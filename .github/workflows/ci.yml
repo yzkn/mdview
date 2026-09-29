@@ -52,7 +52,7 @@ jobs:
       # 版を固定してあるので、鍵にはその取得スクリプトを使う
       - name: 同梱フォントのキャッシュ
         id: fonts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: assets/fonts
           key: fonts-${{ hashFiles('tools/fetch-fonts.py') }}
