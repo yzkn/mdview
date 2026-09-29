@@ -1,0 +1,82 @@
+name: CI
+
+# 検査（書式・Lint・試験）。
+#
+# **3 OS で配るので 3 OS で検査する。** 環境の既定値（文字コード・ツールの版）は
+# OS ごとに違い、手元の 1 台では気づけない。
+#
+# 配布物は作らない（release.yml が作る）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一ブランチで新しい実行が始まったら古い実行を打ち切る
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: 検査（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # **1 つ失敗しても他は続ける。** どの OS が駄目なのかを一度に知りたい
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust ツールチェーンを用意する
+        # **版は rust-toolchain.toml で固定している。** `stable` のままにすると
+        # 手元と CI が別の版になり、clippy の指摘が増えた版で CI だけが落ちる
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+
+      - name: Linux のビルド依存を入れる
+        if: runner.os == 'Linux'
+        # iced（wgpu / winit）が X11 と Wayland のヘッダを要求する
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxkbcommon-dev pkg-config
+
+      # **同梱フォントはリポジトリに無い**（21.56MB あるため。assets/README.md）。
+      # 版を固定してあるので、鍵にはその取得スクリプトを使う
+      - name: 同梱フォントのキャッシュ
+        id: fonts
+        uses: actions/cache@v4
+        with:
+          path: assets/fonts
+          key: fonts-${{ hashFiles('tools/fetch-fonts.py') }}
+
+      - name: 同梱フォントを取得する
+        if: steps.fonts.outputs.cache-hit != 'true'
+        # 配布 zip は計 514MB あるが、必要な 4 エントリだけを Range 要求で取る
+        # （12.8MB）。取得後は SHA256 で照合する
+        run: python tools/fetch-fonts.py
+
+      - name: 同梱フォントを確認する
+        # キャッシュから復元した場合もここを通す。欠けたままビルドすると
+        # include_bytes! で落ち、原因が分かりにくい
+        run: python tools/fetch-fonts.py --check
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 書式
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: テスト
+        # レイアウト層は描画層に依存しないため、ウィンドウ無しで試験できる。
+        # **画面の見た目は CI では確かめられない**（字形・IME・滑らかさ）
+        run: cargo test --all

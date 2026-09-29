@@ -1,0 +1,65 @@
+[package]
+name = "mdview"
+version = "2.0.0-alpha.1"
+description = "Markdown viewer and editor"
+edition = "2021"
+publish = false
+
+[dependencies]
+# 本文の保持。10MB の文書を扱うため、文字列全体を作り直さない（§12.1）
+ropey = "1.6"
+# UI（DEC-202）。描画・入力・IME を担う
+# advanced: 自前ウィジェット（EditorView）を書くために要る。
+# 既製のウィジェットは 10MB に耐えないため自前実装が前提（§6）。
+# image: 図・数式・画像を画素で描くために要る（§16.12）
+iced = { version = "0.14", features = ["advanced", "tokio", "image"] }
+# UAX #14 の行分割規則。日本語の基本的な禁則はここに含まれる（§3.2）
+unicode-linebreak = "0.1"
+# レイアウトキャッシュ（§3.8）
+lru = "0.18"
+# Markdown の解析（DEC-203）。可視範囲のインライン要素と、出力用の全文解析に使う。
+# 既定の機能だけで足りる（HTML 出力は使わない。§12.7）
+comrak = { version = "0.55", default-features = false }
+# コードブロックの着色（DEC-211）。構文定義 75 種が最初から入る。
+# **テーマは入れない。** 色は役割で持ち描画時に解決するため（§16.10）。
+# 正規表現は fancy-regex（純 Rust）を使う。onig は C の依存が増え、
+# 単一実行ファイル（+crt-static）と 3 OS のビルドを面倒にする
+syntect = { version = "5.3", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
+] }
+# Mermaid の図（DEC-207）。v1 と同じ mermaid 11.17.2 に追従する純 Rust 実装
+merman = "0.8.0-alpha.6"
+# SVG のラスタライズ。画面表示と PDF 出力の双方で要る
+resvg = "0.45"
+# merman のサイト設定（htmlLabels の一括無効化）を JSON で渡すため
+serde_json = "1"
+# LaTeX 数式（DEC-210）。出力はすべて <path> で、描画に外部フォントが要らない
+latex-rust = "1.0"
+# 画像のデコード（§16.12）。**ネットワーク機能は使わない**
+# 既定の機能を切り、文書で使う形式だけ入れる
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "webp",
+] }
+# ファイル選択と確認のダイアログ（§14.1 / §18.2）。
+# **OS のものを使う。** 自前で描くと入力補完やネットワークの場所を作り直すことになる
+rfd = "0.16"
+# OS の外観（Light / Dark）の取得。iced は内部で追うがアプリへ渡す口が無い
+dark-light = "2"
+# PDF の生成（DEC-205）。v1 の WebView 印刷に依存しない。
+# **同梱フォントをそのまま埋め込む**（サブセット化は krilla が行う。§8.5）
+krilla = "0.8"
+
+[dev-dependencies]
+
+# 計測は必ずリリース相当の最適化で行う（§9.4）
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,9 @@
+[toolchain]
+# **版を固定する。** `stable` のままだと、手元と CI で別の版になる。
+# clippy は版が上がると新しい指摘を増やすため、`-D warnings` の CI が
+# こちらの変更と無関係に落ちる（実際に踏んだ。§27.7）。
+# 上げるときは意図して上げ、そのとき出た指摘をまとめて直す
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]
+profile = "minimal"

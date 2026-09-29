@@ -1,0 +1,31 @@
+# 依存関係の更新。
+#
+# 更新の量を抑えるため、パッチ・マイナーはまとめて 1 つの PR にする。
+# メジャー更新は影響が大きいため個別の PR とし、内容を確認してから取り込む。
+
+version: 2
+updates:
+  # 本体（Rust）。Cargo.toml はリポジトリの直下にある
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # ワークフローで使うアクション
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+      timezone: Asia/Tokyo
+    commit-message:
+      prefix: "chore(ci)"

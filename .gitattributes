@@ -1,2 +1,9 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# 改行コードの扱い
+#
+# リポジトリへは LF で格納し（text=auto）、**チェックアウト時も LF に固定する**
+# （eol=lf）。eol の指定が無いと、Git for Windows が既定で持つ
+# core.autocrlf=true により作業ツリーが CRLF になり、環境ごとに差分が出る。
+* text=auto eol=lf
+
+# 画像は変換しない
+*.png binary
