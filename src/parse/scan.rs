@@ -93,7 +93,7 @@ pub struct Rescan {
 
 /// 安全な再開点から走査し、旧ブロックと再同期したら打ち切る。
 ///
-/// これが**増分解析ライブラリを使わない**判断（DEC-204）の実体である。
+/// これが**増分解析ライブラリを使わない**判断（設計メモ DEC-204）の実体である。
 /// フェンスの開閉が変わらなければ影響範囲だけで済み、変わった場合は末尾まで
 /// 走査し直す。後者でも 10MB で 5〜16ms なので許容できる。
 ///
@@ -182,7 +182,12 @@ impl Scanner {
                 }
             } else if let Some(open) = opening_fence(trimmed) {
                 finish(&mut self.current, line_start, &mut self.blocks);
-                let language = fence_language(trimmed, open.length);
+                // `$$` には情報文字列が無いので `math` と決める
+                let language = if open.marker == b'$' {
+                    Some("math".to_owned())
+                } else {
+                    fence_language(trimmed, open.length)
+                };
                 self.current = Some((line_start, self.line_index, BlockKind::Code { language }, 1));
                 self.fence = Some(open);
                 self.previous_blank = false;
@@ -303,6 +308,21 @@ fn strip_newline(line: &str) -> &str {
 
 /// フェンスの開始なら、その情報を返す。
 fn opening_fence(trimmed: &str) -> Option<Fence> {
+    // **`$$` も囲みとして扱う**（利用者の要望。2026-10-05）。
+    //
+    // GitHub や Qiita で普通に使われる書き方で、既存の文書に含まれる。
+    // 言語指定は持たないので、**言語を `math` と決め打つ**ことで
+    // ```math と同じ道へ合流させる（§16.6 の判断を 1 か所に保つ）。
+    //
+    // **`$$` の後ろに文字が続く行は囲みにしない。** `$$x$$` のように
+    // 1 行で閉じる書き方があり、それを開始と取ると以降が全部数式になる
+    if trimmed.starts_with("$$") && trimmed[2..].trim().is_empty() {
+        return Some(Fence {
+            marker: b'$',
+            length: 2,
+        });
+    }
+
     for marker in *b"`~" {
         let count = trimmed.bytes().take_while(|byte| *byte == marker).count();
         if count >= 3 {
@@ -410,6 +430,96 @@ fn is_list_marker(trimmed: &str) -> bool {
             (rest.starts_with(". ") || rest.starts_with(") ")) || rest == "." || rest == ")"
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod dollar_math_tests {
+    use super::*;
+
+    fn kinds(text: &str) -> Vec<BlockKind> {
+        scan_lines(text)
+            .blocks
+            .into_iter()
+            .map(|b| b.kind)
+            .collect()
+    }
+
+    /// **`$$` で囲んだものは数式**（利用者の要望）。
+    ///
+    /// GitHub や Qiita で普通に使われる書き方で、既存の文書に含まれる
+    #[test]
+    fn a_dollar_fence_is_math() {
+        let kinds = kinds("$$\nE = mc^2\n$$\n");
+        assert_eq!(
+            kinds,
+            vec![BlockKind::Code {
+                language: Some("math".to_owned())
+            }]
+        );
+    }
+
+    /// 前後に段落があっても切り分かれる。
+    #[test]
+    fn it_separates_from_the_paragraphs_around_it() {
+        let kinds = kinds("前の段落\n\n$$\nx\n$$\n\n後の段落\n");
+        assert_eq!(
+            kinds,
+            vec![
+                BlockKind::Paragraph,
+                BlockKind::Code {
+                    language: Some("math".to_owned())
+                },
+                BlockKind::Paragraph,
+            ]
+        );
+    }
+
+    /// **1 行で閉じる書き方は囲みにしない。**
+    ///
+    /// `$$x$$` を開始と取ると、**以降が全部数式になる**
+    #[test]
+    fn a_one_line_dollar_is_not_a_fence() {
+        let kinds = kinds("$$x$$\n\n普通の段落\n");
+        assert_eq!(kinds, vec![BlockKind::Paragraph, BlockKind::Paragraph]);
+    }
+
+    /// 閉じていない `$$` は、他の囲みと同じ扱いになる。
+    #[test]
+    fn an_unterminated_dollar_fence_is_reported() {
+        let result = scan_lines("$$\nx = 1\n");
+        assert!(result.unterminated_fence, "閉じていないのに気づいていない");
+    }
+
+    /// ``` の囲みは今までどおり。
+    #[test]
+    fn backtick_fences_still_work() {
+        let kinds = kinds("```math\nx\n```\n");
+        assert_eq!(
+            kinds,
+            vec![BlockKind::Code {
+                language: Some("math".to_owned())
+            }]
+        );
+    }
+
+    /// **`$` 1 つは囲みではない。** 金額の表記を壊さない
+    #[test]
+    fn a_single_dollar_is_not_a_fence() {
+        let kinds = kinds("$100 と $200 の違い\n");
+        assert_eq!(kinds, vec![BlockKind::Paragraph]);
+    }
+
+    /// 囲みの中は何が来ても読み飛ばす。
+    #[test]
+    fn the_body_is_left_alone() {
+        let kinds = kinds("$$\n# 見出しに見える行\n| 表 |\n$$\n");
+        assert_eq!(
+            kinds,
+            vec![BlockKind::Code {
+                language: Some("math".to_owned())
+            }]
+        );
     }
 }
 

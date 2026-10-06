@@ -1,4 +1,4 @@
-//! Mermaid の図を描く（DEC-207 / §7.3）。
+//! Mermaid の図を描く（設計メモ DEC-207 / §7.3）。
 //!
 //! merman で SVG を作り、resvg で画素へ落とす。
 //!
@@ -91,7 +91,7 @@ fn svg_options() -> &'static usvg::Options<'static> {
 /// レイアウトは幅に合わせて縮めるが、画素そのものを持つとメモリを食う。
 const MAX_PIXELS: u32 = 4_000;
 
-/// この図を描くか（OPEN-210）。
+/// この図を描くか（設計メモ OPEN-210）。
 ///
 /// **erDiagram は描かない。** merman は `er.htmlLabels: false` を渡しても
 /// foreignObject を残すため、ラベルが本文として出てこない。

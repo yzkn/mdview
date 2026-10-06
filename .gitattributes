@@ -1,9 +1,15 @@
 # 改行コードの扱い
 #
 # リポジトリへは LF で格納し（text=auto）、**チェックアウト時も LF に固定する**
-# （eol=lf）。eol の指定が無いと、Git for Windows が既定で持つ
-# core.autocrlf=true により作業ツリーが CRLF になり、環境ごとに差分が出る。
+# （eol=lf）。eol の指定が無いと、Git for Windows が既定でシステム設定に持つ
+# core.autocrlf=true により作業ツリーが CRLF になる。Prettier は
+# endOfLine: "lf" を要求するため、CI（Linux）は通るのにローカルの
+# format:check だけが失敗するという分かりにくい状態になっていた。
 * text=auto eol=lf
 
-# 画像は変換しない
-*.png binary
+# PowerShell スクリプトは Windows の慣例に合わせ CRLF とする。
+# 5.1 で実行するため UTF-8 BOM 付きで保存すること（doc/リリース手順.md）
+*.ps1 text eol=crlf
+
+# シェルスクリプトは LF 必須。CRLF だと Git Bash が実行できない
+*.sh text eol=lf

@@ -22,13 +22,18 @@ pub struct BlockKey {
     /// f32 のままでは鍵にできず、また量子化しないと、ウィンドウのリサイズ中に
     /// 0.001px 違うだけでキャッシュが全滅する。
     pub width_q: u32,
+    /// 本文の字の大きさ。**倍率を変えたら引き直す**（§4.13）。
+    ///
+    /// これが無いと、倍率を変えても前の大きさで測った結果を引き続ける
+    pub size_q: u32,
 }
 
 impl BlockKey {
-    pub fn new(revision: u64, width: f32) -> Self {
+    pub fn new(revision: u64, width: f32, text_size: f32) -> Self {
         Self {
             revision,
             width_q: (width.max(0.0) * 2.0).round() as u32,
+            size_q: (text_size.max(0.0) * 2.0).round() as u32,
         }
     }
 }
@@ -129,7 +134,7 @@ mod tests {
     #[test]
     fn second_lookup_hits() {
         let mut cache = LayoutCache::new(10);
-        let key = BlockKey::new(1, 800.0);
+        let key = BlockKey::new(1, 800.0, 15.0);
 
         let mut built = 0;
         let height = cache
@@ -155,8 +160,11 @@ mod tests {
     /// 幅は 0.5px 単位へ量子化する。リサイズ中の取りこぼしを避けるため。
     #[test]
     fn width_is_quantised() {
-        assert_eq!(BlockKey::new(1, 800.0), BlockKey::new(1, 800.2));
-        assert_ne!(BlockKey::new(1, 800.0), BlockKey::new(1, 801.0));
+        assert_eq!(BlockKey::new(1, 800.0, 15.0), BlockKey::new(1, 800.2, 15.0));
+        assert_ne!(BlockKey::new(1, 800.0, 15.0), BlockKey::new(1, 801.0, 15.0));
+        // **倍率を変えたら引き直す**（§4.13）。
+        // これが無いと、前の大きさで測った結果を引き続ける
+        assert_ne!(BlockKey::new(1, 800.0, 15.0), BlockKey::new(1, 800.0, 22.5));
     }
 
     /// **番号が違えば別物として扱う。**
@@ -165,9 +173,9 @@ mod tests {
     #[test]
     fn different_revision_is_a_miss() {
         let mut cache = LayoutCache::new(10);
-        cache.get_or_insert(BlockKey::new(1, 800.0), || dummy(100.0));
+        cache.get_or_insert(BlockKey::new(1, 800.0, 15.0), || dummy(100.0));
         let height = cache
-            .get_or_insert(BlockKey::new(2, 800.0), || dummy(200.0))
+            .get_or_insert(BlockKey::new(2, 800.0, 15.0), || dummy(200.0))
             .height;
         assert_eq!(height, 200.0);
         assert_eq!(cache.misses(), 2);
@@ -176,16 +184,16 @@ mod tests {
     #[test]
     fn evicts_least_recently_used() {
         let mut cache = LayoutCache::new(2);
-        cache.get_or_insert(BlockKey::new(1, 800.0), || dummy(1.0));
-        cache.get_or_insert(BlockKey::new(2, 800.0), || dummy(2.0));
+        cache.get_or_insert(BlockKey::new(1, 800.0, 15.0), || dummy(1.0));
+        cache.get_or_insert(BlockKey::new(2, 800.0, 15.0), || dummy(2.0));
         // 1 を引き直して「最近使った」ことにする
-        cache.get_or_insert(BlockKey::new(1, 800.0), || dummy(0.0));
+        cache.get_or_insert(BlockKey::new(1, 800.0, 15.0), || dummy(0.0));
         // 3 を入れると、いちばん古い 2 が落ちる
-        cache.get_or_insert(BlockKey::new(3, 800.0), || dummy(3.0));
+        cache.get_or_insert(BlockKey::new(3, 800.0, 15.0), || dummy(3.0));
 
         assert_eq!(cache.len(), 2);
         let height = cache
-            .get_or_insert(BlockKey::new(2, 800.0), || dummy(22.0))
+            .get_or_insert(BlockKey::new(2, 800.0, 15.0), || dummy(22.0))
             .height;
         assert_eq!(height, 22.0, "落ちているので作り直しになる");
     }
@@ -194,8 +202,8 @@ mod tests {
     fn hit_rate_is_reported() {
         let mut cache = LayoutCache::new(10);
         assert_eq!(cache.hit_rate(), 0.0);
-        cache.get_or_insert(BlockKey::new(1, 800.0), || dummy(1.0));
-        cache.get_or_insert(BlockKey::new(1, 800.0), || dummy(1.0));
+        cache.get_or_insert(BlockKey::new(1, 800.0, 15.0), || dummy(1.0));
+        cache.get_or_insert(BlockKey::new(1, 800.0, 15.0), || dummy(1.0));
         assert!((cache.hit_rate() - 0.5).abs() < 0.01);
     }
 }

@@ -1,4 +1,4 @@
-//! LaTeX の数式を描く（DEC-210 / §7.4）。
+//! LaTeX の数式を描く（設計メモ DEC-210 / §7.4）。
 //!
 //! latex-rust で SVG を作り、[`super::diagram::rasterize`] で画素へ落とす。
 //!

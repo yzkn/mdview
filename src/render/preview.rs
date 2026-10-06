@@ -141,6 +141,8 @@ struct State {
     start_y: f32,
     /// レイアウトキャッシュ（§3.8）
     cache: LayoutCache,
+    /// スクロールバーを掴んでいるか（掴んだ場所と、その時点の文書 Y）
+    bar: Option<(f32, f32)>,
 }
 
 impl Default for State {
@@ -149,6 +151,7 @@ impl Default for State {
             visible: Vec::new(),
             start_y: 0.0,
             cache: LayoutCache::default(),
+            bar: None,
         }
     }
 }
@@ -177,10 +180,57 @@ impl<'a> PreviewView<'a> {
             state,
             embeds: None,
             base_dir: None,
-            text_size: 15.0,
+            text_size: Self::BASE_SIZE,
             on_action: Box::new(on_action),
             query: "",
         }
+    }
+
+    /// 本文の基準の大きさ（等倍）。
+    const BASE_SIZE: f32 = 15.0;
+
+    /// スクロールバーの軌道（右端に重ねる）。
+    ///
+    /// **本文の幅を削らない。** 削るとレイアウトの幅が変わり、
+    /// キャッシュの鍵（幅）が巻き添えで全滅する
+    fn track(&self, bounds: Rectangle) -> Rectangle {
+        Rectangle::new(
+            Point::new(
+                bounds.x + bounds.width - super::scrollbar::THICKNESS,
+                bounds.y,
+            ),
+            Size::new(super::scrollbar::THICKNESS, bounds.height),
+        )
+    }
+
+    /// 「全体・見えている量・いまの位置」（単位は px）。
+    fn span(&self, bounds: Rectangle) -> (f32, f32, f32) {
+        let heights = self.document.heights();
+        (
+            heights.total(),
+            bounds.height,
+            self.state.anchor.to_doc_y(heights),
+        )
+    }
+
+    /// つまみ。出さないなら `None`。
+    fn thumb(&self, bounds: Rectangle) -> Option<(f32, f32)> {
+        let (total, visible, offset) = self.span(bounds);
+        super::scrollbar::thumb(self.track(bounds).height, visible, total, offset)
+    }
+
+    /// 表示倍率を差す（§4.13）。
+    ///
+    /// **余白も一緒に伸ばす。** 字だけ大きくすると、行間と段落の間が
+    /// 詰まって読みにくくなる
+    pub fn zoom(mut self, factor: f32) -> Self {
+        self.text_size = Self::BASE_SIZE * factor;
+        self
+    }
+
+    /// いまの倍率（1.0 = 等倍）。余白を伸ばすのに使う。
+    fn factor(&self) -> f32 {
+        self.text_size / Self::BASE_SIZE
     }
 
     /// 可視範囲をレイアウトし、`state` を更新する。
@@ -226,11 +276,12 @@ impl<'a> PreviewView<'a> {
         }
 
         let measurer = IcedMeasurer::<Renderer>::new(self.text_size);
+        let factor = self.factor();
         let cx = LayoutContext {
             width: bounds.width - PADDING * 2.0,
             measurer: &measurer,
-            block_spacing: 12.0,
-            indent_unit: 24.0,
+            block_spacing: 12.0 * factor,
+            indent_unit: 24.0 * factor,
             base_dir: self.base_dir,
             embeds: self.embeds,
         };
@@ -243,7 +294,7 @@ impl<'a> PreviewView<'a> {
         let mut index = first;
         while index < self.document.blocks().len() && y < bounds.height {
             let block = &self.document.blocks()[index];
-            let key = BlockKey::new(block.revision, cx.width);
+            let key = BlockKey::new(block.revision, cx.width, self.text_size);
 
             // **埋め込みはキャッシュに載せない。** 結果が届いても鍵
             // （revision と幅）は変わらないため、古いプレースホルダを
@@ -327,6 +378,61 @@ where
         let bounds = layout.bounds();
 
         match event {
+            // --- スクロールバー（§3.7） ---
+            //
+            // **本文より手前で受ける。** 右端に重ねてあるため
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let Some(point) = cursor.position() else {
+                    return;
+                };
+                let track = self.track(bounds);
+                if !track.contains(point) {
+                    return;
+                }
+                let Some((at, length)) = self.thumb(bounds) else {
+                    return;
+                };
+                let (total, visible, offset) = self.span(bounds);
+                let along = point.y - track.y;
+
+                let state = tree.state.downcast_mut::<State>();
+                if along >= at && along <= at + length {
+                    // つまみの上。**飛ばさずに掴むだけ**
+                    state.bar = Some((along, offset));
+                } else {
+                    let moved = super::scrollbar::offset_at(track.height, visible, total, along);
+                    state.bar = Some((along, moved));
+                    shell.publish((self.on_action)(PreviewAction::Scrolled(moved - offset)));
+                }
+                shell.capture_event();
+            }
+
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                tree.state.downcast_mut::<State>().bar = None;
+            }
+
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let Some((from, start)) = tree.state.downcast_ref::<State>().bar else {
+                    return;
+                };
+                let Some(point) = cursor.position() else {
+                    return;
+                };
+                let track = self.track(bounds);
+                let (total, visible, offset) = self.span(bounds);
+                let moved = super::scrollbar::offset_after_drag(
+                    track.height,
+                    visible,
+                    total,
+                    start,
+                    (point.y - track.y) - from,
+                );
+                if moved != offset {
+                    shell.publish((self.on_action)(PreviewAction::Scrolled(moved - offset)));
+                }
+                shell.capture_event();
+            }
+
             // 再描画のたびに可視範囲をレイアウトし直す
             Event::Window(window::Event::RedrawRequested(_)) => {
                 let state = tree.state.downcast_mut::<State>();
@@ -364,6 +470,31 @@ where
 
             _ => {}
         }
+    }
+
+    /// **バーの上では形を変える。** 掴めることが分かるように
+    fn mouse_interaction(
+        &self,
+        tree: &widget::Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &Renderer,
+    ) -> mouse::Interaction {
+        let bounds = layout.bounds();
+
+        // 掴んでいる間は、軌道の外へ出ても掴んだ形のまま
+        if tree.state.downcast_ref::<State>().bar.is_some() {
+            return mouse::Interaction::Grabbing;
+        }
+        let Some(point) = cursor.position() else {
+            return mouse::Interaction::None;
+        };
+        // **出していない帯の上では変えない。** 何も無いのに押せそうに見える
+        if self.thumb(bounds).is_some() && self.track(bounds).contains(point) {
+            return mouse::Interaction::Grab;
+        }
+        mouse::Interaction::None
     }
 
     fn draw(
@@ -556,6 +687,40 @@ where
             }
 
             y += laid_out.height;
+        }
+
+        // --- スクロールバー（§3.7） ---
+        //
+        // **いちばん上に描く。** 本文へ重ねているため
+        if let Some((at, length)) = self.thumb(bounds) {
+            let track = self.track(bounds);
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: track,
+                    ..Default::default()
+                },
+                Color {
+                    a: 0.06,
+                    ..text_color
+                },
+            );
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(track.x + 2.0, track.y + at),
+                        Size::new(track.width - 4.0, length),
+                    ),
+                    border: iced::Border {
+                        radius: ((track.width - 4.0) / 2.0).into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Color {
+                    a: 0.35,
+                    ..text_color
+                },
+            );
         }
     }
 }

@@ -72,7 +72,7 @@ echo "終わった"
 
 ```json
 {
-  "name": "mdview",
+  "name": "markdown-viewer",
   "version": "2.0.0",
   "enabled": true,
   "count": 128

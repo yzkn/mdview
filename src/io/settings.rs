@@ -71,7 +71,25 @@ pub struct Settings {
     pub scroll_sync: bool,
     pub toc_width: f32,
     pub split_ratio: f32,
+    /// タブ幅（桁。§4.10）。**変換と表示の双方で使う**
+    pub tab_width: usize,
+    /// 空白・タブ・改行を目に見える印で描くか（§4.11）
+    pub show_invisibles: bool,
+    /// 見えないのに悪さをする文字を強調するか（§4.12）
+    pub show_gremlins: bool,
+    /// 編集中の内容を定期的に退避するか（§18.3）。
+    ///
+    /// **切れるようにしてある。** 10MB の文書では書き出しに数十 ms かかる
+    pub autosave_draft: bool,
+    /// 最近開いたファイル（新しい順。§19.7）
+    pub recent: Vec<std::path::PathBuf>,
 }
+
+/// 覚えておく数。
+///
+/// **増やしすぎない。** メニューが長くなるうえ、消えたファイルが
+/// 並ぶだけになる
+pub const MAX_RECENT: usize = 10;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -83,14 +101,42 @@ impl Default for Settings {
             scroll_sync: true,
             toc_width: 280.0,
             split_ratio: 0.5,
+            // TeraPad の既定に合わせる
+            tab_width: 4,
+            show_invisibles: false,
+            // **既定で出す。** 貼り付けで紛れ込むものを、気づく前に保存させない
+            show_gremlins: true,
+            // **既定で退避する。** 失うほうが痛い
+            autosave_draft: true,
+            recent: Vec::new(),
         }
     }
 }
+
+/// 設定を置くフォルダの名前。
+///
+/// **実行ファイルと同じ名前にする。** 利用者が探すときの手がかりになる
+const FOLDER: &str = "mdview";
+
+/// 名前を変える前のフォルダ（2026-10-02 まで）。
+///
+/// **消さずに読む。** 名前を変えただけで、利用者のテーマや分割比が
+/// 初期値へ戻るのは受け入れられない（§13.5）
+const LEGACY_FOLDER: &str = "markdown-viewer";
 
 /// 設定の置き場。
 ///
 /// OS の設定ディレクトリ配下。取れなければ `None`（保存しないだけで動く）。
 pub fn settings_path() -> Option<PathBuf> {
+    settings_base().map(|base| base.join(FOLDER).join("settings.toml"))
+}
+
+/// 名前を変える前の置き場。**読むときだけ使う。**
+fn legacy_settings_path() -> Option<PathBuf> {
+    settings_base().map(|base| base.join(LEGACY_FOLDER).join("settings.toml"))
+}
+
+fn settings_base() -> Option<PathBuf> {
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -106,20 +152,24 @@ pub fn settings_path() -> Option<PathBuf> {
                     .map(|home| home.join(".config"))
             })
     }?;
-    Some(base.join("mdview").join("settings.toml"))
+    Some(base)
 }
 
 impl Settings {
     /// TOML へ書き出す。
     pub fn to_toml(&self) -> String {
-        format!(
+        let mut out = format!(
             "theme = \"{}\"\n\
              view_mode = \"{}\"\n\
              toc_visible = {}\n\
              zoom = {}\n\
              scroll_sync = {}\n\
              toc_width = {}\n\
-             split_ratio = {}\n",
+             split_ratio = {}\n\
+             tab_width = {}\n\
+             show_invisibles = {}\n\
+             show_gremlins = {}\n\
+             autosave_draft = {}\n",
             self.theme.as_str(),
             self.view_mode.as_str(),
             self.toc_visible,
@@ -127,7 +177,31 @@ impl Settings {
             self.scroll_sync,
             self.toc_width,
             self.split_ratio,
-        )
+            self.tab_width,
+            self.show_invisibles,
+            self.show_gremlins,
+            self.autosave_draft,
+        );
+        // **1 行 1 件で書く。** 区切り文字を決めると、その文字を含む
+        // パスで壊れる（`|` は Windows では使えないが、他の OS では使える）
+        for (index, path) in self.recent.iter().take(MAX_RECENT).enumerate() {
+            let Some(text) = path.to_str() else {
+                continue;
+            };
+            // 引用符と改行を含むパスは諦める。書けても読み戻せない
+            if text.contains('"') || text.contains('\n') {
+                continue;
+            }
+            out.push_str(&format!("recent_{index} = \"{text}\"\n"));
+        }
+        out
+    }
+
+    /// 最近開いたものへ加える（先頭へ。重複は畳む）。
+    pub fn remember(&mut self, path: &std::path::Path) {
+        self.recent.retain(|known| known != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(MAX_RECENT);
     }
 
     /// TOML から読む。
@@ -135,10 +209,11 @@ impl Settings {
     /// **1 行でも壊れていたら、その項目だけ既定値にする。**
     /// 全体を捨てると、設定の一部が壊れただけで全部が戻ってしまう。
     ///
-    /// 外部クレートを使わない。読むのは平らな 7 項目だけで、
+    /// 外部クレートを使わない。読むのは平らな数項目だけで、
     /// TOML の全機能は要らない。
     pub fn from_toml(text: &str) -> Self {
         let mut settings = Self::default();
+        let mut recent: Vec<(usize, std::path::PathBuf)> = Vec::new();
 
         for line in text.lines() {
             let line = line.trim();
@@ -156,6 +231,25 @@ impl Settings {
                 "view_mode" => settings.view_mode = ViewMode::parse(value),
                 "toc_visible" => settings.toc_visible = value == "true",
                 "scroll_sync" => settings.scroll_sync = value == "true",
+                "show_invisibles" => settings.show_invisibles = value == "true",
+                "show_gremlins" => settings.show_gremlins = value == "true",
+                "autosave_draft" => settings.autosave_draft = value == "true",
+                // **並び順は鍵の番号で決まる。** 書いた順に読めるとは限らない
+                _ if key.starts_with("recent_") => {
+                    if let Ok(index) = key["recent_".len()..].parse::<usize>() {
+                        if index < MAX_RECENT && !value.is_empty() {
+                            recent.push((index, std::path::PathBuf::from(value)));
+                        }
+                    }
+                }
+                // **端の値は採らない。** 0 では桁が進まず、広すぎると読めない
+                "tab_width" => {
+                    if let Ok(parsed) = value.parse::<usize>() {
+                        if (1..=16).contains(&parsed) {
+                            settings.tab_width = parsed;
+                        }
+                    }
+                }
                 // **範囲を確かめてから採る。** 壊れた値で画面が潰れるのを避ける
                 "zoom" => {
                     if let Ok(parsed) = value.parse::<f32>() {
@@ -181,15 +275,25 @@ impl Settings {
                 _ => {}
             }
         }
+
+        // **鍵の番号で並べ直す。** 書いた順に読めるとは限らない
+        recent.sort_by_key(|(index, _)| *index);
+        settings.recent = recent.into_iter().map(|(_, path)| path).collect();
         settings
     }
 
     /// 読む。**失敗しても既定値を返す**（§13.5）。
+    /// 読む。
+    ///
+    /// **新しい置き場に無ければ、古い置き場を見る**（§13.5）。
+    /// 次に保存したときに新しい置き場へ移る。古いほうは消さない——
+    /// 消して失敗すると、戻す手立てが無くなる
     pub fn load() -> Self {
-        settings_path()
+        let text = settings_path()
             .and_then(|path| std::fs::read_to_string(path).ok())
-            .map(|text| Self::from_toml(&text))
-            .unwrap_or_default()
+            .or_else(|| legacy_settings_path().and_then(|path| std::fs::read_to_string(path).ok()));
+
+        text.map(|text| Self::from_toml(&text)).unwrap_or_default()
     }
 
     /// 書く。失敗しても致命ではないので、理由だけ返す。
@@ -205,6 +309,26 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// **名前を変える前の置き場も見る**（§13.5）。
+    ///
+    /// 見ないと、名前を変えただけでテーマや分割比が初期値へ戻る
+    #[test]
+    fn the_old_folder_is_still_read() {
+        let (Some(current), Some(legacy)) = (settings_path(), legacy_settings_path()) else {
+            // 置き場が取れない環境では何もしない（保存しないだけで動く）
+            return;
+        };
+        assert_ne!(current, legacy, "新旧が同じ場所を指している");
+        assert!(current.ends_with("mdview/settings.toml"));
+        assert!(legacy.ends_with("markdown-viewer/settings.toml"));
+        // 親フォルダだけが違う
+        assert_eq!(
+            current.parent().and_then(|p| p.parent()),
+            legacy.parent().and_then(|p| p.parent())
+        );
+    }
 
     /// 書いて読むと元に戻る。
     #[test]
@@ -217,8 +341,52 @@ mod tests {
             scroll_sync: false,
             toc_width: 320.0,
             split_ratio: 0.4,
+            tab_width: 8,
+            show_invisibles: true,
+            show_gremlins: false,
+            autosave_draft: false,
+            recent: vec![
+                std::path::PathBuf::from("C:/docs/a.md"),
+                std::path::PathBuf::from("C:/docs/b.md"),
+            ],
         };
         assert_eq!(Settings::from_toml(&settings.to_toml()), settings);
+    }
+
+    /// **新しい順に並べ、重複は畳む**（§19.7）。
+    #[test]
+    fn recent_files_are_newest_first() {
+        let mut settings = Settings::default();
+        settings.remember(Path::new("C:/docs/a.md"));
+        settings.remember(Path::new("C:/docs/b.md"));
+        settings.remember(Path::new("C:/docs/a.md"));
+
+        assert_eq!(
+            settings.recent,
+            [PathBuf::from("C:/docs/a.md"), PathBuf::from("C:/docs/b.md")],
+            "同じものが 2 つ並んでいる"
+        );
+    }
+
+    /// **覚える数には上限がある。** メニューが長くなるだけ
+    #[test]
+    fn recent_files_are_capped() {
+        let mut settings = Settings::default();
+        for index in 0..MAX_RECENT + 5 {
+            settings.remember(Path::new(&format!("C:/docs/{index}.md")));
+        }
+        assert_eq!(settings.recent.len(), MAX_RECENT);
+    }
+
+    /// 並び順は書いて読んでも変わらない。
+    #[test]
+    fn recent_files_keep_their_order_through_a_round_trip() {
+        let mut settings = Settings::default();
+        for name in ["a", "b", "c"] {
+            settings.remember(Path::new(&format!("C:/docs/{name}.md")));
+        }
+        let read = Settings::from_toml(&settings.to_toml());
+        assert_eq!(read.recent, settings.recent);
     }
 
     #[test]

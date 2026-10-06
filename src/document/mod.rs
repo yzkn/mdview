@@ -4,6 +4,8 @@
 //! 1 打鍵ごとに実行できる値ではない。解析・描画・出力はロープから必要な範囲だけを読む。
 
 mod edit;
+// 編集履歴（§4.7）
+pub mod history;
 
 // 編集結果は P1 の画面表示で使うが、外へ公開するのは P2 以降
 #[allow(unused_imports)]
@@ -27,6 +29,16 @@ pub struct Document {
     pub(super) unterminated_fence: bool,
     /// ブロックの採番に使う（§3.8）
     pub(super) next_revision: u64,
+    /// いちばん長い行の添字（§10.59）。
+    ///
+    /// **横のスクロールバーに要る。** 描画層は可視範囲しか測れないので、
+    /// 長い行が画面の外へ出ると幅が分からなくなり、バーが消えてしまう。
+    /// ここで 1 行だけ指しておけば、描画層はそれを足して測れる。
+    ///
+    /// **長さはバイト数で比べる。** 字の幅を測るには整形が要り、
+    /// 10MB の全行には掛けられない。多バイトの字は幅も広いので、
+    /// 近い目安になる（可視範囲は描画層が正しく測る）。
+    pub(super) widest_line: usize,
 }
 
 /// ブロックの番号を配る。
@@ -38,6 +50,32 @@ pub struct Document {
 ///
 /// 番号は「ブロックの同一性」であり、文書の中だけの通し番号ではない。
 /// 実行中に一意であればよいので、単調増加の番号を配る。
+/// いちばん長い行を全体から探す（読み込み時）。
+///
+/// **1 行あたり定数回の仕事にする。** 字を数えると 10MB で 1 千万回に
+/// なるため、ロープが持つバイト位置の差で比べる。
+pub(super) fn widest_line_of(text: &Rope) -> usize {
+    let lines = text.len_lines();
+    let mut widest = 0usize;
+    let mut best = 0usize;
+    for line in 0..lines {
+        let length = line_bytes(text, line);
+        if length > widest {
+            widest = length;
+            best = line;
+        }
+    }
+    best
+}
+
+/// その行のバイト数（改行を含む）。
+pub(super) fn line_bytes(text: &Rope, line: usize) -> usize {
+    if line + 1 >= text.len_lines() {
+        return text.len_bytes() - text.line_to_byte(line);
+    }
+    text.line_to_byte(line + 1) - text.line_to_byte(line)
+}
+
 fn fresh_revision(count: u64) -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -72,14 +110,23 @@ impl Document {
                 .collect(),
         );
 
+        let rope = Rope::from_str(&text);
+        let widest_line = widest_line_of(&rope);
+
         Self {
-            text: Rope::from_str(&text),
+            text: rope,
             blocks,
             heights,
             line_count,
             unterminated_fence,
             next_revision,
+            widest_line,
         }
+    }
+
+    /// いちばん長い行の添字。**範囲の外を返さない。**
+    pub fn widest_line(&self) -> usize {
+        self.widest_line.min(self.line_count.saturating_sub(1))
     }
 
     pub fn text(&self) -> &Rope {
@@ -135,6 +182,65 @@ impl Document {
             .blocks
             .partition_point(|block| block.bytes.start <= byte);
         Some(found.saturating_sub(1))
+    }
+}
+
+#[cfg(test)]
+mod widest_line_tests {
+    use super::*;
+
+    /// **いちばん長い行を覚える**（横のバーに要る。§10.59）。
+    #[test]
+    fn it_finds_the_longest_line() {
+        let document = Document::from_text("短い\nとても長い行がここに在る\n中くらい\n".to_owned());
+        assert_eq!(document.widest_line(), 1);
+    }
+
+    /// 1 行だけでも落ちない。
+    #[test]
+    fn a_single_line_is_safe() {
+        let document = Document::from_text("ただ 1 行".to_owned());
+        assert_eq!(document.widest_line(), 0);
+    }
+
+    /// 空でも落ちない。
+    #[test]
+    fn an_empty_document_is_safe() {
+        let document = Document::from_text(String::new());
+        assert_eq!(document.widest_line(), 0);
+    }
+
+    /// **打ち足すと更新される。** 画面の外に出ても覚えている
+    #[test]
+    fn typing_a_longer_line_updates_it() {
+        let mut document = Document::from_text("あ\nい\nう\n".to_owned());
+        assert_eq!(document.widest_line(), 0, "どれも同じ長さなら先頭");
+
+        // 3 行目を長くする
+        let at = document.text().line_to_byte(2);
+        document.edit(
+            at..at,
+            "とても長い行をここへ足す",
+            800.0,
+            &crate::layout::Metrics::default(),
+        );
+        assert_eq!(document.widest_line(), 2);
+    }
+
+    /// **範囲の外を返さない。** 消したあとでも安全
+    #[test]
+    fn it_never_points_past_the_end() {
+        let mut document = Document::from_text("あ\nとても長い行\nう\n".to_owned());
+        assert_eq!(document.widest_line(), 1);
+
+        // 全部消す
+        let all = 0..document.text().len_bytes();
+        document.edit(all, "", 800.0, &crate::layout::Metrics::default());
+        assert!(
+            document.widest_line() < document.line_count().max(1),
+            "範囲の外を指している: {}",
+            document.widest_line()
+        );
     }
 }
 

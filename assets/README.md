@@ -19,7 +19,7 @@ python tools/fetch-fonts.py
 |`IBMPlexSansJP-Regular.ttf` / `-Bold.ttf`|本文・見出し・UI|
 |`PlemolJP-OFL.txt` / `IBMPlexSansJP-OFL.txt`|ライセンス全文|
 
-選定の理由と方針はDEC-209 / §7.6 を参照する。
+選定の理由と方針は設計メモ DEC-209 / §7.6 を参照する。
 
 ### ライセンス
 
@@ -33,3 +33,30 @@ python tools/fetch-fonts.py
 **サブセット化は行わない。** PlemolJP は Reserved Font Name を宣言しており、
 改変すると同名を使えなくなる。また稀な漢字でシステムフォントに落ちると
 中国語字形が出る（§6.5.5 / DEC-208）。
+
+## アイコン（B-1）
+
+原本は **SVG 3 枚**。ico / icns / png は生成物なので、リポジトリには持たない。
+
+|原本|使いどころ|
+|---|---|
+|`icon.svg`|アプリ本体（48px 以上）|
+|`icon-small.svg`|アプリ本体（32px 以下）。**細部を捨てて矢印だけにする**|
+|`icon-doc.svg`|関連付けた `.md` 文書|
+
+作り直す:
+
+```
+cargo run --example make-icons
+```
+
+`assets/icons/` に次が出る。
+
+|出るもの|使いどころ|
+|---|---|
+|`mdview.ico` / `mdview-doc.ico`|Windows の実行ファイルとインストーラ|
+|`mdview-<大きさ>.png`|Linux の hicolor|
+|`mdview.iconset`|macOS。`iconutil -c icns` で `.icns` にする|
+
+**Windows の実行ファイルへは `build.rs` が埋める。** `mdview.ico` が
+無ければ黙って飛ばすので、先に例を動かしてからビルドする。

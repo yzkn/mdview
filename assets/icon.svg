@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  mdview のアプリアイコン（§7.1）。
+
+  **小さく描いても読めることを最優先にする。** 16px では細部が消えるため、
+  形は「角丸の地」「白い紙」「白い下向きの矢印」の 3 つだけにしてある。
+  Markdown の印（下向き矢印）を借りて、何のアプリかを一目で示す。
+
+  **矢印には地と同じ色の縁を付ける。** 紙に重ねるので、縁が無いと
+  白同士が溶けて形が消える。
+
+  この SVG が原本で、ico / icns / png は examples/make-icons.rs で作る。
+  生成物はリポジトリへ置かない（assets/README.md）。
+
+  XML のコメントには連続したハイフンを書けないので、コマンド例は
+  README 側に置いてある。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3C6CB0"/>
+      <stop offset="1" stop-color="#2A4C80"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 地。角丸の正方形（Windows・macOS のどちらの枠にも収まる余白を残す） -->
+  <rect x="32" y="32" width="448" height="448" rx="96" ry="96" fill="url(#bg)"/>
+
+  <!-- 紙。右上を折る -->
+  <path d="M126 104 h150 l58 58 v222 a18 18 0 0 1 -18 18 h-190 a18 18 0 0 1 -18 -18 v-262 a18 18 0 0 1 18 -18 z"
+        fill="#F2F5F9"/>
+  <path d="M276 104 l58 58 h-58 z" fill="#C6D2E2"/>
+
+  <!-- 本文を思わせる線。**3 本だけ**（増やすと小さいとき潰れる） -->
+  <g fill="#9FB2CC">
+    <rect x="158" y="206" width="112" height="20" rx="10"/>
+    <rect x="158" y="256" width="146" height="20" rx="10"/>
+    <rect x="158" y="306" width="88" height="20" rx="10"/>
+  </g>
+
+  <!-- 下向きの矢印。**これだけで Markdown と分かる** -->
+  <path d="M322 236 h62 v94 h50 l-81 96 -81 -96 h50 z"
+        fill="#FFFFFF" stroke="#2A4C80" stroke-width="28"
+        stroke-linejoin="round"/>
+  <path d="M322 236 h62 v94 h50 l-81 96 -81 -96 h50 z" fill="#FFFFFF"/>
+</svg>

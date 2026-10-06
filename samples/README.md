@@ -8,6 +8,7 @@
 |文書|用途|
 |---|---|
 |[p3-check.md](p3-check.md)|P3（埋め込み）の目視確認。字形・インライン要素・着色・表・折り返し|
+|[screenshot.md](screenshot.md)|**README の画面写真を撮るための文書**（撮り方は本体リポジトリの `doc/画面写真の撮り方.md`）。表・図・数式・コード・画像・チェックリストが 1 画面に収まる|
 
 ## 使い方
 
@@ -23,3 +24,6 @@ target\release\mdview.exe samples\p3-check.md
 **README.md で着色を確かめてはいけない。** `powershell` と `text` は
 syntect の既定構文に無く、着色されるのは 1 行の `bash` だけである。
 「着色が効いていない」と誤って判断する（実際に起きた）。
+
+`powershell` と `toml` を着色しないことは **DD-OPEN-12 で決着している**
+（2026-10-05）。不具合ではない。

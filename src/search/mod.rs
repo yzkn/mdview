@@ -11,6 +11,12 @@
 
 use ropey::Rope;
 
+// 探し方（そのままの文字／正規表現、大文字小文字）
+pub mod pattern;
+pub use pattern::Pattern;
+// 置換（どこを何に置き換えるかを決める）
+pub mod replace;
+
 /// 一致した原文のバイト範囲。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Match {
@@ -43,6 +49,15 @@ fn fold(byte: u8) -> u8 {
     byte.to_ascii_lowercase()
 }
 
+/// 区別するなら倒さない。
+fn folder(case_sensitive: bool) -> fn(u8) -> u8 {
+    if case_sensitive {
+        |byte| byte
+    } else {
+        fold
+    }
+}
+
 /// 畳み込んだバイト列の中から最初の一致を探す。
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
@@ -57,6 +72,12 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 ///
 /// 重なる一致は数えない。見つかった順に並ぶ。
 pub fn find_all(text: &Rope, query: &str) -> Found {
+    find_plain(text, query, false)
+}
+
+/// そのままの文字で走査する。
+pub fn find_plain(text: &Rope, query: &str, case_sensitive: bool) -> Found {
+    let fold = folder(case_sensitive);
     let needle: Vec<u8> = query.bytes().map(fold).collect();
     let mut found = Found::default();
     if needle.is_empty() {

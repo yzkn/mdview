@@ -10,6 +10,7 @@ mod editor;
 pub mod fonts;
 mod measure;
 mod preview;
+pub mod scrollbar;
 
 pub use divider::{Divider, WIDTH as DIVIDER_WIDTH};
 
@@ -21,6 +22,7 @@ pub use divider::{Divider, WIDTH as DIVIDER_WIDTH};
 pub type PdfMeasurer = measure::IcedMeasurer<iced::Renderer>;
 pub use editor::{
     advance_scroll_x, take_whole_lines, Action, CursorMove, EditorState, EditorView, ImeAction,
+    RectSelection,
 };
 pub use preview::{PreviewAction, PreviewState, PreviewView};
 
@@ -73,12 +75,134 @@ pub enum Message {
     SearchInput(String),
     /// 次（`true`）または前（`false`）の一致へ
     SearchStep(bool),
+    /// 置換後の文字が変わった
+    ReplaceInput(String),
+    /// 置換の欄の開閉
+    ToggleReplace,
+    /// 正規表現として扱うかの切り替え
+    ToggleRegex,
+    /// 大文字小文字を区別するかの切り替え
+    ToggleCase,
+    /// いま選んでいる 1 件を置き換える
+    ReplaceOne,
+    /// すべて置き換える
+    ReplaceAll,
     /// ワーカーから走査の結果が届いた。**落ちた理由も運ぶ**
     SearchFound {
         /// 投げたときの世代。**古い結果を捨てるために持つ**
         generation: u64,
         found: Result<crate::search::Found, String>,
+        /// 1 件目へ飛ぶか。**編集で走査し直したときは飛ばない**（§10.40）
+        jump: bool,
     },
+    /// メニューを開く（見出しを押した）
+    OpenMenu(crate::app::Menu),
+    /// メニューを閉じる
+    CloseMenu,
+    /// 切り取り
+    Cut,
+    /// コピー
+    Copy,
+    /// 貼り付け（クリップボードを読みに行く）
+    Paste,
+    /// クリップボードから読めた。`None` は空か、文字列でないもの
+    Pasted(Option<String>),
+    /// 検索欄で `Enter` が押された（前後は修飾キーで決まる。§10.40）
+    SearchSubmit,
+    /// 修飾キーの状態が変わった。
+    ///
+    /// **`on_submit` は修飾キーを運ばない。** `Shift + Enter` を
+    /// 「前へ」にするために、状態を別に覚えておく
+    ModifiersChanged(iced::keyboard::Modifiers),
+    /// 割り当て文字が押された（§7.2）。
+    ///
+    /// `alt` なら見出しを開き、そうでなければ開いている中身から選ぶ
+    AccessKey {
+        key: char,
+        alt: bool,
+    },
+    /// 編集中の内容を定期的に退避するかを切り替える（§18.3）
+    ToggleAutosaveDraft,
+    /// 前回の異常終了で残ったものを復元する（§18.3）
+    RestoreDraft,
+    /// 同じく、捨てる
+    DiscardDraft,
+    /// 検索バーへ焦点を移す（押されたとき）
+    FocusSearch,
+    /// ファイルメニューの折りたたみを開閉する
+    ToggleSubmenu(crate::app::menu::Submenu),
+    /// 文字コードを指定して開き直す（§19.4）
+    ReopenAs(crate::io::Encoding),
+    /// 文字コードを指定して保存する（§19.4）
+    SaveWithEncoding(crate::io::Encoding, bool),
+    /// 改行コードを指定して保存する（§19.6）
+    SaveWithLineEnding(crate::io::LineEnding),
+    /// 最近開いたファイルを開く（§19.7）
+    OpenRecent(std::path::PathBuf),
+    /// 窓へファイルが落とされた
+    FileDropped(std::path::PathBuf),
+    /// 空白・タブ・改行の印を出し入れする（§4.11）
+    ToggleInvisibles,
+    /// 見えないのに悪さをする文字の強調を出し入れする（§4.12）
+    ToggleGremlins,
+    /// タブ幅を変える（§4.10）
+    SetTabWidth(usize),
+    // --- 自前のファイル選択（§14.1 の退避路） ---
+    /// 一覧の選択を上下に動かす
+    BrowserMove(i32),
+    /// 一覧の 1 件を選ぶ
+    BrowserPick(usize),
+    /// 選んでいるものを決める（フォルダなら入る）
+    BrowserActivate,
+    /// 1 つ上の場所へ
+    BrowserUp,
+    /// 直接打つ欄
+    BrowserTyped(String),
+    /// 打ったものを決める
+    BrowserSubmit,
+    /// やめる
+    BrowserCancel,
+    /// 自前の選択を明示的に開く（OS のダイアログが使えても使いたいとき）
+    OpenBrowser,
+
+    /// 表示を大きくする（§4.13）
+    ZoomIn,
+    /// 表示を小さくする（同上）
+    ZoomOut,
+    /// 等倍へ戻す（同上）
+    ZoomReset,
+    /// すべて選択
+    SelectAll,
+    /// 選んだ範囲を作り替える（§4.9）
+    Transform(crate::edit::transform::Transform),
+    /// 字下げを増やす（`true`）／減らす（`false`）
+    Indent(bool),
+    /// 行を複製する
+    DuplicateLine,
+    /// 行を消す
+    DeleteLine,
+    /// 行をつなぐ
+    JoinLines,
+    /// 日付・時刻を差し込む
+    InsertStamp(crate::edit::datetime::Stamp),
+    /// 対応する括弧へ飛ぶ
+    MatchBracket,
+    /// 行番号を指定して飛ぶ欄を出す
+    OpenGoto,
+    /// 行番号の入力が変わった
+    GotoInput(String),
+    /// 行番号が決まった
+    GotoSubmit,
+    /// 行番号の欄を閉じる
+    CloseGoto,
+    /// 取り消し
+    Undo,
+    /// やり直し
+    Redo,
+    /// このアプリについて（同梱物のライセンスを出す）
+    OpenAbout,
+    /// About を閉じる
+    CloseAbout,
     /// 目次の開閉
     ToggleToc,
     /// スクロール同期の切替（Split のときだけ効く）
@@ -93,8 +217,8 @@ pub enum Message {
     WindowResized(f32),
     /// 開くファイルが決まった（取り消しなら `None`）
     PickedOpen(Option<std::path::PathBuf>),
-    /// 保存先が決まった
-    PickedSave(Option<std::path::PathBuf>),
+    /// 保存先が決まった。第 2 要素は文字コードの指定（§19.4）
+    PickedSave(Option<std::path::PathBuf>, SaveAs),
     /// 出力先が決まった（ダイアログを開く）
     PickedExport(Option<std::path::PathBuf>, crate::app::Format),
     /// 出力先を選び直した（「参照」）
@@ -103,7 +227,6 @@ pub enum Message {
     Preview(PreviewAction),
     /// 表示モードを切り替える
     SetMode(ViewMode),
-    ToggleImeLog,
     /// キャレットの点滅
     BlinkCaret,
     /// スクロール計測を 1 フレーム進める（--bench-scroll）
@@ -117,10 +240,30 @@ pub enum FileCommand {
     Open,
     Save,
     SaveAs,
+    /// BOM を付けて上書き保存する（§3.2）
+    ///
+    /// **すでに付いていれば増やさない。** BOM は 1 つだけ
+    SaveWithBom,
     /// PDF に出力する（§17）
     ExportPdf,
     /// HTML に出力する（§17A）
     ExportHtml,
+}
+
+/// 保存するときに、文字コードと BOM をどう決めるか（§19.4）。
+///
+/// **操作といっしょに運ぶ。** 状態に置くと、ダイアログを取り消したときに
+/// 指定だけが残り、ステータスバーが嘘をつく
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveAs {
+    /// 開いたときのまま
+    Keep,
+    /// BOM だけ付ける
+    AddBom,
+    /// 文字コードごと指定する
+    With(crate::io::Encoding, bool),
+    /// 改行コードを指定する（§19.6）
+    Newline(crate::io::LineEnding),
 }
 
 /// 表示モード（§8）。

@@ -1,6 +1,6 @@
 name: Release
 
-# 3 OS の配布物を作る。
+# 3 OS の配布物を作る（§27）。
 #
 # **押すたびには走らせない。** リリースビルドは 3 OS ぶんで 30 分以上かかる。
 #
@@ -8,7 +8,7 @@ name: Release
 #     = **マイナー以上の更新のときだけ**自動で走る
 #   - それ以外（緊急のパッチ配布など）は「Actions」から手動で起動する
 #
-# **署名はしない。** 受け取った側の警告の外し方は Release の説明文に入れる。
+# **署名はしない**（§27.4）。受け取った側の警告の外し方は Release の説明文に入れる。
 
 on:
   push:
@@ -34,6 +34,15 @@ jobs:
   build:
     name: ビルド（${{ matrix.label }}）
     runs-on: ${{ matrix.os }}
+    # **macOS が落ちても Windows / Linux は配る**（v1 と同じ考え方）。
+    #
+    # `optional` を立てた組み合わせは、失敗しても `build` 全体を
+    # 失敗にしない。**実機が無く確認もできない OS が、確認できる OS の
+    # 配布を止めるのはおかしい。**
+    #
+    # Windows / Linux は `optional` を立てないので、落ちれば `build` が
+    # 失敗し、Release は作られない（§1 の「不完全なものを配らない」）。
+    continue-on-error: ${{ matrix.optional || false }}
     strategy:
       # **1 つ失敗しても他は続ける。** どの OS が駄目なのかを一度に知りたい
       fail-fast: false
@@ -53,6 +62,8 @@ jobs:
             label: macos-aarch64
             target: aarch64-apple-darwin
             binary: mdview
+            # **落ちても配布を止めない**（上の `continue-on-error`）
+            optional: true
 
     steps:
       - uses: actions/checkout@v7
@@ -92,6 +103,13 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
+      # **ビルドより先に作る。** `build.rs` が Windows の実行ファイルへ
+      # 埋めるため、この時点で `assets/icons/mdview.ico` が要る。
+      # リリースと同じプロファイル・同じ target で動かすので、
+      # 依存のコンパイルは 1 度で済む
+      - name: アイコンを作る
+        run: cargo run --release --target ${{ matrix.target }} --example make-icons
+
       - name: ビルド
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -110,6 +128,127 @@ jobs:
             chmod +x "dist/${name}"
           fi
           ls -la dist
+
+      # --- Linux の包み（B-5） ---
+      #
+      # **`bash` を頭に付けて呼ぶ。** 実行ビットに頼らない。
+      # Windows では実行ビットを持てず、`git add` で 100644 になる。
+      # 実際、2026-10-05 の v2.0.0 で 3 OS すべてが
+      # `Permission denied`（終了コード 126）で落ちた。
+      # 索引の実行ビットも立て直したが、**公開用の複製を作り直すと再び失われる**
+      # ため、呼び方のほうで断つ。
+      - name: deb を組む
+        if: runner.os == 'Linux'
+        run: |
+          bash packaging/linux/build-deb.sh \
+            "target/${{ matrix.target }}/release/mdview" dist
+
+      - name: AppImage を組む
+        if: runner.os == 'Linux'
+        run: |
+          bash packaging/linux/build-appimage.sh \
+            "target/${{ matrix.target }}/release/mdview" dist
+
+      # **入れて・起動して・消せるかを確かめる**（B-8）
+      - name: deb の煙試験
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          package=$(ls dist/*.deb)
+          echo "試す: $package"
+          sudo dpkg -i "$package"
+
+          test -x /usr/bin/mdview || { echo "入ったはずの実行ファイルが無い"; exit 1; }
+          version=$(/usr/bin/mdview --version)
+          echo "起動できた: $version"
+          case "$version" in mdview\ *) ;; *) echo "版数を返さない: $version"; exit 1;; esac
+
+          # **メニューの定義が妥当か確かめる。** 壊れていると一覧に出ない
+          sudo apt-get install -y desktop-file-utils >/dev/null
+          desktop-file-validate /usr/share/applications/mdview.desktop
+
+          sudo dpkg -r mdview
+          test ! -e /usr/bin/mdview || { echo "消したはずの実行ファイルが残っている"; exit 1; }
+          echo "入れて・起動して・消せた"
+
+      - name: AppImage の煙試験
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          package=$(ls dist/*.AppImage)
+          echo "試す: $package"
+          # runner に FUSE が無いので展開して動かす
+          APPIMAGE_EXTRACT_AND_RUN=1 "$package" --version
+
+      # --- macOS の包み（B-6） ---
+      - name: dmg を組む
+        if: runner.os == 'macOS'
+        run: |
+          bash packaging/macos/build-dmg.sh \
+            "target/${{ matrix.target }}/release/mdview" dist
+
+      - name: dmg の煙試験
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          package=$(ls dist/*.dmg)
+          echo "試す: $package"
+          mount=$(mktemp -d)
+          hdiutil attach "$package" -mountpoint "$mount" -nobrowse -quiet
+
+          app="$mount/mdview.app"
+          test -d "$app" || { echo "バンドルが無い"; exit 1; }
+          test -x "$app/Contents/MacOS/mdview" || { echo "実行ファイルが無い"; exit 1; }
+          test -f "$app/Contents/Resources/mdview.icns" || { echo "アイコンが無い"; exit 1; }
+          # **plist が壊れていないか確かめる。** 壊れていると起動すらしない
+          plutil -lint "$app/Contents/Info.plist"
+          "$app/Contents/MacOS/mdview" --version
+
+          hdiutil detach "$mount" -quiet
+          echo "開いて・起動できた"
+
+      # --- Windows のインストーラ（B-3） ---
+      #
+      # **署名しない**（§27.4）。受け取った側の警告の外し方は Release の
+      # 説明文に入れる
+      - name: Inno Setup を入れる
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y --no-progress
+
+      - name: インストーラを組む
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          packaging/windows/build-installer.ps1 `
+            -SourceExe "target/${{ matrix.target }}/release/mdview.exe" `
+            -OutputDir dist
+
+      # **入れて・起動して・消せるかを確かめる**（B-8）。
+      # ここを作らないと、壊れたインストーラをそのまま配ることになる。
+      # 画面が無いので、起動の確認は `--version` で行う
+      - name: 入れて消す煙試験
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist/*-setup.exe | Select-Object -First 1
+          Write-Host "試す: $($setup.Name)"
+
+          Start-Process -FilePath $setup.FullName `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $exe = "$env:LOCALAPPDATA\Programs\mdview\mdview.exe"
+          if (-not (Test-Path $exe)) { throw "入ったはずの $exe が無い" }
+
+          $version = & $exe --version
+          Write-Host "起動できた: $version"
+          if ($version -notmatch '^mdview ') { throw "版数を返さない: $version" }
+
+          $uninstall = Get-ChildItem "$env:LOCALAPPDATA\Programs\mdview\unins*.exe" |
+            Select-Object -First 1
+          Start-Process -FilePath $uninstall.FullName `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path $exe) { throw "消したはずの $exe が残っている" }
+          Write-Host "入れて・起動して・消せた"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -135,15 +274,48 @@ jobs:
           merge-multiple: true
 
       - name: 照合値を作る
-        # **署名しないぶん、改ざんの確認手段を添える**
+        # **署名しないぶん、改ざんの確認手段を添える**（§27.4）
         run: |
           cd dist
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: 説明文を作る
+        # **実機で見ていない OS があることを必ず載せる**（リリース手順 §5）。
+        # 手で足す決まりにしていたが、ここが自動で作る以上、忘れる。
+        # 字形の問題は実際に踏んでおり、省いてよい断り書きではない
         run: |
-          cat > release-notes.md <<'NOTES'
+          # **入っていない OS を説明文に書く**（§1）。
+          #
+          # macOS は落ちても配布を止めないので、**入っていないことが起こる。**
+          # 黙って欠けていると、受け取った側は「まだ上がっていないのか、
+          # もう作らないのか」が分からない。
+          missing=""
+          for label in windows-x86_64 linux-x86_64 macos-aarch64; do
+            if ! ls dist/ | grep -q -- "$label"; then
+              missing="${missing}${missing:+、}${label}"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            {
+              echo "> **この版には次の環境向けが入っていません: ${missing}**"
+              echo "> 組み立てに失敗したためです。追って別の版で配ります。"
+              echo
+            } > release-notes.md
+          else
+            : > release-notes.md
+          fi
+
+          cat >> release-notes.md <<'NOTES'
+          > **macOS 版は画面を誰も見ていません。**
+          > 組み立てと自動試験は通っていますが、実機が無いため、
+          > 見た目（字形・描画）は未確認です。
+          >
+          > **Linux 版は WSLg で画面を確認しています。**
+          > 字形・レイアウト・図・数式・画像・導入と削除は見ていますが、
+          > **性能・ネイティブ GPU ドライバ・IME・デスクトップ統合は
+          > 未確認**です。お気づきの点があればお知らせください。
+
           ## 受け取った側の手順
 
           **この配布物には署名がありません。** 初回は OS が警告します。

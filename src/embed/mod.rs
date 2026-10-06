@@ -16,7 +16,7 @@ mod pool;
 #[allow(unused_imports)]
 pub use diagram::DiagramRenderer;
 #[allow(unused_imports)]
-pub use image::{is_remote, resolve, ImageRenderer};
+pub use image::{is_remote, resolve, stamp_of, ImageRenderer};
 #[allow(unused_imports)]
 pub use math::MathRenderer;
 #[allow(unused_imports)]
@@ -43,6 +43,11 @@ pub struct EmbedSource {
     pub text: String,
     /// 利用可能幅（px）。図は幅に合わせて描くため、幅が変われば描き直す
     pub width: f32,
+    /// 参照先の更新時刻（ミリ秒）。**画像だけが持つ**（DD-OPEN-16）。
+    ///
+    /// 図と数式は本文そのものが鍵になるので要らない。画像はパスしか
+    /// 鍵に入らず、**中身を差し替えても同じ鍵になってしまう**
+    pub stamp: Option<u64>,
 }
 
 impl EmbedSource {
@@ -51,7 +56,14 @@ impl EmbedSource {
             kind,
             text: text.into(),
             width,
+            stamp: None,
         }
+    }
+
+    /// 参照先の更新時刻を添える（画像用）。
+    pub fn with_stamp(mut self, stamp: Option<u64>) -> Self {
+        self.stamp = stamp;
+        self
     }
 
     /// この依頼を一意に指す鍵。
@@ -81,6 +93,8 @@ impl EmbedKey {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         source.kind.hash(&mut hasher);
         source.text.hash(&mut hasher);
+        // **更新時刻も混ぜる。** 同じパスでも中身が変われば別の鍵になる
+        source.stamp.hash(&mut hasher);
         Self {
             kind: source.kind,
             hash: hasher.finish(),
@@ -218,6 +232,28 @@ mod tests {
         let c = EmbedSource::new(EmbedKind::Diagram, "graph TD; A-->C", 800.0);
         assert_eq!(a.key(), b.key());
         assert_ne!(a.key(), c.key(), "内容が違えば別の鍵");
+    }
+
+    /// **同じパスでも、中身が変われば別の鍵になる**（DD-OPEN-16）。
+    ///
+    /// これが無いと、画像を差し替えても古いものが出続ける
+    #[test]
+    fn key_follows_the_stamp() {
+        let path = "C:/tmp/a.png";
+        let old = EmbedSource::new(EmbedKind::Image, path, 800.0).with_stamp(Some(1_000));
+        let new = EmbedSource::new(EmbedKind::Image, path, 800.0).with_stamp(Some(2_000));
+        let same = EmbedSource::new(EmbedKind::Image, path, 800.0).with_stamp(Some(1_000));
+        assert_ne!(old.key(), new.key(), "差し替えに気づいていない");
+        assert_eq!(old.key(), same.key());
+    }
+
+    /// 更新時刻を読めなかった場合も、鍵としては成り立つ。
+    #[test]
+    fn a_missing_stamp_is_its_own_key() {
+        let path = "C:/tmp/a.png";
+        let unknown = EmbedSource::new(EmbedKind::Image, path, 800.0);
+        let known = EmbedSource::new(EmbedKind::Image, path, 800.0).with_stamp(Some(1_000));
+        assert_ne!(unknown.key(), known.key());
     }
 
     #[test]

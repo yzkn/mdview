@@ -290,11 +290,10 @@ fn image_source(
         return None;
     }
     let path = crate::embed::resolve(reference, base_dir);
-    Some(EmbedSource::new(
-        EmbedKind::Image,
-        path.to_string_lossy(),
-        width,
-    ))
+    // **更新時刻も鍵に入れる**（DD-OPEN-16）。
+    // パスだけだと、画像を差し替えても古いものが出続ける
+    let stamp = crate::embed::stamp_of(&path);
+    Some(EmbedSource::new(EmbedKind::Image, path.to_string_lossy(), width).with_stamp(stamp))
 }
 
 /// 埋め込みを 1 つ置く（§16.5）。

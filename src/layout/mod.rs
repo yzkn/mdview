@@ -10,7 +10,7 @@ mod block;
 mod cache;
 mod estimate;
 mod height_index;
-mod measure;
+pub mod measure;
 
 // P2 で描画層から使う。先に作って試験で挙動を固めてある（§10.3）
 #[allow(unused_imports)]

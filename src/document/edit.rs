@@ -164,6 +164,41 @@ impl Document {
         self.line_count = self.text.len_lines();
         self.unterminated_fence = unterminated;
 
+        // **いちばん長い行を、触った範囲だけで更新する**（§10.59）。
+        //
+        // 全体を見直すと打鍵ごとに全行を舐めることになる。触った行だけを
+        // 今の記録と比べ、長いほうを採る。
+        //
+        // **いちばん長い行を消した場合は、記録が長いまま残る。**
+        // 横のバーが必要より少し長く動けるだけで、害は無い。
+        // 読み込み直したときに正しくなる。
+        {
+            use super::{line_bytes, widest_line_of};
+            let from = self
+                .text
+                .byte_to_line(range.start.min(self.text.len_bytes()));
+            let to = self
+                .text
+                .byte_to_line((range.start + insert.len()).min(self.text.len_bytes()));
+
+            let current = self.widest_line.min(self.line_count.saturating_sub(1));
+            let mut widest = line_bytes(&self.text, current);
+            let mut best = current;
+            for line in from..=to.min(self.line_count.saturating_sub(1)) {
+                let length = line_bytes(&self.text, line);
+                if length > widest {
+                    widest = length;
+                    best = line;
+                }
+            }
+            self.widest_line = best;
+
+            // **全部消えたときだけ作り直す。** 記録が意味を失うため
+            if self.line_count <= 1 {
+                self.widest_line = widest_line_of(&self.text);
+            }
+        }
+
         // Fenwick は O(n) で作り直す（DD-07）。10MB でも 1ms 未満
         debug_assert_eq!(heights.len(), self.blocks.len());
         self.heights = HeightIndex::build(heights);
@@ -375,7 +410,7 @@ mod tests {
         }
     }
 
-    /// 10MB での 1 打鍵あたりの再解析コスト（PERF-03 / PERF-04）。
+    /// 10MB での 1 打鍵あたりの再解析コスト（設計メモ PERF-03 / PERF-04）。
     ///
     /// 既定では走らせない（生成に時間がかかるため）。
     /// 実行: cargo test --release -- --ignored --nocapture measure_large

@@ -52,6 +52,12 @@ pub fn export(
     }
 
     let source = document.text().to_string();
+    // **`$$` を数式の囲みへ直してから渡す**（§16.6）。
+    //
+    // 画面と PDF は自前の走査器を通すので `$$` を数式として扱えるが、
+    // ここは comrak が解析するため、そのままでは段落になる。
+    // **判定は走査器に聞く**（決める場所を増やさない）
+    let source = crate::parse::dollar::to_math_fences(&source);
     let arena = Arena::new();
     let options = options();
     let root = parse_document(&arena, &source, &options);

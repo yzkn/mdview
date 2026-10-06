@@ -1,7 +1,8 @@
 [package]
 name = "mdview"
-version = "2.0.0-alpha.1"
+version = "2.0.1"
 description = "Markdown viewer and editor"
+authors = []
 edition = "2021"
 publish = false
 
@@ -51,13 +52,42 @@ image = { version = "0.25", default-features = false, features = [
 rfd = "0.16"
 # OS の外観（Light / Dark）の取得。iced は内部で追うがアプリへ渡す口が無い
 dark-light = "2"
+# 検索・置換の正規表現（§8.2）。**後戻りしない実装**を選ぶ。
+# fancy-regex（syntect が使う）は先読みが書けるが、書き方次第で
+# 10MB の文書に対して事実上終わらない照合になりうる
+regex = "1"
+# 日付・時刻の差し込み（TeraPad 相当）。**端末の時刻帯が要る**ため。
+# std だけでは地方時を出せない。既定の機能を切って clock だけ入れる
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# 文字コードの変換（利用者の要望。TeraPad に準じる）。
+# Shift_JIS / EUC-JP / ISO-2022-JP / UTF-16 を読み書きする。
+# **判定は自前**（§19.4）。encoding_rs は変換だけを担う
+encoding_rs = "0.8"
 # PDF の生成（DEC-205）。v1 の WebView 印刷に依存しない。
 # **同梱フォントをそのまま埋め込む**（サブセット化は krilla が行う。§8.5）
 krilla = "0.8"
 
+[build-dependencies]
+# Windows の実行ファイルへアイコンと版数を埋める（B-2）。
+# **他の OS では何もしない**（build.rs が target_os を見る）
+embed-resource = "3"
+
 [dev-dependencies]
+# 印に使う字の送り幅を測る（examples/check-marks.rs）。
+# **実行ファイルには入らない。** resvg が同じ版を使っているので増えない
+ttf-parser = "0.25"
+
 
 # 計測は必ずリリース相当の最適化で行う（§9.4）
+# 試験と開発ビルドのデバッグ情報は**行番号だけ**にする。
+#
+# 既定（debug = 2）では、このクレートを 1 つの試験用実行ファイルへまとめる
+# ときに rustc が数 GB を要求し、手元の端末でコミット不足になって
+# `STATUS_STACK_BUFFER_OVERRUN` で落ちる（§10.39）。
+# 行番号があればパニックの場所は分かるため、失うものは少ない。
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

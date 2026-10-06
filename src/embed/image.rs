@@ -57,6 +57,17 @@ pub fn resolve(reference: &str, base: Option<&Path>) -> PathBuf {
     }
 }
 
+/// 参照先の更新時刻（UNIX 元期からのミリ秒）。
+///
+/// **読めなければ `None` を返す。** 無いファイルを指していることも、
+/// 更新時刻を持たないファイルシステムのこともある。どちらも
+/// 「鍵に混ぜるものが無い」という同じ扱いでよい。
+pub fn stamp_of(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(since.as_secs() * 1_000 + u64::from(since.subsec_millis()))
+}
+
 impl RenderEmbed for ImageRenderer {
     fn render(&self, source: &EmbedSource) -> Result<RenderedEmbed, EmbedError> {
         let path = Path::new(&source.text);
@@ -95,6 +106,38 @@ impl RenderEmbed for ImageRenderer {
 mod tests {
     use super::*;
     use crate::embed::EmbedKind;
+
+    /// **無いファイルの更新時刻は `None`。** 落ちない
+    #[test]
+    fn a_missing_file_has_no_stamp() {
+        let path = std::env::temp_dir().join("mdview-stamp-does-not-exist.png");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(stamp_of(&path), None);
+    }
+
+    /// **書き換えたら更新時刻が変わる**（DD-OPEN-16）。
+    ///
+    /// 時計の刻みに頼らないよう、**更新時刻を自分で指定して**確かめる
+    #[test]
+    fn rewriting_a_file_moves_the_stamp() {
+        let path = std::env::temp_dir().join("mdview-stamp-moves.bin");
+        std::fs::write(&path, b"old").expect("書けない");
+        let before = stamp_of(&path).expect("更新時刻が読めない");
+
+        // 1 秒進めた時刻を立てる。ファイルシステムの刻みより大きい
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("開けない");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        file.set_modified(later).expect("更新時刻を立てられない");
+        drop(file);
+
+        let after = stamp_of(&path).expect("更新時刻が読めない");
+        assert!(after > before, "{after} <= {before}");
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// **ネットワークの参照は最初から取りに行かない。**
     #[test]

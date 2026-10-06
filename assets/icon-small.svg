@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  小さいとき（16 / 20 / 24 / 32px）のアイコン。
+
+  **細部を捨てる。** 本体のアイコン（icon.svg）は紙と矢印の 2 つだが、
+  16px では紙の折り目も矢印の軸も潰れて滲むだけになる。ここでは
+  **下向きの矢印 1 つ**に絞り、太く大きく描く。
+
+  小さい側に別の絵を用意するのは、OS のアイコン表示の作法でもある。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3C6CB0"/>
+      <stop offset="1" stop-color="#2A4C80"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="16" y="16" width="480" height="480" rx="96" ry="96" fill="url(#bg)"/>
+
+  <!-- 矢印だけ。**軸を太くする**（細いと 16px で消える） -->
+  <path d="M192 112 h128 v160 h96 l-160 176 -160 -176 h96 z" fill="#FFFFFF"/>
+</svg>

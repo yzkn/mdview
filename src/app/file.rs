@@ -22,7 +22,12 @@ pub struct DocumentMeta {
 impl DocumentMeta {
     /// 新規文書。
     pub fn untitled() -> Self {
-        Self::default()
+        Self {
+            path: None,
+            // **新規は BOM 付き UTF-8**（§19.4）
+            format: FileFormat::for_new_document(),
+            dirty: false,
+        }
     }
 
     /// 読み込んだ文書。
@@ -73,6 +78,10 @@ pub enum Pending {
     Open,
     /// 引数や関連付けで渡されたパスを開く
     OpenPath(PathBuf),
+    /// 文字コードを指定して開き直す（§19.4）
+    ///
+    /// **未保存の確認を通す。** 開き直すと編集中の内容は消える
+    Reopen(PathBuf, crate::io::Encoding),
     Exit,
 }
 

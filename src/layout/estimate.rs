@@ -39,6 +39,22 @@ impl Default for Metrics {
 }
 
 impl Metrics {
+    /// 表示倍率を掛けたもの（§4.13）。
+    ///
+    /// **プレースホルダの高さも掛ける。** 掛けないと、図が届いた瞬間に
+    /// 周りが大きく飛ぶ
+    pub fn scaled(zoom: f32) -> Self {
+        let base = Self::default();
+        Self {
+            line_height: base.line_height * zoom,
+            code_line_height: base.code_line_height * zoom,
+            table_row_height: base.table_row_height * zoom,
+            char_width: base.char_width * zoom,
+            block_spacing: base.block_spacing * zoom,
+            placeholder_height: base.placeholder_height * zoom,
+        }
+    }
+
     /// 見出しの行高。レベルが小さいほど大きい。
     fn heading_line_height(&self, level: u8) -> f32 {
         let scale = match level {
