@@ -1,4 +1,4 @@
-﻿﻿#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     mdview の Windows インストーラを組む（B-3）。
