@@ -315,10 +315,10 @@ hdiutil detach "$mount" -quiet
 
 ```bash
 git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: v2.0.1"
-git tag v2.0.1
+git commit -m "chore: v2.1.0"
+git tag v2.1.0
 git push origin main
-git push origin v2.0.1
+git push origin v2.1.0
 ```
 
 **打ち直すとき**（Release がまだ作られていない場合）:
