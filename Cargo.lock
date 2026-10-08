@@ -1196,9 +1196,9 @@ checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
 
 [[package]]
 name = "dugong"
-version = "0.8.0-alpha.6"
+version = "0.8.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a773dcadac5836ffd8b9f3836beeb02ac382b55e2e5dd40c0061a29a9279ae5c"
+checksum = "fd44734076d1328fc91fae55e0ac33dbd9bf5e54390dc2df085bf3abc91a8808"
 dependencies = [
  "dugong-graphlib",
  "rustc-hash 2.1.3",
@@ -1208,9 +1208,9 @@ dependencies = [
 
 [[package]]
 name = "dugong-graphlib"
-version = "0.8.0-alpha.6"
+version = "0.8.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d39983e5e33f39b7289f3172bf2b4d859413e59ab976c5146d00dc95b6f237f"
+checksum = "96e4ee3cf0526090a03f4757d42ac7e6f25affe75623443e62ef158dfdb97beb"
 dependencies = [
  "hashbrown 0.17.1",
  "rustc-hash 2.1.3",
@@ -1240,13 +1240,12 @@ dependencies = [
 
 [[package]]
 name = "encoding_rs"
-version = "0.8.41"
+version = "0.8.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b5ef0006ac9ab233c38522f5ae99cae3625151de8f706cacee1cba4b8e2832a"
+checksum = "8e985e0451871ad22fb8d2b6b076e2028a502a0d3950998c2c5c0a4f9b5d9679"
 dependencies = [
  "cfg-if",
  "core_detect",
- "multiversion",
  "multiversion_no_op",
  "rustversion",
  "scopeguard",
@@ -2704,9 +2703,9 @@ checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 
 [[package]]
 name = "lru"
-version = "0.18.4"
+version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -2722,9 +2721,9 @@ dependencies = [
 
 [[package]]
 name = "manatee"
-version = "0.8.0-alpha.6"
+version = "0.8.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96af607c425bbed5997213ad61ab3d21f97b4fe5a87d3a49178ae4b4231a12b8"
+checksum = "4ec87803223b898f447468c6f3d96334ae53b99bffc5878e62bedb43cf164772"
 dependencies = [
  "indexmap",
  "libm",
@@ -2756,7 +2755,7 @@ dependencies = [
  "image",
  "krilla",
  "latex-rust",
- "lru 0.18.4",
+ "lru 0.18.5",
  "merman",
  "regex",
  "resvg",
@@ -2794,22 +2793,55 @@ dependencies = [
 
 [[package]]
 name = "merman"
-version = "0.8.0-alpha.6"
+version = "0.8.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e39537e033f102eda0fcd527e2cbe4135df670b90a4b2a3ad0b0a86466a709d6"
+checksum = "86bec6deb20ce327389344a3263df81aeba013b236282008a3e11bcd5732a849"
 dependencies = [
+ "merman-analysis",
+ "merman-ascii",
  "merman-core",
+ "merman-editor-core",
  "merman-render",
  "serde_json",
  "thiserror 2.0.20",
 ]
 
 [[package]]
-name = "merman-core"
-version = "0.8.0-alpha.6"
+name = "merman-analysis"
+version = "0.8.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74f951b8cb5238ee6e12b03e38c0327e19be9f1a19db9d26ad7dcad7f8dff8d7"
+checksum = "2d22dc6c2b701696c871d2629367f0dcada4541eecfa3a37db0159c56c566db7"
 dependencies = [
+ "merman-core",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "merman-ascii"
+version = "0.8.0-alpha.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf9aedd162f635a087d53ce3e13b4954b54a4e15521b1bd89c2cd503593fd6ff"
+dependencies = [
+ "dugong",
+ "merman-core",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "merman-core"
+version = "0.8.0-alpha.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f82cc2169944efec60844a04d39f23b38a7fd3b9733434a9da34424e7335e688"
+dependencies = [
+ "cssparser",
  "euclid",
  "granit-parser",
  "htmlize",
@@ -2829,10 +2861,40 @@ dependencies = [
 ]
 
 [[package]]
-name = "merman-render"
-version = "0.8.0-alpha.6"
+name = "merman-editor-core"
+version = "0.8.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27300d2eda1e2437507c3c66c8335547312680c048b5a78c758b5e9c1ccd923a"
+checksum = "ac2705055b6749bd229a793743736c9ae33a8d35aec0bade2937929f5f246213"
+dependencies = [
+ "merman-analysis",
+ "merman-core",
+ "serde",
+]
+
+[[package]]
+name = "merman-elk-layered"
+version = "0.8.0-alpha.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20f3240584aa1ca3b400f91f47ae2ff02ad4ad2fa25e98d065316f242dfb6ec8"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "merman-layout-elk"
+version = "0.8.0-alpha.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d179bdc7685880b0e3a9d26b31f5a850ce931bbdf0cc94c726518d3de8082350"
+dependencies = [
+ "merman-elk-layered",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "merman-render"
+version = "0.8.0-alpha.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "542e4e009bfa516279bc0692cdef51497e84381d5c3062899cbce6503357dc46"
 dependencies = [
  "base64",
  "cssparser",
@@ -2843,6 +2905,7 @@ dependencies = [
  "libm",
  "manatee",
  "merman-core",
+ "merman-layout-elk",
  "pulldown-cmark",
  "quick-xml",
  "ratex-layout",
@@ -2921,27 +2984,6 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
-]
-
-[[package]]
-name = "multiversion"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ca4bea16ffc3f443cf7d866912118196bfef4c6a1556ca00f9f9b00bb43f7c"
-dependencies = [
- "multiversion-macros",
-]
-
-[[package]]
-name = "multiversion-macros"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d416831a7317ef4b08bee00b69cbbb9c8763da7959a7026244d6266869f9c83"
-dependencies = [
- "proc-macro2",
- "quote",
- "rustversion",
- "syn 3.0.6",
 ]
 
 [[package]]
@@ -3051,6 +3093,12 @@ checksum = "418abd1b6d34fbf6cae440dc874771b0525a604428704c76e48b29a5e67b8003"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "nom"
@@ -4667,6 +4715,19 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-saphyr"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bb49c0aa8a5bb88c00b833c11bae50d1611fb89e01336f53b05f7c643b1c883"
+dependencies = [
+ "base64",
+ "nohash-hasher",
+ "num-traits",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
