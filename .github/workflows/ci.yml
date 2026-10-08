@@ -110,7 +110,7 @@ jobs:
 
       - name: GUI 試験の画面写真を残す
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: gui-shots-${{ matrix.os }}
           path: gui-shots

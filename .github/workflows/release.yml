@@ -260,7 +260,7 @@ jobs:
           if (Test-Path $exe) { throw "消したはずの $exe が残っている" }
           Write-Host "入れて・起動して・消せた"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.label }}
           path: dist/*
