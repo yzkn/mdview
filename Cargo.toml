@@ -51,7 +51,7 @@ image = { version = "0.25", default-features = false, features = [
 # **OS のものを使う。** 自前で描くと入力補完やネットワークの場所を作り直すことになる
 rfd = "0.16"
 # OS の外観（Light / Dark）の取得。iced は内部で追うがアプリへ渡す口が無い
-dark-light = "2"
+dark-light = "3"
 # 検索・置換の正規表現（§8.2）。**後戻りしない実装**を選ぶ。
 # fancy-regex（syntect が使う）は先読みが書けるが、書き方次第で
 # 10MB の文書に対して事実上終わらない照合になりうる
