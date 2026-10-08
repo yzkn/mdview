@@ -66,7 +66,11 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all
 cargo build --release
 ./target/release/mdview --version     # 上げた版数が出ること
+python tools/automation/smoke_test.py         # 試験の口が動くこと
+python tools/automation/spec_test.py --perf   # 要件の試験（失敗・未網羅が 0 件であること）
 ```
+
+GUI 試験の決まりは [GUI 自動テストの方針](GUI自動テストの方針.md)。CI も同じ試験を回す。
 
 ---
 

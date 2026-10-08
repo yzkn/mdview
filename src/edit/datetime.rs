@@ -4,7 +4,7 @@
 //! 選ぶだけにして、表記の揺れを 1 か所へ閉じ込める。
 
 /// 差し込むもの。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Stamp {
     /// `2026-09-30`
     Date,

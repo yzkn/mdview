@@ -7,7 +7,7 @@
 //! **1 回の取り消しで元へ戻る**のが、この種の一括変換では要点である。
 
 /// 変換の種類。**メニューの項目と 1 対 1 で対応する**。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Transform {
     Upper,
     Lower,

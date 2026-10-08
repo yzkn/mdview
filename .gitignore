@@ -17,3 +17,6 @@ assets/fonts/
 .idea/
 .DS_Store
 *.sw?
+
+# Python の中間ファイル（tools/automation などを動かすとできる）
+__pycache__/

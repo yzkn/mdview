@@ -65,6 +65,10 @@ pub struct Browser {
     pub extensions: Vec<String>,
     /// 読めなかった理由。**黙って空にしない**（§16.12 と同じ考え）
     pub error: Option<String>,
+    /// 開くときの文字コード。`None` は判定に任せる（v2.1.0 R-04）
+    pub open_encoding: Option<crate::io::Encoding>,
+    /// 保存するときの文字コード・BOM・改行コード（v2.1.0 R-04）
+    pub save_format: (crate::io::Encoding, bool, crate::io::LineEnding),
 }
 
 impl Browser {
@@ -92,9 +96,50 @@ impl Browser {
             save,
             extensions,
             error: None,
+            open_encoding: None,
+            save_format: (crate::io::Encoding::Utf8, false, crate::io::LineEnding::Lf),
         };
         browser.reload();
         browser
+    }
+
+    /// 保存の既定を、いまの文書の形にする。
+    pub fn with_format(mut self, format: &crate::io::FileFormat) -> Self {
+        self.save_format = (format.encoding, format.has_bom, format.line_ending);
+        self
+    }
+
+    /// Markdown を扱う選択か（文字コードの欄を出すか）。
+    ///
+    /// **出力（PDF・HTML）の保存先では出さない。** 文字コードは関係しない
+    pub fn is_markdown(&self) -> bool {
+        self.extensions.is_empty()
+            || self
+                .extensions
+                .iter()
+                .any(|e| crate::io::MARKDOWN_EXTENSIONS.contains(&e.as_str()))
+    }
+
+    /// 文字コードの選び直し（R-04）。
+    pub fn choose(&mut self, choice: crate::app::EncodingChoice) {
+        use crate::app::EncodingChoice;
+        match choice {
+            EncodingChoice::Auto => self.open_encoding = None,
+            EncodingChoice::Encoding(encoding) => {
+                if self.save {
+                    self.save_format.0 = encoding;
+                    if !encoding.supports_bom() {
+                        self.save_format.1 = false;
+                    }
+                } else {
+                    self.open_encoding = Some(encoding);
+                }
+            }
+            EncodingChoice::Bom(bom) => {
+                self.save_format.1 = bom && self.save_format.0.supports_bom();
+            }
+            EncodingChoice::LineEnding(ending) => self.save_format.2 = ending,
+        }
     }
 
     /// いまの場所を読み直す。
@@ -511,6 +556,8 @@ mod tests {
             save: false,
             extensions: Vec::new(),
             error: None,
+            open_encoding: None,
+            save_format: (crate::io::Encoding::Utf8, false, crate::io::LineEnding::Lf),
         }
     }
 }

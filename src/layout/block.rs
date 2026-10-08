@@ -228,7 +228,15 @@ pub fn is_embed_block(block: &Block, source: &str) -> bool {
             .is_some(),
         // **安く判定する。** ここはレイアウトキャッシュを引く前に呼ばれる。
         // 本当に画像かどうかは `embed_source` が comrak で確かめる
-        BlockKind::Paragraph => source.trim_start().starts_with("!["),
+        // `<img>` タグ 1 つの段落も画像になりうる（v2.1.0 R-17）。
+        // **ここで見落とすと、描く依頼が出ず「描画中」のまま止まる**（実際に踏んだ）
+        BlockKind::Paragraph => {
+            let head = source.trim_start();
+            head.starts_with("![")
+                || head
+                    .get(..4)
+                    .is_some_and(|tag| tag.eq_ignore_ascii_case("<img"))
+        }
         _ => false,
     }
 }
@@ -293,6 +301,10 @@ fn image_source(
     // **更新時刻も鍵に入れる**（DD-OPEN-16）。
     // パスだけだと、画像を差し替えても古いものが出続ける
     let stamp = crate::embed::stamp_of(&path);
+    // `<img width="…">` なら、その幅より大きくしない（画面の幅は超えない。v2.1.0）
+    let width = content
+        .lone_image_width
+        .map_or(width, |wanted| wanted.min(width));
     Some(EmbedSource::new(EmbedKind::Image, path.to_string_lossy(), width).with_stamp(stamp))
 }
 
@@ -1472,6 +1484,27 @@ graph TD; A-->B
         assert_eq!(request.kind, EmbedKind::Diagram);
         // フェンス行を含まない
         assert_eq!(request.text.trim(), "graph TD; A-->B");
+    }
+
+    /// **`<img>` タグ 1 つの段落も箱にする**（v2.1.0 R-17）。
+    ///
+    /// 安い判定（`is_embed_block`）と本当の判定（`embed_source`）の**両方**が
+    /// 認めないと、描く依頼が出ずに「描画中」のまま止まる
+    #[test]
+    fn a_lone_img_tag_is_an_embed_with_its_width() {
+        let text = "<img width=\"200\" alt=\"image\" src=\"img/a.png\">\n";
+        let blocks = scan_lines(text).blocks;
+        let block = &blocks[0];
+        let source = &text[block.bytes.clone()];
+        assert!(is_embed_block(block, source), "安い判定で落ちている");
+        let request = embed_source(block, source, 800.0, None).expect("画像として認識される");
+        assert_eq!(request.kind, EmbedKind::Image);
+        assert_eq!(request.width, 200.0, "幅の指定が効いていない");
+        // 画面より広い指定は画面の幅で止める
+        let wide = "<img width=\"2000\" src=\"img/a.png\">\n";
+        let blocks = scan_lines(wide).blocks;
+        let request = embed_source(&blocks[0], wide, 800.0, None).expect("画像");
+        assert_eq!(request.width, 800.0);
     }
 
     /// **画像だけの段落は箱にする**（§16.12）。

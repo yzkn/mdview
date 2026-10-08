@@ -29,6 +29,13 @@ pub enum Encoding {
     Utf16Be,
 }
 
+// 選択リスト（設定画面・文字コードのダイアログ）に並べるため
+impl std::fmt::Display for Encoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// UTF-8 の BOM。
 pub const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 /// UTF-16LE の BOM。

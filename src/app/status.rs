@@ -32,6 +32,27 @@ impl Status {
     ///
     /// **区切りは全角の中黒。** 半角の記号だと、日本語のファイル名と
     /// 並んだときに切れ目が見えない
+    /// 文字コードの前・文字コード・後ろの 3 つに分けた形（v2.1.0 R-04）。
+    ///
+    /// **文字コードだけを押せるようにする。** 区切りは `line_text` と同じ
+    pub fn parts(&self) -> (String, String, String) {
+        (
+            format!(
+                "{} ・ {} ・ Ln {}, Col {} ・ ",
+                self.name,
+                if self.saved {
+                    "保存済み"
+                } else {
+                    "未保存"
+                },
+                self.line,
+                self.column,
+            ),
+            self.encoding.clone(),
+            format!(" ・ {} ・ {}", self.mode, human_bytes(self.bytes)),
+        )
+    }
+
     pub fn line_text(&self) -> String {
         format!(
             "{} ・ {} ・ Ln {}, Col {} ・ {} ・ {} ・ {}",

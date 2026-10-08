@@ -18,6 +18,7 @@ use iced::keyboard::{self, key::Named};
 use iced::{mouse, Color, Element, Event, Length, Pixels, Point, Rectangle, Size};
 
 use super::scrollbar;
+use crate::app::fold::{FoldMap, Heading, NO_FOLDS};
 use crate::document::Document;
 use crate::search::Match;
 
@@ -277,6 +278,15 @@ pub enum Action {
     /// 以前は Debug 整形した文字列を再解析していたが、内容に `"` や `\` が
     /// 入ると壊れるため改めた。
     Ime(ImeAction),
+    /// 行番号の欄の開閉の印を押した（R-20）
+    ToggleFold {
+        line: usize,
+    },
+    /// `Ctrl` を押しながら本文を押した（リンクを開く。R-19）
+    OpenLinkAt {
+        line: usize,
+        column: usize,
+    },
 }
 
 /// IME から届く出来事（§4.5 の状態遷移）。
@@ -314,6 +324,12 @@ pub struct EditorView<'a> {
     show_gremlins: bool,
     /// 保存時の改行が `CRLF` か（行末の印の形が変わる。§4.11）
     crlf: bool,
+    /// 畳んで隠している行（v2.1.0 R-20）
+    folds: &'a FoldMap,
+    /// 見出しの一覧。**行番号の欄に開閉の印を出すために要る**（R-20）
+    headings: &'a [Heading],
+    /// ミニマップの幅（px）。出さないなら `None`（R-01）
+    minimap: Option<f32>,
 }
 
 impl<'a> EditorView<'a> {
@@ -339,7 +355,282 @@ impl<'a> EditorView<'a> {
             show_invisibles: false,
             show_gremlins: false,
             crlf: false,
+            folds: &NO_FOLDS,
+            headings: &[],
+            minimap: None,
         }
+    }
+
+    /// 文字の大きさと行の高さを直接決める（v2.1.0 R-11）。
+    ///
+    /// **倍率を掛け終えた値を渡す。** 設定の大きさ × 表示倍率はアプリ側で決める
+    pub fn sizes(mut self, text_size: f32, line_height: f32) -> Self {
+        self.text_size = text_size.max(1.0);
+        self.line_height = line_height.max(self.text_size);
+        self
+    }
+
+    /// 畳んでいる行と見出しの一覧（R-20）。
+    pub fn folding(mut self, folds: &'a FoldMap, headings: &'a [Heading]) -> Self {
+        self.folds = folds;
+        self.headings = headings;
+        self
+    }
+
+    /// ミニマップを出す（R-01）。
+    pub fn minimap(mut self, width: Option<f32>) -> Self {
+        self.minimap = width;
+        self
+    }
+
+    // --- 段と行の読み替え（R-20） ---
+    //
+    // **画面の段と文書の行は、畳んだ見出しがあると一致しない。**
+    // 縦の位置を扱うところは、すべてここを通して読み替える
+
+    fn total_lines(&self) -> usize {
+        self.document.text().len_lines()
+    }
+
+    /// 見えている行の数（畳んだぶんを除く）。
+    fn total_rows(&self) -> usize {
+        self.folds.visible_count(self.total_lines())
+    }
+
+    /// 先頭行が何段目か。
+    fn top_row(&self) -> usize {
+        self.folds.row_of(self.state.top_line)
+    }
+
+    /// 画面の上から `row` 段目にある行。**末尾を超えたら最終行**
+    fn line_at_row(&self, row: usize) -> usize {
+        let last = self.total_lines().saturating_sub(1);
+        self.folds.line_of(self.top_row() + row).min(last)
+    }
+
+    /// 画面に描く行（上から順に）。
+    fn drawn_lines(&self, height: f32) -> Vec<usize> {
+        let total = self.total_lines();
+        let rows = self.visible_rows(height);
+        let mut lines = Vec::with_capacity(rows);
+        let mut line = self
+            .folds
+            .visible_at_or_after(self.state.top_line.min(total));
+        while lines.len() < rows && line < total {
+            lines.push(line);
+            line = self.folds.visible_at_or_after(line + 1);
+        }
+        lines
+    }
+
+    /// 縦のバー（またはミニマップ）の幅。
+    fn bar_width(&self) -> f32 {
+        self.minimap.unwrap_or(scrollbar::THICKNESS)
+    }
+
+    /// 本文に使えない右端の幅。**ミニマップは本文に重ねない**（読めなくなる）
+    fn right_reserve(&self) -> f32 {
+        self.minimap.unwrap_or(0.0)
+    }
+
+    /// 見出しの行か（開閉の印を出す行）。
+    fn is_heading_line(&self, line: usize) -> bool {
+        self.headings
+            .binary_search_by_key(&line, |heading| heading.line)
+            .is_ok()
+    }
+
+    /// 畳んでいる見出しか（印の向きを決める）。
+    fn is_folded_heading(&self, line: usize) -> bool {
+        !self.folds.is_hidden(line) && self.folds.is_hidden(line + 1)
+    }
+
+    /// ミニマップを描く（R-01）。
+    ///
+    /// **帯の 1 画素ごとに代表の 1 行を選んで描く。** 38 万行の文書でも、
+    /// 描くのは帯の高さぶん（数百本）だけで済む
+    fn draw_minimap<Renderer>(&self, renderer: &mut Renderer, bounds: Rectangle, text_color: Color)
+    where
+        Renderer: renderer::Renderer,
+    {
+        let track = self.vertical_track(bounds);
+        if track.height <= 0.0 || track.width <= 0.0 {
+            return;
+        }
+        let rope = self.document.text();
+        let total_lines = rope.len_lines();
+        let rows = self.total_rows();
+        let (scale, position, length) = self.minimap_geometry(bounds);
+
+        // 溝（いまのスクロールバーと同じ薄さ）
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: track,
+                ..Default::default()
+            },
+            Color {
+                a: 0.04,
+                ..text_color
+            },
+        );
+
+        let inner_left = track.x + 4.0;
+        let inner_width = (track.width - 8.0).max(1.0);
+        // 1 字 1px。**長い行は帯の幅で切る**
+        let char_px = 1.0_f32;
+
+        // 1 本の高さ。短い文書では 1 行 2px のうち 1px を線にする（行の間が見える）
+        let bar_height = if scale >= 2.0 { 1.0 } else { scale.max(1.0) };
+        // **1 画素に何行も詰まる長い文書では薄く描く。** 濃いままだと
+        // 帯が黒く塗りつぶされ、形が読めない（10MB で実際にそうなった）
+        let dense = scale < 1.0;
+        let text_alpha = if dense { 0.16 } else { 0.30 };
+        let mut y = 0.0_f32;
+        let content_height = (rows as f32 * scale).min(track.height);
+        while y < content_height {
+            let row = (y / scale) as usize;
+            let line = self.folds.line_of(row);
+            if line >= total_lines {
+                break;
+            }
+            let slice = rope.line(line);
+            let mut indent = 0usize;
+            let mut length_chars = 0usize;
+            let mut counting_indent = true;
+            for ch in slice.chars() {
+                if ch == '\n' || ch == '\r' {
+                    break;
+                }
+                if counting_indent && (ch == ' ' || ch == '\t') {
+                    indent += if ch == '\t' { self.tab_width } else { 1 };
+                    continue;
+                }
+                counting_indent = false;
+                length_chars += if is_wide(ch) { 2 } else { 1 };
+                // 帯の幅を超えたら数えない（どうせ切る）
+                if (indent + length_chars) as f32 * char_px > inner_width {
+                    break;
+                }
+            }
+            if length_chars > 0 {
+                let x = inner_left + (indent as f32 * char_px).min(inner_width);
+                let width = (length_chars as f32 * char_px).min(inner_left + inner_width - x);
+                if width > 0.0 {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(x, track.y + y),
+                                Size::new(width, bar_height),
+                            ),
+                            ..Default::default()
+                        },
+                        Color {
+                            a: text_alpha,
+                            ..text_color
+                        },
+                    );
+                }
+            }
+            // 次の画素へ。**短い文書は 1 行ずつ、長い文書は 1 画素ずつ**
+            y += scale.max(1.0);
+        }
+
+        // 見出し（濃い帯）。**近すぎるものは間引く。** 長い文書では見出しが
+        // 1 画素に何十も重なり、すべて描くと帯が黒く埋まる。
+        // 長い文書では左に短く描き、文字の帯と見分けられるようにする
+        let gap = if dense { 4.0 } else { 1.0 };
+        let share = if dense { 0.35 } else { 1.0 };
+        let mut last_y = f32::NEG_INFINITY;
+        for heading in self.headings {
+            if self.folds.is_hidden(heading.line) {
+                continue;
+            }
+            let at = self.folds.row_of(heading.line) as f32 * scale;
+            if at - last_y < gap {
+                continue;
+            }
+            last_y = at;
+            let width =
+                inner_width * share * (1.0 - f32::from(heading.level.saturating_sub(1)) * 0.12);
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(inner_left, track.y + at),
+                        Size::new(width.max(4.0), bar_height.max(2.0)),
+                    ),
+                    ..Default::default()
+                },
+                Color {
+                    a: 0.75,
+                    ..text_color
+                },
+            );
+        }
+
+        // 検索の一致（右端の印）。**多すぎるときは間引く**
+        if !self.matches.is_empty() {
+            let step = (self.matches.len() / 2_000).max(1);
+            let mut last_y = f32::NEG_INFINITY;
+            for found in self.matches.iter().step_by(step) {
+                let line = rope.byte_to_line(found.start.min(rope.len_bytes()));
+                let at = self.folds.row_of(line) as f32 * scale;
+                if at - last_y < 1.0 {
+                    continue;
+                }
+                last_y = at;
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle::new(
+                            Point::new(track.x + track.width - 6.0, track.y + at),
+                            Size::new(5.0, 2.0),
+                        ),
+                        ..Default::default()
+                    },
+                    CURRENT_MATCH,
+                );
+            }
+        }
+
+        // キャレットの行
+        let caret = self.folds.row_of(self.state.cursor_line) as f32 * scale;
+        if caret <= track.height {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(track.x, track.y + caret),
+                        Size::new(track.width, 1.0),
+                    ),
+                    ..Default::default()
+                },
+                Color {
+                    a: 0.85,
+                    ..text_color
+                },
+            );
+        }
+
+        // 見えている範囲（枠）。**つまみと同じもの**
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: Rectangle::new(
+                    Point::new(track.x + 1.0, track.y + position),
+                    Size::new(track.width - 2.0, length),
+                ),
+                border: iced::Border {
+                    color: Color {
+                        a: 0.45,
+                        ..text_color
+                    },
+                    width: 1.0,
+                    radius: 2.0.into(),
+                },
+                ..Default::default()
+            },
+            Color {
+                a: 0.10,
+                ..text_color
+            },
+        );
     }
 
     /// 等倍での字の大きさと行高。
@@ -361,11 +652,8 @@ impl<'a> EditorView<'a> {
     /// 折り返しの判定が全部ずれる。重ねるだけにする
     fn vertical_track(&self, bounds: Rectangle) -> Rectangle {
         Rectangle::new(
-            Point::new(bounds.x + bounds.width - scrollbar::THICKNESS, bounds.y),
-            Size::new(
-                scrollbar::THICKNESS,
-                (bounds.height - self.bar_gap()).max(0.0),
-            ),
+            Point::new(bounds.x + bounds.width - self.bar_width(), bounds.y),
+            Size::new(self.bar_width(), (bounds.height - self.bar_gap()).max(0.0)),
         )
     }
 
@@ -377,7 +665,7 @@ impl<'a> EditorView<'a> {
                 bounds.y + bounds.height - scrollbar::THICKNESS,
             ),
             Size::new(
-                (bounds.width - self.gutter_width() - self.bar_gap()).max(0.0),
+                (bounds.width - self.gutter_width() - self.bar_width()).max(0.0),
                 scrollbar::THICKNESS,
             ),
         )
@@ -388,11 +676,25 @@ impl<'a> EditorView<'a> {
         scrollbar::THICKNESS
     }
 
-    /// 縦の「全体・見えている量・いまの位置」（単位は行）。
+    /// 縦の「全体・見えている量・いまの位置」（単位は**段**。R-20）。
     fn vertical_span(&self, bounds: Rectangle) -> (f32, f32, f32) {
-        let total = self.document.text().len_lines() as f32;
+        let total = self.total_rows() as f32;
         let visible = (bounds.height / self.line_height).max(0.0);
-        (total, visible, self.state.top_line as f32)
+        (total, visible, self.top_row() as f32)
+    }
+
+    /// ミニマップの 1 段の高さ（px）と、つまみ（見えている範囲の枠）。
+    ///
+    /// **短い文書は 1 行 2px で上から描き、長い文書は軌道に縮める**（R-01）。
+    /// つまみの位置も同じ縮尺で決めるので、帯の絵と枠がずれない
+    fn minimap_geometry(&self, bounds: Rectangle) -> (f32, f32, f32) {
+        let track = self.vertical_track(bounds).height;
+        let rows = self.total_rows().max(1) as f32;
+        let scale = (track / rows).min(scrollbar::MINIMAP_LINE);
+        let visible = (bounds.height / self.line_height).max(1.0);
+        let length = (visible * scale).max(scrollbar::MIN_VIEWPORT).min(track);
+        let position = (self.top_row() as f32 * scale).min(track - length).max(0.0);
+        (scale, position, length)
     }
 
     /// 横の「全体・見えている量・いまの位置」（単位は px）。
@@ -412,7 +714,13 @@ impl<'a> EditorView<'a> {
     /// 文書が画面から出ていく（§10.58）
     fn max_top_line(&self, bounds: Rectangle) -> usize {
         let (total, visible, _) = self.vertical_span(bounds);
-        (total - visible).max(0.0) as usize
+        self.folds.line_of((total - visible).max(0.0) as usize)
+    }
+
+    /// 段を先頭行へ直す（バーを掴んだときの行き先）。
+    fn top_line_of_row(&self, row: f32) -> usize {
+        let last = self.total_rows().saturating_sub(1);
+        self.folds.line_of((row.max(0.0) as usize).min(last))
     }
 
     /// スクロールバーの上に居るか。
@@ -434,7 +742,16 @@ impl<'a> EditorView<'a> {
     }
 
     /// 縦のつまみ。出さないなら `None`。
+    ///
+    /// **ミニマップは全部見えていても出す。** 文書の形を見るためのものでもある
     fn vertical_thumb(&self, bounds: Rectangle) -> Option<(f32, f32)> {
+        if self.minimap.is_some() {
+            if self.vertical_track(bounds).height <= 0.0 {
+                return None;
+            }
+            let (_, position, length) = self.minimap_geometry(bounds);
+            return Some((position, length));
+        }
         let (total, visible, offset) = self.vertical_span(bounds);
         scrollbar::thumb(self.vertical_track(bounds).height, visible, total, offset)
     }
@@ -469,25 +786,26 @@ impl<'a> EditorView<'a> {
             if track.contains(absolute) {
                 let along = absolute.y - track.y;
                 let (total, visible, offset) = self.vertical_span(bounds);
+                let max_row = (total - visible).max(0.0);
+                let grabbed = along >= at && along <= at + length;
+                // **ミニマップは絵と同じ縮尺で動かす**（R-01）。押したところの
+                // 行が枠の中ほどへ来る
+                let moved = if grabbed {
+                    offset
+                } else if self.minimap.is_some() {
+                    let (scale, _, _) = self.minimap_geometry(bounds);
+                    (along / scale - visible / 2.0).clamp(0.0, max_row)
+                } else {
+                    scrollbar::offset_at(track.height, visible, total, along)
+                };
                 let state = tree.state.downcast_mut::<State>();
-                if along >= at && along <= at + length {
-                    state.bar = Some(BarDrag {
-                        vertical: true,
-                        from: along,
-                        start_offset: offset,
-                    });
-                    return Some(Action::ScrollTo {
-                        top_line: offset as usize,
-                    });
-                }
-                let moved = scrollbar::offset_at(track.height, visible, total, along);
                 state.bar = Some(BarDrag {
                     vertical: true,
                     from: along,
                     start_offset: moved,
                 });
                 return Some(Action::ScrollTo {
-                    top_line: moved as usize,
+                    top_line: self.top_line_of_row(moved),
                 });
             }
         }
@@ -538,15 +856,21 @@ impl<'a> EditorView<'a> {
             let track = self.vertical_track(bounds);
             let (total, visible, _) = self.vertical_span(bounds);
             let along = point.y - track.y;
-            let moved = scrollbar::offset_after_drag(
-                track.height,
-                visible,
-                total,
-                held.start_offset,
-                along - held.from,
-            );
+            let moved = if self.minimap.is_some() {
+                let (scale, _, _) = self.minimap_geometry(bounds);
+                (held.start_offset + (along - held.from) / scale)
+                    .clamp(0.0, (total - visible).max(0.0))
+            } else {
+                scrollbar::offset_after_drag(
+                    track.height,
+                    visible,
+                    total,
+                    held.start_offset,
+                    along - held.from,
+                )
+            };
             return Some(Action::ScrollTo {
-                top_line: moved as usize,
+                top_line: self.top_line_of_row(moved),
             });
         }
 
@@ -946,7 +1270,7 @@ impl<'a> EditorView<'a> {
 
     /// 本文を描ける幅。行番号の欄と左余白を除いたもの。
     fn text_area_width(&self, bounds: Rectangle) -> f32 {
-        (bounds.width - self.gutter_width() - TEXT_PADDING).max(0.0)
+        (bounds.width - self.gutter_width() - TEXT_PADDING - self.right_reserve()).max(0.0)
     }
 
     /// この行が右端からはみ出しているか。
@@ -975,12 +1299,10 @@ impl<'a> EditorView<'a> {
         Renderer: text::Renderer<Font = iced::Font>,
     {
         let available = self.text_area_width(bounds);
-        let total = self.document.text().len_lines();
-        let first = self.state.top_line.min(total);
-        let last = (first + self.visible_rows(bounds.height)).min(total);
+        let drawn = self.drawn_lines(bounds.height);
 
         let mut widest = 0.0_f32;
-        for line in first..last {
+        for &line in &drawn {
             let content = self.rendered(line).text;
             // 確実に収まる行は測らない（`overflows` と同じ見積もり）
             if content.chars().count() as f32 * self.text_size <= available {
@@ -1002,7 +1324,7 @@ impl<'a> EditorView<'a> {
         // 文書が覚えている「いちばん長い行」を 1 行だけ足して測る。
         // 整形が要るのはその 1 行だけなので、10MB でも軽い。
         let candidate = self.document.widest_line();
-        if !(first..last).contains(&candidate) {
+        if !drawn.contains(&candidate) {
             let content = self.rendered(candidate).text;
             widest = widest.max(measure_width::<Renderer>(
                 &content,
@@ -1025,8 +1347,9 @@ impl<'a> EditorView<'a> {
         if rows == 0 {
             return None;
         }
-        let first = self.state.top_line;
-        let line = self.state.cursor_line;
+        // **段で比べる**（R-20）。畳んだ行は画面の行数に入らない
+        let first = self.top_row();
+        let line = self.folds.row_of(self.state.cursor_line);
 
         let to = if line < first {
             line
@@ -1036,7 +1359,8 @@ impl<'a> EditorView<'a> {
         } else {
             return None;
         };
-        (to != first).then_some(to)
+        let to = self.folds.line_of(to);
+        (to != self.state.top_line).then_some(to)
     }
 
     /// **キャレットが動いたときだけ**、縦に寄せる位置を返す。
@@ -1065,7 +1389,7 @@ impl<'a> EditorView<'a> {
     {
         let (x, _) = self.caret_position::<Renderer>(bounds);
         let left = bounds.x + self.gutter_width() + TEXT_PADDING;
-        let right = bounds.x + bounds.width - CARET_MARGIN;
+        let right = bounds.x + bounds.width - CARET_MARGIN - self.right_reserve();
 
         let current = self.state.scroll_x;
         let to = if x < left {
@@ -1086,7 +1410,10 @@ impl<'a> EditorView<'a> {
     where
         Renderer: text::Renderer<Font = iced::Font>,
     {
-        let row = self.state.cursor_line.saturating_sub(self.state.top_line);
+        let row = self
+            .folds
+            .row_of(self.state.cursor_line)
+            .saturating_sub(self.top_row());
         let y = bounds.y + row as f32 * self.line_height;
 
         let rendered = Rendered::new(self.cursor_line_content(), self.tab_width);
@@ -1290,6 +1617,10 @@ where
                         shell.publish((self.on_action)(Action::Insert("\n".to_owned())));
                         shell.capture_event();
                     }
+                    // **`Ctrl + ↑ / ↓` は見出しの移動へ譲る**（R-18）。
+                    // ここで動かすと、見出しへ飛ぶ前に 1 行動いてしまう
+                    keyboard::Key::Named(Named::ArrowDown | Named::ArrowUp)
+                        if modifiers.command() => {}
                     keyboard::Key::Named(Named::ArrowDown) => {
                         shell.publish((self.on_action)(Action::Move {
                             movement: CursorMove::Down,
@@ -1385,8 +1716,14 @@ where
                     return;
                 }
                 let row = (point.y / self.line_height).floor().max(0.0) as usize;
-                let line = (self.state.top_line + row)
-                    .min(self.document.text().len_lines().saturating_sub(1));
+                let line = self.line_at_row(row);
+
+                // **行番号の欄の左端は開閉の印**（R-20）。見出しの行だけで効く
+                if self.show_gutter && point.x < GUTTER_PADDING && self.is_heading_line(line) {
+                    shell.publish((self.on_action)(Action::ToggleFold { line }));
+                    shell.capture_event();
+                    return;
+                }
 
                 let text_x = point.x - self.gutter_width() - TEXT_PADDING + self.state.scroll_x;
                 // **表示の桁で当ててから、もとの桁へ戻す**（§4.10）
@@ -1398,6 +1735,14 @@ where
                     self.text_size,
                     self.line_height,
                 ));
+
+                // **`Ctrl` を押しながらならリンクを開く**（R-19）。
+                // キャレットも動かす（開けなかったときに、どこを見たか分かる）
+                if modifiers.command() && !modifiers.shift() && !modifiers.alt() {
+                    shell.publish((self.on_action)(Action::OpenLinkAt { line, column }));
+                    shell.capture_event();
+                    return;
+                }
 
                 // **`Alt` を押しながらなら矩形選択**（§4.13）
                 if modifiers.alt() {
@@ -1450,8 +1795,7 @@ where
                     return;
                 };
                 let row = (point.y / self.line_height).floor().max(0.0) as usize;
-                let line = (self.state.top_line + row)
-                    .min(self.document.text().len_lines().saturating_sub(1));
+                let line = self.line_at_row(row);
                 let text_x = point.x - self.gutter_width() - TEXT_PADDING + self.state.scroll_x;
                 // **表示の桁で当ててから、もとの桁へ戻す**（§4.10）
                 let rendered = self.rendered(line);
@@ -1562,11 +1906,8 @@ where
     ) {
         let bounds = layout.bounds();
         let gutter = self.gutter_width();
-        let rope = self.document.text();
-        let total_lines = rope.len_lines();
-
-        let first = self.state.top_line.min(total_lines);
-        let last = (first + self.visible_rows(bounds.height)).min(total_lines);
+        // **畳んだ行は飛ばして並べる**（R-20）。段と行は一致しない
+        let drawn = self.drawn_lines(bounds.height);
 
         let text_color = style.text_color;
         let gutter_color = Color {
@@ -1581,7 +1922,7 @@ where
         // 行番号は本文と別の層に描く。**本文が横へ動いても行番号は動かない**
         if self.show_gutter {
             renderer.with_layer(own_clip, |renderer| {
-                for (row, line_index) in (first..last).enumerate() {
+                for (row, &line_index) in drawn.iter().enumerate() {
                     let y = bounds.y + row as f32 * self.line_height;
                     draw_text(
                         renderer,
@@ -1594,6 +1935,15 @@ where
                         text::Alignment::Right,
                         &own_clip,
                     );
+                    // **見出しの行に開閉の印**（R-20）。畳んでいれば右向き
+                    if self.is_heading_line(line_index) {
+                        let middle = y + self.line_height / 2.0;
+                        if self.is_folded_heading(line_index) {
+                            draw_right_triangle(renderer, bounds.x + 3.0, middle, text_color);
+                        } else {
+                            draw_down_triangle(renderer, bounds.x + 2.0, middle, gutter_color);
+                        }
+                    }
                 }
             });
         }
@@ -1601,7 +1951,8 @@ where
         // 本文・検索の強調・キャレットは、行番号の欄にも被らない層へ描く
         let text_clip = Rectangle {
             x: bounds.x + gutter,
-            width: (bounds.width - gutter).max(0.0),
+            // **ミニマップの下へは描かない**（R-01）
+            width: (bounds.width - gutter - self.right_reserve()).max(0.0),
             ..bounds
         }
         .intersection(viewport)
@@ -1614,7 +1965,7 @@ where
         renderer.with_layer(text_clip, |renderer| {
             let left = bounds.x + gutter + TEXT_PADDING - self.state.scroll_x;
 
-            for (row, line_index) in (first..last).enumerate() {
+            for (row, &line_index) in drawn.iter().enumerate() {
                 let y = bounds.y + row as f32 * self.line_height;
 
                 // 本文。**可視行だけをロープから取り出す**
@@ -1680,10 +2031,7 @@ where
             // --- キャレット ---
             //
             // カーソル行が画面外なら描かない。
-            if self.state.caret_visible
-                && self.state.cursor_line >= first
-                && self.state.cursor_line < last
-            {
+            if self.state.caret_visible && drawn.contains(&self.state.cursor_line) {
                 let (x, y) = self.caret_position::<Renderer>(bounds);
                 renderer.fill_quad(
                     renderer::Quad {
@@ -1702,7 +2050,7 @@ where
         // 折り返さない代わりの目印で、**右向きの三角**で「続きがある」と示す。
         // **縦のバーを出すときは、その分だけ左へ寄せる**（重ねると読めない）
         let mark_shift = if self.vertical_thumb(bounds).is_some() {
-            scrollbar::THICKNESS
+            self.bar_width()
         } else {
             0.0
         };
@@ -1725,7 +2073,9 @@ where
         // **いちばん上に描く。** 本文の幅を削らずに重ねているため、
         // 先に描くと長い行に隠れる
         renderer.with_layer(own_clip, |renderer| {
-            if let Some((at, length)) = self.vertical_thumb(bounds) {
+            if self.minimap.is_some() {
+                self.draw_minimap(renderer, bounds, text_color);
+            } else if let Some((at, length)) = self.vertical_thumb(bounds) {
                 let track = self.vertical_track(bounds);
                 draw_bar(
                     renderer,
@@ -1801,6 +2151,35 @@ where
         renderer.fill_quad(
             renderer::Quad {
                 bounds: Rectangle::new(Point::new(left, top + row as f32), Size::new(width, 1.0)),
+                ..Default::default()
+            },
+            color,
+        );
+    }
+}
+
+/// 下を向いた三角（▼）を描く。**開いている見出しの印**（R-20）。
+///
+/// `left` は左端、`middle` は上下の中心。右向きと同じく帯を積んで作る
+fn draw_down_triangle<Renderer>(renderer: &mut Renderer, left: f32, middle: f32, color: Color)
+where
+    Renderer: renderer::Renderer,
+{
+    let width = OVERFLOW_MARK_HEIGHT * 0.8;
+    let rows = (width / 2.0).ceil() as usize;
+    let top = middle - rows as f32 / 2.0;
+    for row in 0..rows {
+        let inset = row as f32;
+        let span = width - inset * 2.0;
+        if span <= 0.0 {
+            continue;
+        }
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: Rectangle::new(
+                    Point::new(left + inset, top + row as f32),
+                    Size::new(span, 1.0),
+                ),
                 ..Default::default()
             },
             color,
@@ -2810,5 +3189,85 @@ mod wheel_tests {
         let mut carry = 0.0;
         assert_eq!(take_whole_lines(&mut carry, 0.0), 0);
         assert_eq!(carry, 0.0);
+    }
+}
+
+/// ミニマップのつまみを掴む・溝を押して飛ぶ（v2.1.0 R-01）。
+///
+/// **部品の中の処理を直に呼ぶ。** マウスの出来事は試験の口から流せないので、
+/// 押した位置から行き先を決めるところ（`press_bar` / `drag_bar`）をここで確かめる
+#[cfg(test)]
+mod minimap_press_tests {
+    use super::*;
+
+    fn document(lines: usize) -> Document {
+        let text: String = (1..=lines).map(|n| format!("{n} 行目\n")).collect();
+        Document::from_text(text)
+    }
+
+    /// 10 行ぶんの高さ。
+    fn bounds() -> Rectangle {
+        Rectangle::new(Point::new(0.0, 0.0), Size::new(800.0, 200.0))
+    }
+
+    fn tree() -> widget::Tree {
+        widget::Tree {
+            tag: widget::tree::Tag::of::<State>(),
+            state: widget::tree::State::new(State::default()),
+            children: Vec::new(),
+        }
+    }
+
+    fn top_line(action: Option<Action>) -> usize {
+        match action {
+            Some(Action::ScrollTo { top_line }) => top_line,
+            _ => panic!("縦に動かしていない"),
+        }
+    }
+
+    /// 溝を押すと、押したところの行が枠の中ほどへ来るように飛ぶ。
+    #[test]
+    fn pressing_the_groove_jumps_there() {
+        let document = document(500);
+        let state = EditorState::default();
+        let view = EditorView::new(&document, &state, |_| super::super::Message::BlinkCaret)
+            .minimap(Some(80.0));
+        let track = view.vertical_track(bounds());
+        let (scale, _, _) = view.minimap_geometry(bounds());
+        let along = track.height * 0.8;
+        let point = Point::new(track.x + 5.0, track.y + along);
+
+        let line = top_line(view.press_bar::<()>(&mut tree(), bounds(), point));
+        let expected = (along / scale - 10.0 / 2.0) as usize;
+        assert!(
+            line.abs_diff(expected) <= 1,
+            "飛び先が違う: {line} / {expected}"
+        );
+    }
+
+    /// 枠（つまみ）を掴んでも飛ばず、動かした分だけ帯の縮尺で動く。
+    #[test]
+    fn dragging_the_frame_moves_by_the_minimap_scale() {
+        let document = document(500);
+        let state = EditorState::default();
+        let view = EditorView::new(&document, &state, |_| super::super::Message::BlinkCaret)
+            .minimap(Some(80.0));
+        let track = view.vertical_track(bounds());
+        let (scale, position, _) = view.minimap_geometry(bounds());
+        let grab = Point::new(track.x + 5.0, track.y + position + 2.0);
+        let mut tree = tree();
+
+        assert_eq!(
+            top_line(view.press_bar::<()>(&mut tree, bounds(), grab)),
+            0,
+            "掴んだだけで飛んだ"
+        );
+        let to = Point::new(grab.x, grab.y + 40.0);
+        let line = top_line(view.drag_bar::<()>(&mut tree, bounds(), mouse::Cursor::Available(to)));
+        let expected = (40.0 / scale) as usize;
+        assert!(
+            line.abs_diff(expected) <= 1,
+            "動いた量が違う: {line} / {expected}"
+        );
     }
 }

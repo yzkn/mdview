@@ -24,7 +24,7 @@ pub use editor::{
     advance_scroll_x, take_whole_lines, Action, CursorMove, EditorState, EditorView, ImeAction,
     RectSelection,
 };
-pub use preview::{PreviewAction, PreviewState, PreviewView};
+pub use preview::{PreviewAction, PreviewState, PreviewView, BASE_SIZE as PREVIEW_BASE_SIZE};
 
 /// アプリ全体のメッセージ（§6.4）。
 ///
@@ -215,6 +215,7 @@ pub enum Message {
     JumpTo(usize),
     /// ウィンドウの幅が変わった（つまみの換算に使う）
     WindowResized(f32),
+
     /// 開くファイルが決まった（取り消しなら `None`）
     PickedOpen(Option<std::path::PathBuf>),
     /// 保存先が決まった。第 2 要素は文字コードの指定（§19.4）
@@ -231,6 +232,114 @@ pub enum Message {
     BlinkCaret,
     /// スクロール計測を 1 フレーム進める（--bench-scroll）
     BenchTick,
+
+    // --- v2.1.0 ---
+    /// 修飾キー付きの打鍵（R-10）。**割り当ての表で引く**
+    KeyChord {
+        chord: crate::app::keymap::Chord,
+        /// 入力欄などに捕まっていないか
+        free: bool,
+    },
+    /// 何もしない（仕事の終わりを受けるだけのもの）
+    Noop,
+    /// 新しい窓を開く（R-09）
+    NewWindow,
+    /// 新しい窓で開くファイルを選ぶ（R-09）
+    OpenInNewWindow,
+    /// 新しい窓で開くファイルが決まった
+    PickedOpenInNewWindow(Option<std::path::PathBuf>),
+    /// 設定画面（R-03）
+    OpenSettings,
+    CloseSettings,
+    SettingsPage(crate::app::SettingsPage),
+    Setting(crate::app::SettingChange),
+    /// 文字コード・改行コードのダイアログ（R-04）
+    OpenEncodingDialog,
+    CloseEncodingDialog,
+    EncodingChoice(crate::app::EncodingChoice),
+    EncodingApply(crate::app::EncodingAction),
+    /// コメントの切替（R-06）
+    ToggleComment {
+        block: bool,
+    },
+    /// 強調・コード・リンク（R-15）
+    Format(crate::app::FormatKind),
+    /// 表（R-16）
+    FormatTable,
+    TableAddRow,
+    TableAddColumn,
+    /// 定義・参照へ（R-07）
+    Seek(crate::app::Seek),
+    /// 閉じ括弧へ（R-07）
+    ClosingBracket,
+    /// 前（`false`）／次（`true`）の見出しへ（R-18）
+    HeadingStep(bool),
+    /// 見出しを絞り込んで飛ぶ（R-18）
+    OpenHeadingPicker,
+    HeadingPickerInput(String),
+    HeadingPickerSubmit,
+    HeadingPickerPick(usize),
+    CloseHeadingPicker,
+    /// 目次の絞り込み（R-18）
+    TocFilter(String),
+    /// キャレットのリンクを開く（R-19）
+    OpenLinkAtCaret,
+    /// プレビューでリンクを押した（ブロック番号と、押した文字）
+    PreviewLink {
+        block: usize,
+        text: String,
+    },
+    /// リンク切れを調べる（R-19）
+    CheckLinks,
+    /// 一覧の 1 件へ飛ぶ（R-07 / R-19）
+    ResultPick(usize),
+    CloseResults,
+    /// 見出しの折りたたみ（R-20）
+    Fold,
+    Unfold,
+    FoldAll,
+    UnfoldAll,
+    /// 常に最前面（R-02）
+    ToggleAlwaysOnTop,
+    /// 窓の位置が変わった（R-05 の「前回終了時」に使う）
+    WindowMoved(iced::Point),
+    /// 窓の大きさが変わった
+    WindowSized(iced::Size),
+    /// 終わる前に聞いた窓の様子（R-05 の「前回終了時」）
+    ExitGeometry {
+        maximized: bool,
+        position: Option<iced::Point>,
+        size: iced::Size,
+    },
+    /// 起動時に窓を置く（R-05）。作業領域の大きさと倍率が分かった
+    PlaceWindow {
+        id: iced::window::Id,
+        monitor: Option<iced::Size>,
+        scale: f32,
+    },
+    /// 最近使ったファイルの一覧を消す（R-12）
+    ClearRecent,
+    /// 外で書き換えられたかを確かめた結果（R-21）
+    ExternalStamp(Option<crate::app::FileStamp>),
+    /// 外の変更を読み直す／無視する（R-21）
+    ReloadExternal,
+    IgnoreExternal,
+    /// クリップボードの画像を読んだ結果（R-17）。無ければ文字として貼る
+    ClipboardImage(Option<std::sync::Arc<crate::app::ClipImage>>),
+    /// 試験用の操作口から 1 行届いた（`--automation`）
+    Automation(String),
+    /// 試験用の操作口が頼んだ画面写真が撮れた
+    AutomationShot {
+        /// 要求の `id`（JSON のまま）
+        id: String,
+        path: String,
+        shot: crate::app::automation::Shot,
+    },
+    /// 試験用の操作口が裏で聞いた結果（JSON のまま）
+    AutomationReply {
+        id: String,
+        result: String,
+    },
 }
 
 /// ファイルに関する操作（メニューの File）。
@@ -264,6 +373,8 @@ pub enum SaveAs {
     With(crate::io::Encoding, bool),
     /// 改行コードを指定する（§19.6）
     Newline(crate::io::LineEnding),
+    /// 文字コード・BOM・改行コードをまとめて指定する（v2.1.0 R-04）
+    Full(crate::io::Encoding, bool, crate::io::LineEnding),
 }
 
 /// 表示モード（§8）。

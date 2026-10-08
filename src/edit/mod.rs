@@ -5,6 +5,10 @@
 
 pub mod datetime;
 pub mod gremlin;
+// Markdown の書き方の補助（v2.1.0 R-06 / R-14 / R-15 / R-16）
+pub mod markdown;
+// 移動の判定（v2.1.0 R-07 / R-18 / R-19）
+pub mod navigate;
 pub mod transform;
 
 /// 対応する括弧を探す（§4.8）。

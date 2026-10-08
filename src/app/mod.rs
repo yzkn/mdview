@@ -43,6 +43,29 @@ mod picker;
 mod toc;
 // 文書の状態とファイル操作の判断（§18.2）
 mod file;
+// v2.1.0
+// キー割り当て（R-10）
+pub mod keymap;
+// 見出しの折りたたみ（R-20）。描画層も段と行の読み替えに使う
+pub(crate) mod fold;
+// 編集の補助（R-06 / R-14 / R-15 / R-16 / R-17）
+mod features;
+// 移動（R-07 / R-18 / R-19 / R-20）
+mod navigation;
+// 窓とファイルの見張り（R-02 / R-05 / R-08 / R-09 / R-21 / R-22）
+mod window;
+// 設定画面（R-03）
+mod settings_view;
+// 文字コード・改行コードのダイアログ（R-04）
+mod encoding_dialog;
+// 試験用の操作口（GUI 自動テスト。`--automation` のときだけ働く）
+pub(crate) mod automation;
+
+pub use crate::edit::navigate::Seek;
+pub use encoding_dialog::{EncodingAction, EncodingChoice};
+pub use features::{ClipImage, FormatKind};
+pub use settings_view::{SettingChange, SettingsPage};
+pub use window::{initial as initial_window, FileStamp};
 
 use crate::render::{
     Action, Divider, EditorState, EditorView, FileCommand, ImeAction, Message, PreviewAction,
@@ -104,6 +127,34 @@ fn search_input_id() -> iced::advanced::widget::Id {
 /// 自前のファイル選択の入力欄。
 fn browser_input_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new("browser-input")
+}
+
+/// 見出しの絞り込みの入力欄（R-18）。
+fn heading_picker_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("heading-picker-input")
+}
+
+/// 目次の絞り込みの入力欄（R-18）。
+fn toc_filter_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("toc-filter-input")
+}
+
+/// 設定で選んだフォント名を、iced が受け取れる形にする（R-11）。
+///
+/// **iced はフォント名を `&'static str` で受ける。** 名前ごとに一度だけ
+/// 留め置き、同じ名前では使い回す（打つたびに漏らさない）
+fn font_named(name: &str) -> iced::Font {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static NAMES: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+    let names = NAMES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut names = names
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let leaked = *names
+        .entry(name.to_owned())
+        .or_insert_with(|| Box::leak(name.to_owned().into_boxed_str()));
+    iced::Font::with_name(leaked)
 }
 
 /// 知らせに出すパスの長さ（文字）。**これを超えたら真ん中を省く**
@@ -188,6 +239,64 @@ pub struct App {
     /// **UI は止まらない**（§10.31）ので、押しっぱなしで 2 つ開けてしまう。
     /// 開いている間はファイル操作の口を閉じる
     picking: bool,
+
+    // --- v2.1.0 ---
+    /// キー割り当て（R-10）
+    keymap: keymap::Keymap,
+    /// 畳んでいる見出し（ブロックの番号。R-20）
+    folded: std::collections::BTreeSet<u64>,
+    /// 隠している行
+    folds: fold::FoldMap,
+    /// 見出しの一覧（折りたたみと開閉の印に使う）
+    fold_headings: Vec<fold::Heading>,
+    /// 設定画面（R-03）
+    settings_screen: Option<settings_view::SettingsScreen>,
+    /// 文字コード・改行コードのダイアログ（R-04）
+    encoding_dialog: Option<encoding_dialog::EncodingDialog>,
+    /// 自前のファイル選択で選んだ文字コード（R-04）。**答えと一緒に使う**
+    browser_choice: Option<BrowserChoice>,
+    /// 見出しの絞り込み（R-18）
+    heading_picker: Option<navigation::HeadingPicker>,
+    /// 目次の絞り込み（R-18）
+    toc_filter: String,
+    /// 参照・リンク切れの一覧（R-07 / R-19）
+    results: Option<navigation::Results>,
+    /// いま最前面か（R-02）
+    on_top: bool,
+    /// 窓の位置と大きさ（R-05 の「前回終了時」に使う）
+    window_position: Option<iced::Point>,
+    window_size: Option<iced::Size>,
+    maximized: bool,
+    /// 外での変更の見張り（R-21）
+    watch: window::Watch,
+    /// 外の変更を読み直している最中か（キャレットを保つ）
+    reloading: bool,
+    /// 最後に編集した時刻（自動保存。R-22）
+    autosave_touched: Option<std::time::Instant>,
+    /// 最後にディスクと揃えたときの設定（v2.1.0）。
+    ///
+    /// **これと比べて変わった項目だけを書く。** 窓は別のプロセスで動くため、
+    /// 丸ごと書くと他の窓の変更を古い値で上書きする
+    settings_baseline: Settings,
+    /// 設定ファイルの印。**他の窓が書いたことに気づくため**に持つ
+    settings_stamp: Option<window::FileStamp>,
+    /// この窓へファイルを落としたか（2 つ目からは別の窓。R-09）
+    dropped_here: bool,
+    /// 試験用の操作口を開いているか（`--automation`）
+    automation: bool,
+    /// この窓が起こした窓のプロセス番号（R-09。試験の口が見分けるため）
+    spawned: Vec<u32>,
+    /// 試験の口のときに、開かずに覚えた外の先（URL・ファイル）
+    external_opens: Vec<String>,
+}
+
+/// 自前のファイル選択で選んだ文字コード（R-04）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BrowserChoice {
+    /// 開くとき（`None` は判定に任せる）
+    open: Option<crate::io::Encoding>,
+    /// 保存するとき
+    save: Option<(crate::io::Encoding, bool, crate::io::LineEnding)>,
 }
 
 /// 動いている出力 1 件。
@@ -288,6 +397,25 @@ fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// `Esc` で `message` を流す購読。
+///
+/// **`listen_with` は捕まえない関数しか取れない**ので、流すものは
+/// 関数ごとに作る（引数の `message` は関数ポインタ）
+fn escape(message: fn() -> Message) -> iced::Subscription<Message> {
+    iced::event::listen_with(|event, _status, _window| {
+        let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { ref key, .. }) = event else {
+            return None;
+        };
+        (key.as_ref() == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape))
+            .then_some(Message::Noop)
+    })
+    .with(message)
+    .map(|(message, noop)| match noop {
+        Message::Noop => message(),
+        other => other,
+    })
+}
+
 /// 割り当て文字つきのラベル（§7.2）。
 ///
 /// **Windows の作法に合わせる。** `ファイル(F)` のように出し、
@@ -366,12 +494,29 @@ fn browser_from(picker: &picker::Picker, meta: &DocumentMeta) -> browser::Browse
             extensions,
             picker.file_name.clone().unwrap_or_default(),
         )
+        // **保存の既定はいまの文書の形**（R-04）
+        .with_format(&meta.format)
     } else {
         browser::Browser::open(start, extensions)
     }
 }
 
 const APP_NAME: &str = "mdview";
+
+/// 移動メニューの注意（R-07: 「字句の目安であることをヘルプに書く」）。
+const ABOUT_SEEK_NOTE: &str =
+    "移動メニューの「定義・型定義・宣言・実装へ移動」と「参照を探す」は、\
+     コードブロックの中では同じ言語のブロックを書き方の目安で探します（言語の意味は解きません）。";
+
+/// 設定ファイルの印（他の窓が書いたかを見る）。
+fn settings_stamp() -> Option<window::FileStamp> {
+    crate::io::settings::settings_path().and_then(|path| window::FileStamp::of(&path))
+}
+
+/// プレビューの倍率（表示倍率 × 設定の文字の大きさ ÷ 基準。R-11）。
+fn preview_factor(settings: &Settings) -> f32 {
+    settings.zoom * settings.preview_font_size / crate::render::PREVIEW_BASE_SIZE
+}
 
 /// メニューの見出し 1 つぶんの幅（px）。
 ///
@@ -381,7 +526,9 @@ const MENU_WIDTH: f32 = 96.0;
 /// メニューバーの高さ（px）。中身を重ねる位置に使う
 const MENU_BAR_HEIGHT: f32 = 36.0;
 /// 開いたメニューの幅（px）
-const MENU_PANEL_WIDTH: f32 = 260.0;
+///
+/// **打鍵の併記（`Shift + Alt + A`）と並んでも 1 行に収まる幅にする**（v2.1.0）
+const MENU_PANEL_WIDTH: f32 = 320.0;
 
 /// この知らせでメニューを閉じるか。
 ///
@@ -402,6 +549,19 @@ fn closes_menu(message: &Message) -> bool {
             | Message::ModifiersChanged(_)
             // 割り当て文字は、選んだ側で閉じるかどうかを決める
             | Message::AccessKey { .. }
+            // 周期的・裏で届くもの（v2.1.0）
+            | Message::WindowMoved(_)
+            | Message::WindowSized(_)
+            | Message::ExternalStamp(_)
+            | Message::ClipboardImage(_)
+            | Message::PlaceWindow { .. }
+            | Message::Noop
+            // 打鍵は割り当てを引いてから決める（何も無ければ閉じない）
+            | Message::KeyChord { .. }
+            // 試験の要求は、要求の中身で決める（メニューの項目を押す前に閉じてはいけない）
+            | Message::Automation(_)
+            | Message::AutomationShot { .. }
+            | Message::AutomationReply { .. }
     )
 }
 
@@ -513,15 +673,24 @@ impl App {
         // **読み込みに失敗しても既定値で起動する**（§13.5）
         let settings = Settings::load();
         // **倍率は設定から来る。** 推定の寸法を先に作っておく（§4.13）
-        let zoom_metrics = Metrics::scaled(settings.zoom);
-        let path = std::env::args().nth(1).filter(|arg| !arg.starts_with("--"));
+        let zoom_metrics = Metrics::scaled(preview_factor(&settings));
+        // **ファイルは何個でも受ける**（R-08）。1 つ目はこの窓、
+        // 2 つ目以降は別の窓で開く（R-09）
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut files = window::files_from_args(&args).into_iter();
+        let path = files.next();
+        let mut spawned = Vec::new();
+        if !cfg!(test) {
+            for extra in files {
+                if let Ok(pid) = window::spawn(Some(&extra)) {
+                    spawned.push(pid);
+                }
+            }
+        }
 
         // **起動時の読み込みは同期で行う。** 窓が出る前なので UI は止まらない。
         // 開けなければ新規文書として起動する（起動しないよりよい）
-        let loaded = path
-            .as_deref()
-            .map(std::path::Path::new)
-            .map(crate::io::load);
+        let loaded = path.as_deref().map(crate::io::load);
 
         let (text, meta, notice) = match loaded {
             Some(Ok(file)) => {
@@ -549,8 +718,10 @@ impl App {
         } else {
             Vec::new()
         };
+        let keymap = keymap::Keymap::new(&settings.keys);
+        let on_top = window::initial(&settings).on_top;
 
-        (
+        let mut app = (
             Self {
                 document,
                 editor: EditorState {
@@ -611,6 +782,29 @@ impl App {
                 open_menu: None,
                 about_open: false,
                 picking: false,
+                keymap,
+                folded: std::collections::BTreeSet::new(),
+                folds: fold::FoldMap::default(),
+                fold_headings: Vec::new(),
+                settings_screen: None,
+                encoding_dialog: None,
+                browser_choice: None,
+                heading_picker: None,
+                toc_filter: String::new(),
+                results: None,
+                on_top,
+                window_position: None,
+                window_size: None,
+                maximized: false,
+                watch: window::Watch::default(),
+                reloading: false,
+                autosave_touched: None,
+                settings_baseline: Settings::default(),
+                settings_stamp: None,
+                dropped_here: false,
+                automation: automation::requested(),
+                spawned: Vec::new(),
+                external_opens: Vec::new(),
                 bench: std::env::args()
                     .any(|arg| arg == "--bench-scroll" || arg == "--bench-edit")
                     .then(|| Bench {
@@ -623,7 +817,28 @@ impl App {
                     }),
             },
             Task::none(),
-        )
+        );
+        app.0.spawned = spawned;
+        app.0.rebuild_folds();
+        app.0.reset_watch();
+        app.0.settings_baseline = app.0.settings.clone();
+        app.0.settings_stamp = settings_stamp();
+        // **試験の道具に「話せる」と知らせる**（1 度だけ）
+        if app.0.automation && !cfg!(test) {
+            automation::emit(&serde_json::json!({
+                "event": "ready",
+                "version": env!("CARGO_PKG_VERSION"),
+            }));
+        }
+        // **窓が出てから左半分・右半分へ寄せる**（R-05）
+        app.1 = app.0.begin_placement();
+        // **起動時の最前面も、窓が出てから当てる**（R-02）。窓を作るときの指定だけでは、
+        // OS から見て最前面にならないことがあった（GUI の要件試験で見つかった）
+        if app.0.on_top {
+            let placement = std::mem::replace(&mut app.1, Task::none());
+            app.1 = Task::batch([placement, app.0.apply_on_top()]);
+        }
+        app
     }
 
     /// 目次を作り直す。
@@ -745,7 +960,7 @@ impl App {
     ///
     /// **OS のダイアログを真似ない。** 真似ると「できるはずのこと」が
     /// 増えて期待を外す。ここは「場所を辿る」「名前を打つ」の 2 つだけ
-    fn browser_view(&self, browser: &browser::Browser) -> Element<'_, Message> {
+    fn browser_view<'a>(&'a self, browser: &'a browser::Browser) -> Element<'a, Message> {
         let title = if browser.save { "保存先" } else { "開く" };
 
         let mut list = column![].spacing(1);
@@ -818,6 +1033,7 @@ impl App {
             container(iced::widget::scrollable(list))
                 .height(Length::Fill)
                 .width(Length::Fill),
+            self.browser_format_row(browser),
             text(if browser.error.is_some() {
                 browser.error.clone().unwrap_or_default()
             } else {
@@ -827,6 +1043,65 @@ impl App {
         ]
         .spacing(8)
         .padding(12)
+        .into()
+    }
+
+    /// 自前のファイル選択の、文字コードの欄（R-04）。
+    ///
+    /// **OS のダイアログには足せないので、こちらにだけ置く**（要件定義書 §0.2）
+    fn browser_format_row<'a>(&self, browser: &'a browser::Browser) -> Element<'a, Message> {
+        use iced::widget::{checkbox, pick_list};
+        if !browser.is_markdown() {
+            return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
+        }
+        if !browser.save {
+            // 「自動判定」を先頭に置く
+            let mut choices = vec!["自動判定".to_owned()];
+            choices.extend(
+                crate::io::Encoding::ALL
+                    .iter()
+                    .map(|e| e.label().to_owned()),
+            );
+            let selected = browser
+                .open_encoding
+                .map_or("自動判定".to_owned(), |e| e.label().to_owned());
+            return row![
+                text("文字コード").size(12),
+                pick_list(choices, Some(selected), |label: String| {
+                    let found = crate::io::Encoding::ALL
+                        .into_iter()
+                        .find(|e| e.label() == label);
+                    Message::EncodingChoice(match found {
+                        Some(encoding) => EncodingChoice::Encoding(encoding),
+                        None => EncodingChoice::Auto,
+                    })
+                })
+                .text_size(12),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into();
+        }
+        let (encoding, bom, ending) = browser.save_format;
+        let mut bom_box = checkbox(bom).label("BOM").text_size(12);
+        if encoding.supports_bom() {
+            bom_box = bom_box.on_toggle(|on| Message::EncodingChoice(EncodingChoice::Bom(on)));
+        }
+        row![
+            text("文字コード").size(12),
+            pick_list(crate::io::Encoding::ALL.to_vec(), Some(encoding), |e| {
+                Message::EncodingChoice(EncodingChoice::Encoding(e))
+            })
+            .text_size(12),
+            bom_box,
+            text("改行").size(12),
+            pick_list(crate::io::LineEnding::ALL.to_vec(), Some(ending), |e| {
+                Message::EncodingChoice(EncodingChoice::LineEnding(e))
+            })
+            .text_size(12),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
         .into()
     }
 
@@ -976,14 +1251,34 @@ impl App {
             return;
         }
         self.settings.zoom = zoom;
-        self.metrics = Metrics::scaled(zoom);
+        self.refresh_metrics();
         self.touch_settings();
+    }
+
+    /// 推定の寸法を、いまの倍率とプレビューの文字の大きさに合わせる（R-11）。
+    fn refresh_metrics(&mut self) {
+        self.metrics = Metrics::scaled(preview_factor(&self.settings));
+    }
+
+    /// エディタの文字の大きさと行の高さ（px。R-11）。**設定 × 表示倍率**
+    fn editor_sizes(&self) -> (f32, f32) {
+        let size = self.settings.editor_font_size * self.settings.zoom;
+        (size, size * self.settings.editor_line_spacing)
+    }
+
+    /// エディタのフォント（R-11）。**空なら同梱のもの**
+    fn editor_font(&self) -> iced::Font {
+        let name = self.settings.editor_font.trim();
+        if name.is_empty() {
+            crate::render::fonts::mono()
+        } else {
+            font_named(name)
+        }
     }
 
     fn menu_context(&self) -> menu::Context<'_> {
         menu::Context {
             mode: self.mode,
-            theme: self.settings.theme,
             toc_visible: self.settings.toc_visible,
             scroll_sync: self.settings.scroll_sync,
             open_submenu: self.open_submenu,
@@ -1002,6 +1297,10 @@ impl App {
             has_path: self.meta.path.is_some(),
             can_undo: self.history.can_undo(),
             can_redo: self.history.can_redo(),
+            keymap: &self.keymap,
+            table_format: self.settings.table_format,
+            on_top: self.on_top,
+            has_folds: !self.folded.is_empty(),
         }
     }
 
@@ -1026,6 +1325,7 @@ impl App {
                     text(APP_NAME).size(18),
                     text(format!("版数 {}", env!("CARGO_PKG_VERSION"))).size(12),
                     text("このアプリ本体は Apache License 2.0 で配布しています。").size(12),
+                    text(ABOUT_SEEK_NOTE).size(12),
                     text("同梱フォントのライセンス").size(14),
                     scrollable(licenses).height(Length::Fixed(280.0)),
                     button(text("閉じる").size(13))
@@ -1207,24 +1507,40 @@ impl App {
                 .into();
         }
 
-        let items = column(self.toc.iter().enumerate().map(|(index, entry)| {
-            // 段の深さぶん右へ寄せる。`#` の数がそのまま見た目になる
-            let indent = f32::from(entry.level.saturating_sub(1)) * 12.0;
-            container(
-                button(text(&entry.title).size(12))
-                    .padding([2, 6])
-                    .width(Length::Fill)
-                    .style(button::text)
-                    .on_press(Message::JumpTo(index)),
-            )
-            .padding(iced::Padding {
-                left: indent,
-                ..iced::Padding::ZERO
-            })
-            .into()
-        }));
+        // **絞り込みの欄を上に置く**（R-18）。見出しの多い文書で探しやすくする
+        let filter = text_input("目次を絞り込む", &self.toc_filter)
+            .id(toc_filter_id())
+            .on_input(Message::TocFilter)
+            .size(12);
 
-        scrollable(items).height(Length::Fill).into()
+        let items = column(
+            self.toc
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| navigation::matches_filter(&entry.title, &self.toc_filter))
+                .map(|(index, entry)| {
+                    // 段の深さぶん右へ寄せる。`#` の数がそのまま見た目になる
+                    let indent = f32::from(entry.level.saturating_sub(1)) * 12.0;
+                    container(
+                        button(text(&entry.title).size(12))
+                            .padding([2, 6])
+                            .width(Length::Fill)
+                            .style(button::text)
+                            .on_press(Message::JumpTo(index)),
+                    )
+                    .padding(iced::Padding {
+                        left: indent,
+                        ..iced::Padding::ZERO
+                    })
+                    .into()
+                }),
+        );
+
+        column![
+            container(filter).padding([4, 6]),
+            scrollable(items).height(Length::Fill)
+        ]
+        .into()
     }
 
     pub fn title(&self) -> String {
@@ -1233,6 +1549,10 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+
+        // **畳んだ中へキャレットが入ったら開く**（R-20）。入口は検索・行へ
+        // ジャンプ・取り消しなどいくつもあるので、出口の 1 か所で見る
+        self.ensure_caret_unfolded();
 
         // **編集で一致の位置はずれる。** 走査し直すまで印は出さない（§10.38）。
         // ここ 1 か所で見るのは、編集の入口が入力・後退・取り消し・置換と
@@ -1266,12 +1586,18 @@ impl App {
             }
             Message::Cut => return self.cut(),
             Message::Copy => return self.copy(),
-            Message::Paste => return iced::clipboard::read().map(Message::Pasted),
+            Message::Paste => {
+                if self.editing_blocked() {
+                    return Task::none();
+                }
+                return self.paste();
+            }
             Message::Pasted(text) => {
                 if let Some(text) = text {
-                    self.insert(&normalize_newlines(&text));
+                    self.paste_text(&normalize_newlines(&text));
                 }
             }
+            Message::ClipboardImage(found) => return self.pasted_image(found),
             Message::ReopenAs(encoding) => return self.reopen_as(encoding),
             Message::SaveWithEncoding(encoding, has_bom) => {
                 return self.save_now(needs_save_as(&self.meta), SaveAs::With(encoding, has_bom))
@@ -1279,7 +1605,8 @@ impl App {
             Message::SaveWithLineEnding(ending) => {
                 return self.save_now(needs_save_as(&self.meta), SaveAs::Newline(ending))
             }
-            Message::OpenRecent(path) | Message::FileDropped(path) => {
+            Message::FileDropped(path) => return self.open_dropped(path),
+            Message::OpenRecent(path) => {
                 // **未保存の確認を通す**（§18.2）。開くと編集中の内容は消える
                 if !self.begin(Pending::OpenPath(path)) {
                     return Task::none();
@@ -1384,6 +1711,11 @@ impl App {
             Message::BlinkCaret => {
                 self.flush_settings();
                 self.flush_draft();
+                // **他の窓が変えた設定を取り込む**（v2.1.0）
+                self.poll_settings();
+                // 外の変更（R-21）と自動保存（R-22）も同じ刻みで見る
+                let watch = self.poll_external();
+                let save = self.flush_autosave();
                 // **届いた図を取り込む。** 取り込むと高さが変わりうるので、
                 // 次の描画でレイアウトし直される（§16.5 の置き換え）
                 if !self.embeds.poll().is_empty() {
@@ -1393,6 +1725,7 @@ impl App {
                 if self.bench.is_none() {
                     self.editor.caret_visible = !self.editor.caret_visible;
                 }
+                return Task::batch([watch, save]);
             }
             Message::BenchTick => return self.bench_tick(),
             Message::Editor(action) => {
@@ -1407,6 +1740,10 @@ impl App {
                     return Task::batch([task, self.focus_editor()]);
                 }
                 return task;
+            }
+            // プレビューのリンク（R-19）
+            Message::Preview(PreviewAction::LinkClicked { block, text }) => {
+                return self.preview_link(block, &text)
             }
             Message::Preview(action) => self.apply_preview(action),
             Message::SetMode(mode) => {
@@ -1571,15 +1908,29 @@ impl App {
             }
             Message::JumpTo(index) => self.jump_to(index),
             Message::WindowResized(width) => self.window_width = width,
+            Message::WindowSized(size) => {
+                self.window_width = size.width;
+                self.window_size = Some(size);
+            }
+            Message::WindowMoved(position) => self.window_position = Some(position),
             Message::PickedOpen(path) => {
                 self.picking = false;
+                let choice = self.browser_choice.take();
                 let Some(path) = path else {
                     return Task::none();
                 };
-                return self.load_path(path);
+                // **自前の選択で文字コードを選んでいたら、それで読む**（R-04）
+                let forced = choice.and_then(|choice| choice.open);
+                return self.load_path_as(path, forced);
             }
             Message::PickedSave(path, how) => {
                 self.picking = false;
+                let how = match self.browser_choice.take().and_then(|choice| choice.save) {
+                    Some((encoding, bom, ending)) if how == SaveAs::Keep => {
+                        SaveAs::Full(encoding, bom, ending)
+                    }
+                    _ => how,
+                };
                 return self.finish_pick_save(path, how);
             }
             Message::PickedExport(path, format) => {
@@ -1650,8 +2001,202 @@ impl App {
             }
             Message::DismissNotice => self.notice = None,
             Message::OpenNoticeLink => self.open_notice_link(),
+            Message::Noop => {}
+            Message::Automation(line) => return self.automation(&line),
+            Message::AutomationShot { id, path, shot } => self.automation_shot(&id, &path, shot),
+            Message::AutomationReply { id, result } => self.automation_reply(&id, &result),
+
+            // --- v2.1.0 ---
+            Message::KeyChord { chord, free } => return self.key_chord(chord, free),
+            Message::NewWindow => self.spawn_window(None),
+            Message::OpenInNewWindow => {
+                if !self.picking {
+                    return self
+                        .ask(picker::Picker::open())
+                        .map(Message::PickedOpenInNewWindow);
+                }
+            }
+            Message::PickedOpenInNewWindow(path) => {
+                self.picking = false;
+                self.browser_choice = None;
+                if let Some(path) = path {
+                    self.spawn_window(Some(&path));
+                }
+            }
+            Message::OpenSettings => {
+                self.open_settings();
+                // 「いまの窓を使う」のために、位置と大きさを聞いておく
+                return self.query_geometry();
+            }
+            Message::CloseSettings => self.settings_screen = None,
+            Message::SettingsPage(page) => {
+                if let Some(screen) = self.settings_screen.as_mut() {
+                    screen.page = page;
+                    screen.capturing = None;
+                }
+            }
+            Message::Setting(change) => return self.apply_setting(change),
+            Message::OpenEncodingDialog => self.open_encoding_dialog(),
+            Message::CloseEncodingDialog => self.encoding_dialog = None,
+            Message::EncodingChoice(choice) => {
+                if let Some(dialog) = self.encoding_dialog.as_mut() {
+                    dialog.apply(choice);
+                } else if let Some(browser) = self.browser.as_mut() {
+                    browser.choose(choice);
+                }
+            }
+            Message::EncodingApply(action) => return self.apply_encoding_action(action),
+            Message::ToggleComment { block } => {
+                if !self.editing_blocked() {
+                    self.toggle_comment(block);
+                }
+            }
+            Message::Format(kind) => {
+                if !self.editing_blocked() {
+                    self.format(kind);
+                }
+            }
+            Message::FormatTable => self.table_edit(features::TableOp::Format),
+            Message::TableAddRow => self.table_edit(features::TableOp::AddRow),
+            Message::TableAddColumn => self.table_edit(features::TableOp::AddColumn),
+            Message::Seek(seek) => return self.seek(seek),
+            Message::ClosingBracket => self.closing_bracket(),
+            Message::HeadingStep(forward) => self.heading_step(forward),
+            Message::OpenHeadingPicker => {
+                self.heading_picker = Some(navigation::HeadingPicker::default());
+                self.search_focused = true;
+                return iced::advanced::widget::operate(
+                    iced::advanced::widget::operation::focusable::focus(heading_picker_id()),
+                );
+            }
+            Message::HeadingPickerInput(query) => {
+                if let Some(picker) = self.heading_picker.as_mut() {
+                    picker.query = query;
+                }
+            }
+            Message::HeadingPickerSubmit => {
+                self.submit_heading_picker();
+                if self.heading_picker.is_none() {
+                    self.search_focused = false;
+                    return self.focus_editor_now();
+                }
+            }
+            Message::HeadingPickerPick(index) => {
+                self.pick_heading(index);
+                self.search_focused = false;
+                return self.focus_editor_now();
+            }
+            Message::CloseHeadingPicker => {
+                self.heading_picker = None;
+                self.search_focused = false;
+                return self.focus_editor_now();
+            }
+            Message::TocFilter(filter) => self.toc_filter = filter,
+            Message::OpenLinkAtCaret => {
+                return self.open_link_at(self.editor.cursor_line, self.editor.cursor_column)
+            }
+            Message::PreviewLink { block, text } => return self.preview_link(block, &text),
+            Message::CheckLinks => self.check_links(),
+            Message::ResultPick(index) => self.pick_result(index),
+            Message::CloseResults => self.results = None,
+            Message::Fold => self.fold_here(),
+            Message::Unfold => self.unfold_here(),
+            Message::FoldAll => self.fold_all(),
+            Message::UnfoldAll => self.unfold_all(),
+            Message::ToggleAlwaysOnTop => return self.toggle_on_top(),
+            Message::ExitGeometry {
+                maximized,
+                position,
+                size,
+            } => {
+                self.maximized = maximized;
+                if position.is_some() {
+                    self.window_position = position;
+                }
+                self.window_size = Some(size);
+                return self.exit_now();
+            }
+            Message::PlaceWindow { id, monitor, scale } => {
+                return self.place_window(id, monitor, scale)
+            }
+            Message::ClearRecent => {
+                self.settings.recent.clear();
+                self.open_submenu = None;
+                self.touch_settings_now();
+            }
+            Message::ExternalStamp(stamp) => return self.external_checked(stamp),
+            Message::ReloadExternal => {
+                // **編集中の内容は捨てる。** 帯の文言で断っている
+                self.meta.dirty = false;
+                return self.reload_external();
+            }
+            Message::IgnoreExternal => self.ignore_external(),
         }
         Task::none()
+    }
+
+    /// 本文を書き換える操作を止めるか。
+    ///
+    /// **入力欄に焦点があるとき・ダイアログを出しているときは止める。**
+    /// 検索欄で `Ctrl + B` を押して本文が太字になってはいけない
+    fn editing_blocked(&self) -> bool {
+        self.search_focused
+            || self.goto.is_some()
+            || self.heading_picker.is_some()
+            || self.settings_screen.is_some()
+            || self.encoding_dialog.is_some()
+            || self.browser.is_some()
+            || self.confirming
+            || self.draft.is_some()
+            || self.export_dialog.is_some()
+            || self.about_open
+    }
+
+    /// 修飾キー付きの打鍵（R-10）。
+    ///
+    /// **割り当ての表で引く。** 何も割り当たっていない `Alt` + 文字は、
+    /// メニューの割り当て文字として扱う（§7.2）
+    fn key_chord(&mut self, chord: keymap::Chord, free: bool) -> Task<Message> {
+        // 設定画面で打鍵を待っているなら、それを割り当てる
+        if self
+            .settings_screen
+            .as_ref()
+            .is_some_and(|screen| screen.capturing.is_some())
+        {
+            self.capture_key(chord);
+            return Task::none();
+        }
+        if let Some(command) = self.keymap.lookup(&chord) {
+            // **入力欄が受け取ったものは横取りしない**（§10.40）。
+            // ファイルと表示の操作だけは、どこに焦点があっても効く
+            if !free && !command.works_in_inputs() {
+                return Task::none();
+            }
+            if !command.works_in_inputs() && self.editing_blocked() {
+                return Task::none();
+            }
+            // 表の整形を切っていたら、打鍵も効かせない（R-16）
+            if command == keymap::Command::FormatTable && !self.settings.table_format {
+                return Task::none();
+            }
+            self.open_menu = None;
+            return self.update(command.message());
+        }
+        if chord.alt && !chord.ctrl {
+            if let keymap::ChordKey::Char(key) = chord.key {
+                return self.update(Message::AccessKey { key, alt: true });
+            }
+        }
+        Task::none()
+    }
+
+    /// 終わる（設定を書いてから）。
+    fn exit_now(&mut self) -> Task<Message> {
+        self.remember_window();
+        // **終了前に設定を書く。** デバウンスの途中で終わると消える
+        self.settings_touched = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        self.flush_settings();
+        iced::exit()
     }
 
     /// エディタからの通知を当てる。
@@ -1667,7 +2212,23 @@ impl App {
                 if select && self.editor.anchor.is_none() {
                     self.editor.anchor = Some(self.caret_byte());
                 }
+                let from = self.editor.cursor_line;
                 cursor::move_cursor(&self.document, &mut self.editor, movement);
+                // **畳んだ行は飛ばす**（R-20）。下へなら次の見える行、
+                // 上へなら畳んだ見出しの行へ
+                if self.folds.is_hidden(self.editor.cursor_line) {
+                    let line = if self.editor.cursor_line >= from {
+                        self.folds.visible_at_or_after(self.editor.cursor_line)
+                    } else {
+                        self.folds.visible_at_or_before(self.editor.cursor_line)
+                    };
+                    let line = line.min(self.document.text().len_lines().saturating_sub(1));
+                    let column = self.editor.cursor_column;
+                    self.editor.extend_caret(line, column);
+                    let byte = self.document.byte_at(line, column);
+                    let (line, column) = self.document.position_at(byte);
+                    self.editor.extend_caret(line, column);
+                }
                 if !select {
                     self.editor.anchor = None;
                 }
@@ -1718,8 +2279,11 @@ impl App {
                     // 念のため行数でも抑える
                     let total = self.document.text().len_lines();
                     let ceiling = max_top_line.min(total.saturating_sub(1));
-                    let to = (self.editor.top_line as i64 + step).clamp(0, ceiling as i64) as usize;
-                    self.set_top_line(to);
+                    // **段で動かす**（R-20）。畳んだ行はホイールの量に数えない
+                    let top = self.folds.row_of(self.editor.top_line) as i64;
+                    let ceiling = self.folds.row_of(ceiling) as i64;
+                    let row = (top + step).clamp(0, ceiling.max(0)) as usize;
+                    self.set_top_line(self.folds.line_of(row));
                 }
             }
             // **上限は描画層が測って添えてくる**（字幅を知るのはあちらだけ）
@@ -1731,9 +2295,19 @@ impl App {
             // どちらも同期の対象（§10.59）
             Action::ScrollTo { top_line } => self.set_top_line(top_line),
             Action::ScrollXTo { to } => self.editor.scroll_x = to.max(0.0),
-            Action::Insert(text) => self.insert(&text),
+            // **改行はリストを続けるかを先に見る**（R-14）
+            Action::Insert(text) => {
+                if text != "\n" || !self.continue_list() {
+                    self.insert(&text);
+                }
+            }
             Action::Backspace => self.backspace(),
             Action::Ime(ime) => self.apply_ime(ime),
+            Action::ToggleFold { line } => self.toggle_fold_at(line),
+            Action::OpenLinkAt { line, column } => {
+                self.editor.place_caret(line, column);
+                return self.open_link_at(line, column);
+            }
         }
         Task::none()
     }
@@ -1741,6 +2315,8 @@ impl App {
     /// プレビューからの通知（§3.7）。
     fn apply_preview(&mut self, action: PreviewAction) {
         match action {
+            // `handle` が先に受ける（開くには仕事を返す必要がある）
+            PreviewAction::LinkClicked { .. } => {}
             PreviewAction::Scrolled(delta) => {
                 // ここでだけアンカーを作り直す
                 let viewport = 600.0;
@@ -2282,8 +2858,14 @@ impl App {
         }
         self.meta.dirty = true;
         self.rebuild_toc();
+        // 見出しが動いたかもしれない（R-20）
+        self.rebuild_folds();
         // **編集の入口はここ 1 つ。** 控えるのもここでまとめる（§18.3）
         self.remember_draft();
+        // 止まってから自動保存する（R-22）
+        if self.settings.autosave {
+            self.autosave_touched = Some(std::time::Instant::now());
+        }
         // **図と数式は打鍵のたびに描き直さない**（§16.12）。
         // 本文の再レイアウトは待たせない——待たせるのは図だけである
         self.embeds.touch();
@@ -2796,11 +3378,26 @@ impl App {
                 // **正常に終わるので控えは要らない**（§18.3）。
                 // 残すと、次に開いたときに身に覚えのない復元を聞かれる
                 crate::io::recover::forget();
-                // **終了前に設定を書く。** デバウンスの途中で終わると消える
-                self.settings_touched =
-                    Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
-                self.flush_settings();
-                iced::exit()
+                // **窓の様子を聞いてから終わる**（R-05 の「前回終了時」）。
+                // 動かしていなければ位置の知らせは来ていないので、ここで聞く。
+                // 聞けなくても終わる
+                let size = self.window_size.unwrap_or(iced::Size::new(1200.0, 800.0));
+                iced::window::latest().then(move |id| match id {
+                    Some(id) => iced::window::is_maximized(id).then(move |maximized| {
+                        iced::window::position(id).then(move |position| {
+                            iced::window::size(id).map(move |size| Message::ExitGeometry {
+                                maximized,
+                                position,
+                                size,
+                            })
+                        })
+                    }),
+                    None => Task::done(Message::ExitGeometry {
+                        maximized: false,
+                        position: None,
+                        size,
+                    }),
+                })
             }
         }
     }
@@ -2848,9 +3445,28 @@ impl App {
                 self.settings.remember(&file.path);
                 self.touch_settings();
                 let meta = DocumentMeta::opened(file.path.clone(), file.format.clone());
+                // **外の変更を読み直したときは、居た場所に留まる**（R-21）
+                let keep = std::mem::take(&mut self.reloading).then_some((
+                    self.editor.top_line,
+                    self.editor.cursor_line,
+                    self.editor.cursor_column,
+                ));
                 self.replace_document(file.text.clone(), meta);
+                if let Some((top, line, column)) = keep {
+                    let last = self.document.text().len_lines().saturating_sub(1);
+                    self.editor.top_line = top.min(last);
+                    let byte = self.document.byte_at(line.min(last), column);
+                    let (line, column) = self.document.position_at(byte);
+                    self.editor.place_caret(line, column);
+                    self.notice = Some(notice::Notice::plain(
+                        "他のアプリで書き換えられたので、読み直しました".to_owned(),
+                    ));
+                }
             }
-            Err(reason) => self.notice = Some(notice::Notice::plain(reason)),
+            Err(reason) => {
+                self.reloading = false;
+                self.notice = Some(notice::Notice::plain(reason));
+            }
         }
     }
 
@@ -2869,6 +3485,12 @@ impl App {
         // **別の文書の取り消しは当たらない**（§4.7）
         self.history.clear();
         self.rebuild_toc();
+        // 畳んだ状態と一覧は持ち越さない（R-19 / R-20）
+        self.folded.clear();
+        self.rebuild_folds();
+        self.results = None;
+        self.reset_watch();
+        self.autosave_touched = None;
     }
 
     /// 保存する。`ask` なら保存先を聞く。
@@ -2914,6 +3536,12 @@ impl App {
                 format.has_bom = has_bom && encoding.supports_bom();
             }
             SaveAs::Newline(ending) => format.line_ending = ending,
+            // 文字コード・BOM・改行をまとめて（R-04）
+            SaveAs::Full(encoding, has_bom, ending) => {
+                format.encoding = encoding;
+                format.has_bom = has_bom && encoding.supports_bom();
+                format.line_ending = ending;
+            }
         }
 
         // **成功を先に反映しない。** 書けたことを確かめてから未保存を下ろす
@@ -2928,6 +3556,9 @@ impl App {
                 // **保存できたので控えは要らない**（§18.3）
                 crate::io::recover::forget();
                 self.notice = None;
+                // **自分で書いたものを外の変更と取り違えない**（R-21）
+                self.reset_watch();
+                self.autosave_touched = None;
             }
             Err(error) => self.notice = Some(notice::Notice::plain(format!("{error}"))),
         }
@@ -2954,12 +3585,16 @@ impl App {
     /// メッセージで戻ってくる（同期では受け取れない）
     fn ask(&mut self, picker: picker::Picker) -> Task<Option<std::path::PathBuf>> {
         self.picking = true;
+        // 前の選択で選んだ文字コードを持ち越さない（R-04）
+        self.browser_choice = None;
 
         // **OS のダイアログが出せないなら自前のものを出す**（§14.1）。
         // Linux は portal（D-Bus）越しにしか出せず、WSL の既定には
         // セッションバスが無い。呼んでも `None` が返るだけで、
         // 利用者からは「押しても何も起きない」ように見える
-        if !browser::os_dialog_available() {
+        //
+        // **試験のときも自前のものを出す。** OS のダイアログは試験の口から操作できない
+        if !browser::os_dialog_available() || self.automation {
             return self.ask_in_app(browser_from(&picker, &self.meta));
         }
 
@@ -2995,6 +3630,15 @@ impl App {
     /// **必ず返す。** 返さないと、呼び出し側の仕事が終わらず
     /// `picking` が立ったままになる（ファイル操作が押せなくなる）
     fn answer_browser(&mut self, path: Option<std::path::PathBuf>) {
+        // **選んだ文字コードを答えと一緒に渡す**（R-04）。
+        // Markdown を開く・保存するときだけ（出力の保存先では関係しない）
+        self.browser_choice = match (&self.browser, &path) {
+            (Some(browser), Some(_)) if browser.is_markdown() => Some(BrowserChoice {
+                open: (!browser.save).then_some(browser.open_encoding).flatten(),
+                save: browser.save.then_some(browser.save_format),
+            }),
+            _ => None,
+        };
         self.browser = None;
         self.picking = false;
         if let Some(sender) = self.browser_reply.take() {
@@ -3139,7 +3783,7 @@ impl App {
             return;
         };
         // **開けなかったことも知らせる。** 黙って何も起きないのが一番困る
-        if let Err(error) = crate::io::launch::open(&path) {
+        if let Err(error) = self.launch_external(&path.display().to_string()) {
             self.notice = Some(notice::Notice::plain(format!(
                 "{} を開けません: {error}",
                 path.display()
@@ -3155,6 +3799,59 @@ impl App {
         self.settings_touched = Some(std::time::Instant::now());
     }
 
+    /// 設定が変わった。**次の刻みで書く**（設定画面の変更。v2.1.0）。
+    ///
+    /// 設定画面で変えたものは、他の窓へすぐに届けたい。
+    /// デバウンスは、倍率や幅のように**続けて変わるもの**のためにある
+    fn touch_settings_now(&mut self) {
+        self.settings_touched = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        self.flush_settings();
+    }
+
+    /// 他の窓が設定ファイルを書いていたら、取り込む（v2.1.0）。
+    ///
+    /// **この窓でまだ書いていない変更は残す**（`merge_changes`）。
+    /// 窓ごとの項目（表示モード・目次・倍率など）は取り込まない
+    fn poll_settings(&mut self) {
+        if cfg!(test) || self.settings_touched.is_some() {
+            return;
+        }
+        let stamp = settings_stamp();
+        if stamp == self.settings_stamp {
+            return;
+        }
+        self.settings_stamp = stamp;
+        let disk = Settings::load();
+        let mut merged = Settings::merge_changes(&disk, &self.settings_baseline, &self.settings);
+        merged.keep_window_local(&self.settings);
+        self.settings_baseline = merged.clone();
+        self.adopt_settings(merged);
+    }
+
+    /// 新しい設定を使い始める。**効き目のあるものを作り直す**
+    fn adopt_settings(&mut self, settings: Settings) {
+        let previous = std::mem::replace(&mut self.settings, settings);
+        if previous.keys != self.settings.keys {
+            self.keymap = keymap::Keymap::new(&self.settings.keys);
+        }
+        if previous.preview_font_size != self.settings.preview_font_size {
+            self.refresh_metrics();
+        }
+        if previous.watch_external != self.settings.watch_external {
+            self.reset_watch();
+        }
+        if previous.toc_visible != self.settings.toc_visible {
+            self.rebuild_toc();
+        }
+        // **打ちかけの欄は、値が外から変わったときだけ作り直す。**
+        // いつも作り直すと、欄を空にして打ち直すことができない
+        let outside = previous.window_custom != self.settings.window_custom
+            || previous.autosave_seconds != self.settings.autosave_seconds;
+        if let Some(screen) = self.settings_screen.as_mut().filter(|_| outside) {
+            screen.refresh(&self.settings);
+        }
+    }
+
     /// 溜まった設定の変更を書く。**変更から 1 秒**（§13.5）。
     fn flush_settings(&mut self) {
         let Some(touched) = self.settings_touched else {
@@ -3164,26 +3861,46 @@ impl App {
             return;
         }
         self.settings_touched = None;
+        // 試験では利用者の設定ファイルを触らない
+        if cfg!(test) {
+            self.settings_baseline = self.settings.clone();
+            return;
+        }
+        // **この窓で変えた項目だけを、ディスク上のものへ重ねて書く**（v2.1.0）。
+        // 他の窓の変更を古い値で上書きしない。窓ごとの項目はこの窓の値を保つ
+        let disk = Settings::load();
+        let mut merged = Settings::merge_changes(&disk, &self.settings_baseline, &self.settings);
         // **書けなくても動き続ける。** 設定は保存できなくても致命ではない
-        if let Err(reason) = self.settings.save() {
+        if let Err(reason) = merged.save() {
             self.notice = Some(notice::Notice::plain(format!(
                 "設定を保存できません: {reason}"
             )));
         }
+        self.settings_stamp = settings_stamp();
+        merged.keep_window_local(&self.settings);
+        self.settings_baseline = merged.clone();
+        self.adopt_settings(merged);
     }
 
     /// いま使う外観（§10.4）。
     pub fn theme(&self) -> iced::Theme {
-        match self.settings.theme {
+        let system = || {
+            if self.system_dark {
+                iced::Theme::Dark
+            } else {
+                iced::Theme::Light
+            }
+        };
+        match &self.settings.theme {
             ThemePreference::Light => iced::Theme::Light,
             ThemePreference::Dark => iced::Theme::Dark,
-            ThemePreference::System => {
-                if self.system_dark {
-                    iced::Theme::Dark
-                } else {
-                    iced::Theme::Light
-                }
-            }
+            ThemePreference::System => system(),
+            // **知らない名前なら OS に合わせる**（iced が配色を減らしたとき）
+            ThemePreference::Named(name) => iced::Theme::ALL
+                .iter()
+                .find(|theme| theme.to_string() == *name)
+                .cloned()
+                .unwrap_or_else(system),
         }
     }
 
@@ -3290,8 +4007,14 @@ impl App {
         iced::Subscription::batch([
             iced::time::every(std::time::Duration::from_millis(500)).map(|_| Message::BlinkCaret),
             iced::window::close_requests().map(|_| Message::CloseRequested),
-            // **`Alt` + 文字で見出しを開く**（§7.2）
-            iced::event::listen_with(|event, _status, _window| {
+            // **修飾キー付きの打鍵は、割り当ての表で引く**（R-10）。
+            // `Alt` + 文字（メニューの割り当て文字。§7.2）も、表に無ければ
+            // こちらから割り当て文字として流す。
+            //
+            // **捕まった出来事も見る。** 焦点のある入力欄は打鍵を捕まえるため、
+            // 捕まっていないものだけを見ると `Ctrl + S` が検索欄で効かない。
+            // 捕まったかどうかは `free` で運び、本文を書き換える操作は止める
+            iced::event::listen_with(|event, status, _window| {
                 let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     ref key,
                     modifiers,
@@ -3300,16 +4023,11 @@ impl App {
                 else {
                     return None;
                 };
-                if !modifiers.alt() || modifiers.command() {
-                    return None;
-                }
-                let iced::keyboard::Key::Character(typed) = key.as_ref() else {
-                    return None;
-                };
-                typed
-                    .chars()
-                    .next()
-                    .map(|key| Message::AccessKey { key, alt: true })
+                let chord = keymap::Chord::from_event(key, modifiers)?;
+                chord.is_shortcut_candidate().then_some(Message::KeyChord {
+                    chord,
+                    free: status == iced::event::Status::Ignored,
+                })
             }),
             // **開いている間は、文字だけで中身を選べる**（§7.2）
             if self.open_menu.is_some() {
@@ -3353,58 +4071,14 @@ impl App {
                 };
                 Some(Message::FileDropped(path))
             }),
-            // つまみは px でしか動かないため、比率へ直すのに窓幅が要る
-            iced::window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
-            // `Ctrl + F` で検索（§8.1 のキー割り当て）。
-            //
-            // **捕まった出来事も見る。** 焦点のある入力欄は `Esc` を捕まえるため、
-            // 捕まっていないものだけを見る購読では検索バーを閉じられない
-            iced::event::listen_with(|event, status, _window| {
-                let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                    ref key,
-                    modifiers,
-                    ..
-                }) = event
-                else {
+            // つまみは px でしか動かないため、比率へ直すのに窓幅が要る。
+            // 大きさは「前回終了時」にも使う（R-05）
+            iced::window::resize_events().map(|(_, size)| Message::WindowSized(size)),
+            iced::event::listen_with(|event, _status, _window| {
+                let iced::Event::Window(iced::window::Event::Moved(position)) = event else {
                     return None;
                 };
-                if !modifiers.command() {
-                    return None;
-                }
-                // **入力欄が受け取ったものは横取りしない。** 検索欄で
-                // `Ctrl + V` を押したときに、本文にも貼り付いてしまう
-                let free = status == iced::event::Status::Ignored;
-                // **打鍵は入力文字で判定する**（§7.2）。物理キーの位置で
-                // 指定すると、JIS 配列で打てない組み合わせが出る
-                let iced::keyboard::Key::Character(typed) = key.as_ref() else {
-                    return None;
-                };
-                match typed {
-                    "f" => Some(Message::OpenSearch),
-                    "n" => Some(Message::File(FileCommand::New)),
-                    "o" => Some(Message::File(FileCommand::Open)),
-                    // `Ctrl + Shift + S` は名前を付けて保存
-                    "s" if modifiers.shift() => Some(Message::File(FileCommand::SaveAs)),
-                    "s" => Some(Message::File(FileCommand::Save)),
-                    "x" if free => Some(Message::Cut),
-                    "c" if free => Some(Message::Copy),
-                    "v" if free => Some(Message::Paste),
-                    // `Ctrl + Shift + Z` も「やり直し」として通す（§8.1）
-                    "z" if free && modifiers.shift() => Some(Message::Redo),
-                    "z" if free => Some(Message::Undo),
-                    "y" if free => Some(Message::Redo),
-                    "a" if free => Some(Message::SelectAll),
-                    "g" if free => Some(Message::OpenGoto),
-                    "d" if free => Some(Message::DuplicateLine),
-                    "l" if free => Some(Message::DeleteLine),
-                    "j" if free => Some(Message::JoinLines),
-                    "]" if free => Some(Message::MatchBracket),
-                    // **JIS 配列では `+` に Shift が要る。** `;` でも通す（§4.13）
-                    "+" | "=" | ";" => Some(Message::ZoomIn),
-                    "-" => Some(Message::ZoomOut),
-                    "0" => Some(Message::ZoomReset),
-                    _ => None,
-                }
+                Some(Message::WindowMoved(position))
             }),
             // **自前のファイル選択を打鍵で操る**（§14.1）。
             // 入力欄が焦点を持っていても、↑↓ は受け取らないので横取りできる
@@ -3477,6 +4151,28 @@ impl App {
             } else {
                 iced::Subscription::none()
             },
+            // 試験用の操作口（`--automation` のときだけ標準入力を読む）
+            if self.automation {
+                iced::Subscription::run(automation::requests)
+            } else {
+                iced::Subscription::none()
+            },
+            // **v2.1.0 の画面も `Esc` で閉じる**（設定画面・ダイアログ・絞り込み）
+            if self
+                .settings_screen
+                .as_ref()
+                .is_some_and(|screen| screen.capturing.is_some())
+            {
+                escape(|| Message::Setting(SettingChange::CancelCapture))
+            } else if self.settings_screen.is_some() {
+                escape(|| Message::CloseSettings)
+            } else if self.encoding_dialog.is_some() {
+                escape(|| Message::CloseEncodingDialog)
+            } else if self.heading_picker.is_some() {
+                escape(|| Message::CloseHeadingPicker)
+            } else {
+                iced::Subscription::none()
+            },
             // **検索バーを出している間だけ効かせる。** 常時だと本文の Enter を奪う
             if self.search.open {
                 // **Enter をどちらへ届けるかは受け取ってから決める**（§10.40）。
@@ -3519,13 +4215,23 @@ impl App {
             bench.frames.set(bench.frames.get() + 1);
         }
 
+        // **文字の大きさと行間は設定から**（R-11）。表示倍率を掛け合わせる
+        let (editor_size, editor_line) = self.editor_sizes();
         let mut editor = EditorView::new(&self.document, &self.editor, Message::Editor)
-            .zoom(self.settings.zoom)
+            .font(self.editor_font())
+            .sizes(editor_size, editor_line)
+            .folding(&self.folds, &self.fold_headings)
+            .minimap(self.settings.minimap.then_some(self.settings.minimap_width))
             .highlight(&self.search.matches, self.search.current_match())
             // **検索バーへ入力している間だけ本文へ入れない**（§10.40）。
             // 開いているだけなら打てる——探した場所を見ながら直せるように
             // メニューを開いている間は本文へ入れない（割り当て文字が入ってしまう）
-            .accept_keys(!self.search_focused && self.goto.is_none() && self.open_menu.is_none())
+            .accept_keys(
+                !self.search_focused
+                    && self.goto.is_none()
+                    && self.open_menu.is_none()
+                    && self.heading_picker.is_none(),
+            )
             .display(
                 self.tab_width(),
                 self.settings.show_invisibles,
@@ -3539,7 +4245,7 @@ impl App {
         let editor = container(editor).width(Length::Fill).height(Length::Fill);
         let preview = container(
             PreviewView::new(&self.document, &self.preview, Message::Preview)
-                .zoom(self.settings.zoom)
+                .zoom(preview_factor(&self.settings))
                 .embeds(&self.embeds)
                 .base_dir(self.meta.base_dir())
                 .highlight(if self.search.open {
@@ -3571,7 +4277,10 @@ impl App {
 
         // **確認中は本文を覆う**（§18.2 / SCR-004）。
         // 答えるまで編集させないことで、状態の食い違いを防ぐ
-        let main: Element<'_, Message> = if self.about_open {
+        let main: Element<'_, Message> = if let Some(screen) = &self.settings_screen {
+            // **設定画面は本文を覆う**（R-03）。About と同じ扱い
+            self.settings_view(screen)
+        } else if self.about_open {
             self.about_view()
         } else if let Some(browser) = &self.browser {
             // **答えるまで本文を触らせない**（確認ダイアログと同じ扱い）
@@ -3581,6 +4290,8 @@ impl App {
             self.draft_view(draft)
         } else if self.confirming {
             self.confirm_view()
+        } else if let Some(dialog) = &self.encoding_dialog {
+            self.encoding_dialog_view(dialog)
         } else if let Some(dialog) = &self.export_dialog {
             // **答えるまで本文を触らせない**（確認ダイアログと同じ扱い）
             self.export_dialog_view(dialog)
@@ -3597,7 +4308,17 @@ impl App {
             main
         };
 
-        let status = text(self.status().line_text()).size(12);
+        // **文字コードの表示は押せる**（R-04）。押すとダイアログが開く
+        let (head, encoding, tail) = self.status().parts();
+        let status = row![
+            text(head).size(12),
+            button(text(encoding).size(12))
+                .padding([0, 2])
+                .style(button::text)
+                .on_press(Message::OpenEncodingDialog),
+            text(tail).size(12),
+        ]
+        .align_y(iced::Alignment::Center);
 
         let mut body = column![container(self.chrome()).padding(6)];
 
@@ -3607,6 +4328,34 @@ impl App {
         }
         if let Some(input) = &self.goto {
             body = body.push(container(self.goto_view(input)).padding([0, 6]));
+        }
+        if let Some(picker) = &self.heading_picker {
+            body = body.push(container(self.heading_picker_view(picker)).padding([0, 6]));
+        }
+
+        // **外で書き換えられたことを帯で知らせる**（R-21）
+        if self.watch.changed {
+            let warning = if self.meta.dirty {
+                "このファイルは他のアプリで書き換えられました。読み直すと、編集中の内容は失われます。"
+            } else {
+                "このファイルは他のアプリで書き換えられました。"
+            };
+            body = body.push(
+                container(
+                    row![
+                        text(warning).size(12),
+                        button(text("読み直す").size(11))
+                            .padding([2, 8])
+                            .on_press(Message::ReloadExternal),
+                        button(text("無視する").size(11))
+                            .padding([2, 8])
+                            .on_press(Message::IgnoreExternal),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding(6),
+            );
         }
 
         // 出力の進み具合（§17.10）。**取り消せる**
@@ -3654,7 +4403,14 @@ impl App {
             );
         }
 
-        let body = body.push(main).push(container(status).padding(6));
+        let mut body = body.push(main);
+        // 参照・リンク切れの一覧（R-07 / R-19）。**本文の下に出す**
+        if let Some(results) = &self.results {
+            if self.settings_screen.is_none() {
+                body = body.push(container(self.results_view(results)).padding([0, 6]));
+            }
+        }
+        let body = body.push(container(status).padding(6));
 
         // **開いたメニューは本文の上に重ねる。** 押し下げると画面が跳ねる
         match self.open_menu {
@@ -3878,6 +4634,30 @@ mod browser_wiring_tests {
     /// （実際に踏んだ。2026-10-06）
     fn app() -> App {
         App::new().0
+    }
+
+    /// 修飾キーの無い打鍵は割り当てず、待ち続ける（R-10）。
+    #[test]
+    fn a_plain_key_is_not_captured() {
+        let mut app = app();
+        app.open_settings();
+        let _ = app.update(Message::Setting(SettingChange::CaptureKey(
+            keymap::Command::Bold,
+        )));
+        let plain = keymap::Chord::parse("A").expect("読める");
+        assert!(!app.capture_key(plain), "修飾キー無しを受けた");
+        assert!(
+            app.settings_screen
+                .as_ref()
+                .is_some_and(|screen| screen.capturing.is_some()),
+            "待つのをやめた"
+        );
+        let chord = keymap::Chord::parse("Ctrl+Alt+B").expect("読める");
+        assert!(app.capture_key(chord));
+        assert_eq!(
+            app.settings.keys.get("bold").map(String::as_str),
+            Some("Ctrl+Alt+B")
+        );
     }
 
     /// 自前の選択が開き、本文の代わりに出る。

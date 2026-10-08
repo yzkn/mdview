@@ -113,6 +113,11 @@ pub struct PreviewState {
     pub hit_rate: f32,
 }
 
+/// プレビューの等倍の文字の大きさ（px）。
+///
+/// **設定の「プレビューの文字の大きさ」はこれとの比で倍率にする**（v2.1.0 R-11）
+pub const BASE_SIZE: f32 = 15.0;
+
 /// プレビューから外へ出る通知。
 #[derive(Debug, Clone)]
 pub enum PreviewAction {
@@ -128,6 +133,9 @@ pub enum PreviewAction {
         /// キャッシュの命中率（確認用）
         hit_rate: f32,
     },
+    /// リンクを押した（v2.1.0 R-19）。**押した文字しか分からない**ので、
+    /// アプリ側がブロックの原文から先を拾い直す
+    LinkClicked { block: usize, text: String },
 }
 
 /// ウィジェットが持ち越す状態。
@@ -187,7 +195,7 @@ impl<'a> PreviewView<'a> {
     }
 
     /// 本文の基準の大きさ（等倍）。
-    const BASE_SIZE: f32 = 15.0;
+    const BASE_SIZE: f32 = BASE_SIZE;
 
     /// スクロールバーの軌道（右端に重ねる）。
     ///
@@ -223,6 +231,48 @@ impl<'a> PreviewView<'a> {
     ///
     /// **余白も一緒に伸ばす。** 字だけ大きくすると、行間と段落の間が
     /// 詰まって読みにくくなる
+    /// 押した場所にあるリンクの文字（ブロック番号, 文字）。
+    ///
+    /// **描いたときと同じ並べ方で当てる**（`draw` の Y の積み方と同じ）
+    fn link_under(
+        &self,
+        tree: &widget::Tree,
+        bounds: Rectangle,
+        point: Point,
+    ) -> Option<(usize, String)> {
+        let state = tree.state.downcast_ref::<State>();
+        let mut y = bounds.y + state.start_y;
+        for (index, laid_out) in &state.visible {
+            if point.y >= y && point.y < y + laid_out.height {
+                for line in &laid_out.lines {
+                    let top = y + line.top;
+                    if point.y < top || point.y >= top + line.height {
+                        continue;
+                    }
+                    for run in &line.runs {
+                        let x = bounds.x + PADDING + line.left + run.x;
+                        if run.decoration == RunDecoration::Link
+                            && point.x >= x
+                            && point.x <= x + run.width
+                        {
+                            return Some((*index, run.text.clone()));
+                        }
+                    }
+                }
+                return None;
+            }
+            y += laid_out.height;
+        }
+        None
+    }
+
+    /// リンクの上か（指の形を変える）。
+    fn over_link(&self, tree: &widget::Tree, bounds: Rectangle, cursor: mouse::Cursor) -> bool {
+        cursor
+            .position()
+            .is_some_and(|point| self.link_under(tree, bounds, point).is_some())
+    }
+
     pub fn zoom(mut self, factor: f32) -> Self {
         self.text_size = Self::BASE_SIZE * factor;
         self
@@ -387,6 +437,11 @@ where
                 };
                 let track = self.track(bounds);
                 if !track.contains(point) {
+                    // **リンクの上なら開く**（R-19）
+                    if let Some((block, text)) = self.link_under(tree, bounds, point) {
+                        shell.publish((self.on_action)(PreviewAction::LinkClicked { block, text }));
+                        shell.capture_event();
+                    }
                     return;
                 }
                 let Some((at, length)) = self.thumb(bounds) else {
@@ -493,6 +548,10 @@ where
         // **出していない帯の上では変えない。** 何も無いのに押せそうに見える
         if self.thumb(bounds).is_some() && self.track(bounds).contains(point) {
             return mouse::Interaction::Grab;
+        }
+        // **リンクの上では指の形にする**（押せることが分かる。R-19）
+        if self.over_link(tree, bounds, cursor) {
+            return mouse::Interaction::Pointer;
         }
         mouse::Interaction::None
     }

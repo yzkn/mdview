@@ -7,8 +7,9 @@
 //! 自前で描く。アプリが直接キーを受けるため、v1 で起きた
 //! 「Windows でアクセラレータが発火しない」が構造的に起きない。
 
+use super::keymap::{Command, Keymap};
+use crate::app::Format;
 use crate::render::{FileCommand, Message, ViewMode};
-use crate::{app::Format, io::settings::ThemePreference};
 
 /// 見出し（メニューバーに並ぶもの）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,11 +17,13 @@ pub enum Menu {
     File,
     Edit,
     View,
+    /// 移動（v2.1.0 R-07 / R-18 / R-19 / R-20）
+    Go,
     Help,
 }
 
 impl Menu {
-    pub const ALL: [Menu; 4] = [Menu::File, Menu::Edit, Menu::View, Menu::Help];
+    pub const ALL: [Menu; 5] = [Menu::File, Menu::Edit, Menu::View, Menu::Go, Menu::Help];
 
     /// `Alt` と合わせて押す文字（§7.2）。
     ///
@@ -31,6 +34,7 @@ impl Menu {
             Menu::File => 'F',
             Menu::Edit => 'E',
             Menu::View => 'V',
+            Menu::Go => 'G',
             Menu::Help => 'H',
         }
     }
@@ -40,6 +44,7 @@ impl Menu {
             Menu::File => "ファイル",
             Menu::Edit => "編集",
             Menu::View => "表示",
+            Menu::Go => "移動",
             Menu::Help => "ヘルプ",
         }
     }
@@ -65,6 +70,10 @@ pub enum Submenu {
     TabWidth,
     /// 改行コードの指定
     LineEnding,
+    /// 強調・コード・リンク（v2.1.0 R-15）
+    Format,
+    /// 表（v2.1.0 R-16）
+    Table,
 }
 
 impl Submenu {
@@ -77,6 +86,8 @@ impl Submenu {
             Submenu::Recent => "最近使ったファイル",
             Submenu::TabWidth => "タブ幅",
             Submenu::LineEnding => "改行コードを指定して保存",
+            Submenu::Format => "書式",
+            Submenu::Table => "表",
         }
     }
 }
@@ -87,8 +98,10 @@ pub enum Item {
     /// 押せる項目
     Action {
         label: String,
-        /// 併記する打鍵（`Ctrl + S` など）。無ければ空
-        accel: &'static str,
+        /// 併記する打鍵（`Ctrl + S` など）。無ければ空。
+        ///
+        /// **キー割り当ての表から作る**（v2.1.0 R-10）。利用者が変えたら変わる
+        accel: String,
         message: Message,
         enabled: bool,
         /// いま選ばれている状態か（表示モードなど）
@@ -114,10 +127,10 @@ pub enum Item {
 }
 
 impl Item {
-    fn action(label: impl Into<String>, accel: &'static str, message: Message) -> Self {
+    fn action(label: impl Into<String>, accel: impl Into<String>, message: Message) -> Self {
         Item::Action {
             label: label.into(),
-            accel,
+            accel: accel.into(),
             message,
             enabled: true,
             checked: false,
@@ -164,10 +177,9 @@ impl Item {
 ///
 /// **App をそのまま渡さない。** 渡すと試験のために App を作ることになり、
 /// 窓が要る。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct Context<'a> {
     pub mode: ViewMode,
-    pub theme: ThemePreference,
     pub toc_visible: bool,
     pub scroll_sync: bool,
     /// 出力中・ダイアログを出している最中は、ファイル操作を止める
@@ -198,23 +210,57 @@ pub struct Context<'a> {
     pub zoom: f32,
     pub can_undo: bool,
     pub can_redo: bool,
+    /// キー割り当て（R-10）。**併記する打鍵をここから出す**
+    pub keymap: &'a Keymap,
+    /// 表の整形を使うか（R-16。切っていればメニューに出さない）
+    pub table_format: bool,
+    /// 常に最前面か（R-02）
+    pub on_top: bool,
+    /// 畳んでいる見出しがあるか（R-20）
+    pub has_folds: bool,
+}
+
+impl Context<'_> {
+    /// 操作に割り当たっている打鍵（メニューに併記する）。
+    fn accel(&self, command: Command) -> String {
+        self.keymap.accel(command)
+    }
 }
 
 /// 1 つのメニューの中身。
 pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
+    let c = |command: Command| context.accel(command);
     match menu {
         Menu::File => vec![
-            Item::action("新規", "Ctrl + N", Message::File(FileCommand::New))
+            Item::action("新規", c(Command::New), Message::File(FileCommand::New))
                 .enabled(!context.busy)
                 .access('N'),
-            Item::action("開く…", "Ctrl + O", Message::File(FileCommand::Open))
+            // **別の窓で開く**（R-09）。窓ごとに別のプロセスになる
+            Item::action(
+                "新しいウィンドウ",
+                c(Command::NewWindow),
+                Message::NewWindow,
+            )
+            .access('W'),
+            Item::action("開く…", c(Command::Open), Message::File(FileCommand::Open))
                 .enabled(!context.busy)
                 .access('O'),
+            Item::action(
+                "新しいウィンドウで開く…",
+                c(Command::OpenInNewWindow),
+                Message::OpenInNewWindow,
+            )
+            .enabled(!context.busy)
+            .access('L'),
             // **OS のダイアログが出せない環境がある**（§14.1）。
             // 自前のものをいつでも呼べるようにしておく
-            Item::action("アプリ内で開く…", "", Message::OpenBrowser)
-                .enabled(!context.busy)
-                .access('I'),
+            Item::action(
+                "アプリ内で開く…",
+                c(Command::OpenInApp),
+                Message::OpenBrowser,
+            )
+            .enabled(!context.busy)
+            .access('I'),
             Item::Fold {
                 label: Submenu::Recent.label(),
                 open: context.open_submenu == Some(Submenu::Recent),
@@ -224,12 +270,16 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
                 access: Some('R'),
             },
             Item::Separator,
-            Item::action("上書き保存", "Ctrl + S", Message::File(FileCommand::Save))
-                .enabled(!context.busy)
-                .access('S'),
+            Item::action(
+                "上書き保存",
+                c(Command::Save),
+                Message::File(FileCommand::Save),
+            )
+            .enabled(!context.busy)
+            .access('S'),
             Item::action(
                 "名前を付けて保存…",
-                "Ctrl + Shift + S",
+                c(Command::SaveAs),
                 Message::File(FileCommand::SaveAs),
             )
             .enabled(!context.busy)
@@ -238,142 +288,181 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
             // ステータスバーに出している表記（§7.4）と同じ言葉にする
             Item::action(
                 "BOM を付けて保存",
-                "",
+                c(Command::SaveWithBom),
                 Message::File(FileCommand::SaveWithBom),
             )
             .enabled(!context.busy && !context.has_bom)
             .access('B'),
-            // **既定で入れておく。** 失うほうが痛い（§18.3）
-            Item::action("異常終了に備えて退避する", "", Message::ToggleAutosaveDraft)
-                .checked(context.autosave_draft)
-                .access('D'),
+            // **文字コードと改行コードは 1 か所で選ぶ**（R-04）。
+            // v2.0 の 3 つの折りたたみをまとめた
+            Item::action(
+                "文字コード・改行コード…",
+                c(Command::Encoding),
+                Message::OpenEncodingDialog,
+            )
+            .enabled(!context.busy)
+            .access('E'),
             Item::Separator,
-            Item::Fold {
-                label: Submenu::ReopenAs.label(),
-                open: context.open_submenu == Some(Submenu::ReopenAs),
-                message: Message::ToggleSubmenu(Submenu::ReopenAs),
-                // **保存先の無い文書は開き直せない。** 読む元が無い
-                enabled: context.has_path && !context.busy,
-                access: Some('E'),
-            },
-            Item::Fold {
-                label: Submenu::SaveWithEncoding.label(),
-                open: context.open_submenu == Some(Submenu::SaveWithEncoding),
-                message: Message::ToggleSubmenu(Submenu::SaveWithEncoding),
-                enabled: !context.busy,
-                access: Some('C'),
-            },
-            Item::Fold {
-                label: Submenu::LineEnding.label(),
-                open: context.open_submenu == Some(Submenu::LineEnding),
-                message: Message::ToggleSubmenu(Submenu::LineEnding),
-                enabled: !context.busy,
-                access: Some('K'),
-            },
+            Item::action(
+                "PDF に出力…",
+                c(Command::ExportPdf),
+                Message::File(FileCommand::ExportPdf),
+            )
+            .enabled(!context.busy)
+            .access('P'),
+            Item::action(
+                "HTML に出力…",
+                c(Command::ExportHtml),
+                Message::File(FileCommand::ExportHtml),
+            )
+            .enabled(!context.busy)
+            .access('H'),
             Item::Separator,
-            Item::action("PDF に出力…", "", Message::File(FileCommand::ExportPdf))
-                .enabled(!context.busy)
-                .access('P'),
-            Item::action("HTML に出力…", "", Message::File(FileCommand::ExportHtml))
-                .enabled(!context.busy)
-                .access('H'),
+            // **頻繁に切り替えないものは設定画面へ移した**（R-03）
+            Item::action("設定…", c(Command::Settings), Message::OpenSettings).access('T'),
             Item::Separator,
             Item::action("終了", "Alt + F4", Message::CloseRequested).access('X'),
         ],
 
-        // **選択と切り取り・貼り付けは未実装**（A-1 の残り）。
-        // 押せない項目を並べると、出来ているのか壊れているのか分からないので置かない
-        Menu::Edit => vec![
-            Item::action("取り消し", "Ctrl + Z", Message::Undo)
-                .enabled(context.can_undo)
-                .access('U'),
-            Item::action("やり直し", "Ctrl + Y", Message::Redo)
-                .enabled(context.can_redo)
-                .access('R'),
-            Item::Separator,
-            Item::action("切り取り", "Ctrl + X", Message::Cut)
-                .enabled(context.has_selection)
-                .access('T'),
-            Item::action("コピー", "Ctrl + C", Message::Copy)
-                .enabled(context.has_selection)
-                .access('C'),
-            // **貼り付けはいつでも押せる。** クリップボードの中身は
-            // 読みに行くまで分からず、毎回覗くと他のアプリの邪魔になる
-            Item::action("貼り付け", "Ctrl + V", Message::Paste).access('P'),
-            Item::action("すべて選択", "Ctrl + A", Message::SelectAll).access('A'),
-            Item::Separator,
-            Item::action("行の複製", "Ctrl + D", Message::DuplicateLine).access('D'),
-            Item::action("行の削除", "Ctrl + L", Message::DeleteLine).access('L'),
-            Item::action("行の連結", "Ctrl + J", Message::JoinLines).access('J'),
-            Item::action("字下げ", "Tab", Message::Indent(true))
-                .enabled(context.has_selection)
-                .access('I'),
-            Item::action("字下げを戻す", "Shift + Tab", Message::Indent(false))
-                .enabled(context.has_selection)
-                .access('O'),
-            Item::Separator,
-            // **変換は選んだ範囲だけに効く。** 文書全体へ効くと、
-            // 押し間違いを取り消すまで気づけない
-            Item::Fold {
-                label: Submenu::Transform.label(),
-                open: context.open_submenu == Some(Submenu::Transform),
-                message: Message::ToggleSubmenu(Submenu::Transform),
-                enabled: context.has_selection,
-                access: Some('V'),
-            },
-            Item::Fold {
-                label: Submenu::Insert.label(),
-                open: context.open_submenu == Some(Submenu::Insert),
-                message: Message::ToggleSubmenu(Submenu::Insert),
-                enabled: true,
-                access: Some('N'),
-            },
-            Item::Separator,
-            Item::action("指定行へジャンプ…", "Ctrl + G", Message::OpenGoto).access('G'),
-            Item::action("対応する括弧へ", "Ctrl + ]", Message::MatchBracket).access('B'),
-            Item::action("検索・置換…", "Ctrl + F", Message::OpenSearch).access('F'),
-        ],
+        Menu::Edit => {
+            let mut items = vec![
+                Item::action("取り消し", c(Command::Undo), Message::Undo)
+                    .enabled(context.can_undo)
+                    .access('U'),
+                Item::action("やり直し", c(Command::Redo), Message::Redo)
+                    .enabled(context.can_redo)
+                    .access('R'),
+                Item::Separator,
+                Item::action("切り取り", c(Command::Cut), Message::Cut)
+                    .enabled(context.has_selection)
+                    .access('T'),
+                Item::action("コピー", c(Command::Copy), Message::Copy)
+                    .enabled(context.has_selection)
+                    .access('C'),
+                // **貼り付けはいつでも押せる。** クリップボードの中身は
+                // 読みに行くまで分からず、毎回覗くと他のアプリの邪魔になる
+                Item::action("貼り付け", c(Command::Paste), Message::Paste).access('P'),
+                Item::action("すべて選択", c(Command::SelectAll), Message::SelectAll).access('A'),
+                Item::Separator,
+                Item::action(
+                    "行の複製",
+                    c(Command::DuplicateLine),
+                    Message::DuplicateLine,
+                )
+                .access('D'),
+                Item::action("行の削除", c(Command::DeleteLine), Message::DeleteLine).access('L'),
+                Item::action("行の連結", c(Command::JoinLines), Message::JoinLines).access('J'),
+                Item::action("字下げ", "Tab", Message::Indent(true))
+                    .enabled(context.has_selection)
+                    .access('I'),
+                Item::action("字下げを戻す", "Shift + Tab", Message::Indent(false))
+                    .enabled(context.has_selection)
+                    .access('O'),
+                Item::Separator,
+                // コメント（R-06）。**コードの中ならその言語の書き方**
+                Item::action(
+                    "行コメントの切替",
+                    c(Command::LineComment),
+                    Message::ToggleComment { block: false },
+                )
+                .access('M'),
+                Item::action(
+                    "ブロックコメントの切替",
+                    c(Command::BlockComment),
+                    Message::ToggleComment { block: true },
+                )
+                .access('K'),
+                Item::Fold {
+                    label: Submenu::Format.label(),
+                    open: context.open_submenu == Some(Submenu::Format),
+                    message: Message::ToggleSubmenu(Submenu::Format),
+                    enabled: true,
+                    access: Some('S'),
+                },
+            ];
+            // **表の整形を切っていたら出さない**（R-16）
+            if context.table_format {
+                items.push(Item::Fold {
+                    label: Submenu::Table.label(),
+                    open: context.open_submenu == Some(Submenu::Table),
+                    message: Message::ToggleSubmenu(Submenu::Table),
+                    enabled: true,
+                    access: Some('E'),
+                });
+            }
+            items.extend([
+                Item::Separator,
+                // **変換は選んだ範囲だけに効く。** 文書全体へ効くと、
+                // 押し間違いを取り消すまで気づけない
+                Item::Fold {
+                    label: Submenu::Transform.label(),
+                    open: context.open_submenu == Some(Submenu::Transform),
+                    message: Message::ToggleSubmenu(Submenu::Transform),
+                    enabled: context.has_selection,
+                    access: Some('V'),
+                },
+                Item::Fold {
+                    label: Submenu::Insert.label(),
+                    open: context.open_submenu == Some(Submenu::Insert),
+                    message: Message::ToggleSubmenu(Submenu::Insert),
+                    enabled: true,
+                    access: Some('N'),
+                },
+                Item::Separator,
+                Item::action("検索・置換…", c(Command::Find), Message::OpenSearch).access('F'),
+            ]);
+            items
+        }
 
         Menu::View => vec![
-            Item::action("編集", "", Message::SetMode(ViewMode::Edit))
-                .checked(context.mode == ViewMode::Edit)
-                .access('E'),
-            Item::action("プレビュー", "", Message::SetMode(ViewMode::Preview))
-                .checked(context.mode == ViewMode::Preview)
-                .access('P'),
-            Item::action("分割", "", Message::SetMode(ViewMode::Split))
-                .checked(context.mode == ViewMode::Split)
-                .access('S'),
+            Item::action(
+                "編集",
+                c(Command::ViewEdit),
+                Message::SetMode(ViewMode::Edit),
+            )
+            .checked(context.mode == ViewMode::Edit)
+            .access('E'),
+            Item::action(
+                "プレビュー",
+                c(Command::ViewPreview),
+                Message::SetMode(ViewMode::Preview),
+            )
+            .checked(context.mode == ViewMode::Preview)
+            .access('P'),
+            Item::action(
+                "分割",
+                c(Command::ViewSplit),
+                Message::SetMode(ViewMode::Split),
+            )
+            .checked(context.mode == ViewMode::Split)
+            .access('S'),
             Item::Separator,
-            Item::action("目次", "", Message::ToggleToc)
+            Item::action("目次", c(Command::ToggleToc), Message::ToggleToc)
                 .checked(context.toc_visible)
                 .access('T'),
             // **分割のときだけ効く**（片方しか見えていないなら相手がいない）
-            Item::action("スクロール同期", "", Message::ToggleSync)
-                .enabled(context.mode == ViewMode::Split)
-                .checked(context.scroll_sync)
-                .access('Y'),
+            Item::action(
+                "スクロール同期",
+                c(Command::ToggleSync),
+                Message::ToggleSync,
+            )
+            .enabled(context.mode == ViewMode::Split)
+            .checked(context.scroll_sync)
+            .access('Y'),
             Item::Separator,
-            Item::action("空白・タブ・改行を表示", "", Message::ToggleInvisibles)
-                .checked(context.show_invisibles)
-                .access('W'),
-            // **既定で出す。** 貼り付けで紛れ込むものを、気づく前に保存させない
-            Item::action("怪しい文字を強調", "", Message::ToggleGremlins)
-                .checked(context.show_gremlins)
-                .access('M'),
-            Item::Fold {
-                label: Submenu::TabWidth.label(),
-                open: context.open_submenu == Some(Submenu::TabWidth),
-                message: Message::ToggleSubmenu(Submenu::TabWidth),
-                enabled: true,
-                access: Some('B'),
-            },
+            Item::action(
+                "空白・タブ・改行を表示",
+                c(Command::ToggleInvisibles),
+                Message::ToggleInvisibles,
+            )
+            .checked(context.show_invisibles)
+            .access('W'),
             Item::Separator,
             // **倍率は数で出す。** 「拡大」だけでは、いまどこに居るのか分からない
-            Item::action("拡大", "Ctrl + +", Message::ZoomIn)
+            Item::action("拡大", c(Command::ZoomIn), Message::ZoomIn)
                 .enabled(context.zoom < super::ZOOM_MAX)
                 .access('I'),
-            Item::action("縮小", "Ctrl + -", Message::ZoomOut)
+            Item::action("縮小", c(Command::ZoomOut), Message::ZoomOut)
                 .enabled(context.zoom > super::ZOOM_MIN)
                 .access('O'),
             Item::action(
@@ -381,32 +470,118 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
                     "等倍に戻す（いま {}%）",
                     (context.zoom * 100.0).round() as i32
                 ),
-                "Ctrl + 0",
+                c(Command::ZoomReset),
                 Message::ZoomReset,
             )
             .enabled((context.zoom - 1.0).abs() > f32::EPSILON)
             .access('R'),
             Item::Separator,
+            // その場で切り替える（R-02）。起動時の扱いは設定画面で決める
             Item::action(
-                "外観: 明るい",
-                "",
-                Message::SetTheme(ThemePreference::Light),
+                "常に最前面に表示",
+                c(Command::AlwaysOnTop),
+                Message::ToggleAlwaysOnTop,
             )
-            .checked(context.theme == ThemePreference::Light)
-            .access('L'),
-            Item::action("外観: 暗い", "", Message::SetTheme(ThemePreference::Dark))
-                .checked(context.theme == ThemePreference::Dark)
-                .access('K'),
-            Item::action(
-                "外観: OS に合わせる",
-                "",
-                Message::SetTheme(ThemePreference::System),
-            )
-            .checked(context.theme == ThemePreference::System)
-            .access('Z'),
+            .checked(context.on_top)
+            .access('F'),
         ],
 
-        Menu::Help => vec![Item::action("このアプリについて…", "", Message::OpenAbout).access('A')],
+        // 移動（R-07 / R-18 / R-19 / R-20）
+        Menu::Go => vec![
+            Item::Heading("定義と参照"),
+            Item::action(
+                "定義へ移動",
+                c(Command::Definition),
+                Message::Seek(crate::app::Seek::Definition),
+            )
+            .access('D'),
+            Item::action(
+                "型定義へ移動",
+                c(Command::TypeDefinition),
+                Message::Seek(crate::app::Seek::TypeDefinition),
+            )
+            .access('T'),
+            Item::action(
+                "宣言へ移動",
+                c(Command::Declaration),
+                Message::Seek(crate::app::Seek::Declaration),
+            )
+            .access('C'),
+            Item::action(
+                "実装へ移動",
+                c(Command::Implementation),
+                Message::Seek(crate::app::Seek::Implementation),
+            )
+            .access('I'),
+            Item::action(
+                "参照を探す",
+                c(Command::References),
+                Message::Seek(crate::app::Seek::References),
+            )
+            .access('R'),
+            Item::Separator,
+            Item::action(
+                "対応する括弧へ",
+                c(Command::MatchBracket),
+                Message::MatchBracket,
+            )
+            .access('B'),
+            Item::action(
+                "閉じ括弧へ移動",
+                c(Command::ClosingBracket),
+                Message::ClosingBracket,
+            )
+            .access('K'),
+            Item::action("指定行へジャンプ…", c(Command::GotoLine), Message::OpenGoto).access('G'),
+            Item::Separator,
+            Item::action(
+                "前の見出しへ",
+                c(Command::PreviousHeading),
+                Message::HeadingStep(false),
+            )
+            .access('P'),
+            Item::action(
+                "次の見出しへ",
+                c(Command::NextHeading),
+                Message::HeadingStep(true),
+            )
+            .access('N'),
+            Item::action(
+                "見出しへ移動…",
+                c(Command::GotoHeading),
+                Message::OpenHeadingPicker,
+            )
+            .access('H'),
+            Item::Separator,
+            Item::action(
+                "リンクを開く",
+                c(Command::OpenLink),
+                Message::OpenLinkAtCaret,
+            )
+            .access('L'),
+            Item::action(
+                "リンク切れを検査",
+                c(Command::CheckLinks),
+                Message::CheckLinks,
+            )
+            .access('E'),
+            Item::Separator,
+            Item::action("この見出しを畳む", c(Command::Fold), Message::Fold).access('F'),
+            Item::action("この見出しを開く", c(Command::Unfold), Message::Unfold)
+                .enabled(context.has_folds)
+                .access('O'),
+            Item::action("すべて畳む", c(Command::FoldAll), Message::FoldAll).access('A'),
+            Item::action("すべて開く", c(Command::UnfoldAll), Message::UnfoldAll)
+                .enabled(context.has_folds)
+                .access('U'),
+        ],
+
+        Menu::Help => vec![Item::action(
+            "このアプリについて…",
+            context.accel(Command::About),
+            Message::OpenAbout,
+        )
+        .access('A')],
     }
 }
 
@@ -442,9 +617,13 @@ fn submenu_items(which: Submenu, context: Context<'_>) -> Vec<Item> {
         Submenu::Transform => crate::edit::transform::Transform::ALL
             .iter()
             .map(|which| {
-                Item::action(which.label(), "", Message::Transform(*which))
-                    .enabled(context.has_selection)
-                    .indented()
+                Item::action(
+                    which.label(),
+                    context.accel(Command::Transform(*which)),
+                    Message::Transform(*which),
+                )
+                .enabled(context.has_selection)
+                .indented()
             })
             .collect(),
         Submenu::LineEnding => crate::io::LineEnding::ALL
@@ -464,24 +643,85 @@ fn submenu_items(which: Submenu, context: Context<'_>) -> Vec<Item> {
                     .indented()
             })
             .collect(),
-        Submenu::Recent => context
-            .recent
-            .iter()
-            .map(|path| {
-                // **見えるのは名前だけにする。** 長い共有フォルダのパスは
-                // メニューの幅を超えて読めない
-                let label = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
-                Item::action(label, "", Message::OpenRecent(path.clone()))
-                    .enabled(!context.busy)
-                    .indented()
-            })
-            .collect(),
+        Submenu::Recent => {
+            let mut items: Vec<Item> = context
+                .recent
+                .iter()
+                .map(|path| {
+                    // **見えるのは名前だけにする。** 長い共有フォルダのパスは
+                    // メニューの幅を超えて読めない
+                    let label = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                    Item::action(label, "", Message::OpenRecent(path.clone()))
+                        .enabled(!context.busy)
+                        .indented()
+                })
+                .collect();
+            // **消す口を末尾に置く**（R-12）
+            items.push(Item::action("一覧を消す", "", Message::ClearRecent).indented());
+            items
+        }
+        Submenu::Format => {
+            let c = |command: Command| context.accel(command);
+            vec![
+                Item::action(
+                    "太字",
+                    c(Command::Bold),
+                    Message::Format(crate::app::FormatKind::Bold),
+                )
+                .indented(),
+                Item::action(
+                    "斜体",
+                    c(Command::Italic),
+                    Message::Format(crate::app::FormatKind::Italic),
+                )
+                .indented(),
+                Item::action(
+                    "インラインコード",
+                    c(Command::InlineCode),
+                    Message::Format(crate::app::FormatKind::Code),
+                )
+                .indented(),
+                Item::action(
+                    "リンク",
+                    c(Command::Link),
+                    Message::Format(crate::app::FormatKind::Link),
+                )
+                .indented(),
+            ]
+        }
+        Submenu::Table => vec![
+            Item::action(
+                "表を整形",
+                context.accel(Command::FormatTable),
+                Message::FormatTable,
+            )
+            .indented(),
+            Item::action(
+                "表に行を足す",
+                context.accel(Command::TableAddRow),
+                Message::TableAddRow,
+            )
+            .indented(),
+            Item::action(
+                "表に列を足す",
+                context.accel(Command::TableAddColumn),
+                Message::TableAddColumn,
+            )
+            .indented(),
+        ],
         Submenu::Insert => crate::edit::datetime::Stamp::ALL
             .iter()
-            .map(|stamp| Item::action(stamp.label(), "", Message::InsertStamp(*stamp)).indented())
+            .map(|stamp| {
+                Item::action(
+                    stamp.label(),
+                    context.accel(Command::Insert(*stamp)),
+                    Message::InsertStamp(*stamp),
+                )
+                .indented()
+            })
             .collect(),
         Submenu::SaveWithEncoding => save_choices()
             .into_iter()
@@ -559,10 +799,14 @@ pub fn format_of(command: FileCommand) -> Option<Format> {
 mod tests {
     use super::*;
 
+    fn keymap() -> &'static Keymap {
+        static KEYMAP: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
+        KEYMAP.get_or_init(|| Keymap::new(&std::collections::BTreeMap::new()))
+    }
+
     fn context() -> Context<'static> {
         Context {
             mode: ViewMode::Split,
-            theme: ThemePreference::System,
             toc_visible: true,
             scroll_sync: true,
             busy: false,
@@ -580,6 +824,10 @@ mod tests {
             zoom: 1.0,
             can_undo: true,
             can_redo: true,
+            keymap: keymap(),
+            table_format: true,
+            on_top: false,
+            has_folds: true,
         }
     }
 
@@ -635,6 +883,8 @@ mod tests {
                 Some(Submenu::Transform),
                 Some(Submenu::Insert),
                 Some(Submenu::TabWidth),
+                Some(Submenu::Format),
+                Some(Submenu::Table),
             ] {
                 let context = Context {
                     open_submenu: open,
@@ -692,13 +942,13 @@ mod tests {
     /// 見出しが並ぶ（§7.2）。
     #[test]
     fn the_menu_bar_lists_every_menu() {
-        assert_eq!(Menu::ALL.len(), 4);
+        assert_eq!(Menu::ALL.len(), 5);
         assert_eq!(Menu::File.label(), "ファイル");
     }
 
-    /// **文字コードと改行コードはファイルメニューの中にある**（利用者の要望）。
+    /// **文字コードと改行コードは 1 つのダイアログにまとめた**（R-04）。
     #[test]
-    fn the_encodings_live_under_the_file_menu() {
+    fn the_encodings_are_one_dialog() {
         let folds: Vec<&'static str> = items(Menu::File, context())
             .iter()
             .filter_map(|item| match item {
@@ -706,82 +956,94 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            folds,
-            [
-                Submenu::Recent.label(),
-                Submenu::ReopenAs.label(),
-                Submenu::SaveWithEncoding.label(),
-                Submenu::LineEnding.label()
-            ]
-        );
+        assert_eq!(folds, [Submenu::Recent.label()]);
+        assert!(labels(Menu::File, context())
+            .iter()
+            .any(|l| l == "文字コード・改行コード…"));
     }
 
-    /// **閉じているうちは中身を出さない**（メニューが窓の高さを超える）。
+    /// **併記する打鍵は割り当ての表から出る**（R-10）。
     #[test]
-    fn a_closed_fold_hides_its_items() {
-        let closed = context();
-        let shown = expand(items(Menu::File, closed), closed);
-        assert!(
-            !shown.iter().any(|item| matches!(
-                item,
-                Item::Action {
-                    message: Message::ReopenAs(_),
-                    ..
-                }
-            )),
-            "閉じているのに中身が出ている"
-        );
-    }
-
-    /// **開き直しと保存が両方選べる**（§19.6）。
-    #[test]
-    fn the_folds_offer_reopen_and_save() {
-        for (which, wanted) in [
-            (Submenu::ReopenAs, "Shift_JIS"),
-            (Submenu::SaveWithEncoding, "UTF-8（BOM なし）"),
-        ] {
-            let open = Context {
-                open_submenu: Some(which),
-                ..context()
-            };
-            let labels: Vec<String> = expand(items(Menu::File, open), open)
-                .into_iter()
-                .filter_map(|item| match item {
-                    Item::Action { label, .. } => Some(label),
-                    _ => None,
-                })
-                .collect();
-            assert!(
-                labels.iter().any(|l| l == wanted),
-                "{wanted} が無い: {labels:?}"
-            );
+    fn accelerators_come_from_the_keymap() {
+        match find(Menu::File, context(), "上書き保存") {
+            Item::Action { accel, .. } => assert_eq!(accel, "Ctrl + S"),
+            other => panic!("{other:?}"),
         }
-    }
-
-    /// **保存先の無い文書は開き直せない。** 読む元が無い
-    #[test]
-    fn an_unsaved_document_cannot_be_reopened() {
-        let fresh = Context {
-            has_path: false,
-            open_submenu: Some(Submenu::ReopenAs),
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("save".to_owned(), "Ctrl+Alt+S".to_owned());
+        let changed = Keymap::new(&overrides);
+        let context = Context {
+            keymap: &changed,
             ..context()
         };
-        let items = expand(items(Menu::File, fresh), fresh);
-        for item in &items {
-            if let Item::Action {
-                message, enabled, ..
-            } = item
-            {
-                if matches!(message, Message::ReopenAs(_)) {
-                    assert!(!enabled, "開き直せることになっている: {item:?}");
-                }
-            }
+        match find(Menu::File, context, "上書き保存") {
+            Item::Action { accel, .. } => assert_eq!(accel, "Ctrl + Alt + S"),
+            other => panic!("{other:?}"),
         }
-        // 見出しそのものも押せない
-        assert!(items
-            .iter()
-            .any(|item| matches!(item, Item::Fold { enabled: false, .. })));
+    }
+
+    /// **表の整形を切ったらメニューから消える**（R-16）。
+    #[test]
+    fn the_table_menu_follows_the_setting() {
+        let has_table = |context: Context<'_>| {
+            items(Menu::Edit, context).iter().any(
+                |item| matches!(item, Item::Fold { label, .. } if *label == Submenu::Table.label()),
+            )
+        };
+        assert!(has_table(context()));
+        assert!(!has_table(Context {
+            table_format: false,
+            ..context()
+        }));
+    }
+
+    /// 移動のメニューに定義・参照・見出し・折りたたみが並ぶ（R-07 / R-18 / R-20）。
+    #[test]
+    fn the_go_menu_has_the_navigation() {
+        let labels = labels(Menu::Go, context());
+        for wanted in [
+            "定義へ移動",
+            "型定義へ移動",
+            "宣言へ移動",
+            "実装へ移動",
+            "参照を探す",
+            "閉じ括弧へ移動",
+            "前の見出しへ",
+            "リンク切れを検査",
+            "すべて畳む",
+        ] {
+            assert!(labels.iter().any(|l| l == wanted), "{wanted} が無い");
+        }
+    }
+
+    /// **頻繁に切り替えないものは設定画面へ移した**（R-03）。
+    #[test]
+    fn rarely_changed_items_moved_to_settings() {
+        let view = labels(Menu::View, context());
+        assert!(!view.iter().any(|l| l.starts_with("外観")));
+        assert!(!view.iter().any(|l| l == "怪しい文字を強調"));
+        let file = labels(Menu::File, context());
+        assert!(!file.iter().any(|l| l == "異常終了に備えて退避する"));
+        assert!(file.iter().any(|l| l == "設定…"));
+    }
+
+    /// 最近使ったファイルの末尾に「一覧を消す」がある（R-12）。
+    #[test]
+    fn the_recent_list_can_be_cleared() {
+        let recent = [std::path::PathBuf::from("C:/a.md")];
+        let open = Context {
+            recent: &recent,
+            open_submenu: Some(Submenu::Recent),
+            ..context()
+        };
+        let shown = expand(items(Menu::File, open), open);
+        assert!(shown.iter().any(|item| matches!(
+            item,
+            Item::Action {
+                message: Message::ClearRecent,
+                ..
+            }
+        )));
     }
 
     /// ファイルの操作が一通り入る。
@@ -830,22 +1092,6 @@ mod tests {
             ..context()
         };
         assert!(!is_enabled(&find(Menu::View, edit, "スクロール同期")));
-    }
-
-    /// 外観は 3 つのうち 1 つだけに印が付く。
-    #[test]
-    fn exactly_one_theme_is_checked() {
-        let context = Context {
-            theme: ThemePreference::Dark,
-            ..context()
-        };
-        let checked = items(Menu::View, context)
-            .iter()
-            .filter(|item| {
-                matches!(item, Item::Action { label, checked: true, .. } if label.starts_with("外観"))
-            })
-            .count();
-        assert_eq!(checked, 1);
     }
 
     /// **戻せないときは押せない。** 押せるのに何も起きないほうが分かりにくい

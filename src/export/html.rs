@@ -92,22 +92,24 @@ pub fn export(
                         _ => None,
                     }
                 }
-                NodeValue::Image(image) => {
-                    match embed_image(&image.url, base_dir) {
-                        Some(data_uri) => Some(format!(
-                            r#"<p><img src="{data_uri}" alt="{}"></p>"#,
-                            escape(&image.title)
-                        )),
-                        // **埋め込めなかったものは件数で知らせる**（§17A.5）。
-                        // 外部参照は持たないので、画像そのものは落とす
-                        None => {
-                            skipped_images += 1;
-                            Some(format!(
-                                r#"<p class="mv-missing">［画像を埋め込めません: {}］</p>"#,
-                                escape(&image.url)
-                            ))
-                        }
-                    }
+                NodeValue::Image(image) => Some(image_html(
+                    &image.url,
+                    &image.title,
+                    None,
+                    base_dir,
+                    &mut skipped_images,
+                )),
+                // **`<img>` タグ 1 つだけのものも画像として埋め込む**（v2.1.0 R-17）。
+                // 生の HTML は出さない設定なので、扱わないと黙って消える
+                NodeValue::HtmlBlock(html) => {
+                    crate::parse::inline::img_tag(&html.literal).map(|tag| {
+                        image_html(&tag.src, &tag.alt, tag.width, base_dir, &mut skipped_images)
+                    })
+                }
+                NodeValue::HtmlInline(html) if alone_in_paragraph(node) => {
+                    crate::parse::inline::img_tag(html).map(|tag| {
+                        image_html(&tag.src, &tag.alt, tag.width, base_dir, &mut skipped_images)
+                    })
                 }
                 _ => None,
             }
@@ -132,7 +134,10 @@ pub fn export(
         paragraph.append(text);
 
         // 画像は段落の中にあるので、包んでいる段落ごと置き換える
-        let target = if matches!(node.data.borrow().value, NodeValue::Image(_)) {
+        let target = if matches!(
+            node.data.borrow().value,
+            NodeValue::Image(_) | NodeValue::HtmlInline(_)
+        ) {
             node.parent().unwrap_or(node)
         } else {
             node
@@ -153,6 +158,52 @@ pub fn export(
     Ok(Html {
         text: wrap(title, &body),
         skipped_images,
+    })
+}
+
+/// 画像 1 つを HTML にする（埋め込めなければ、その旨の段落）。
+fn image_html(
+    url: &str,
+    alt: &str,
+    width: Option<f32>,
+    base_dir: Option<&Path>,
+    skipped: &mut usize,
+) -> String {
+    match embed_image(url, base_dir) {
+        Some(data_uri) => {
+            let width = width
+                .map(|w| format!(r#" width="{}""#, w.round() as u32))
+                .unwrap_or_default();
+            format!(
+                r#"<p><img src="{data_uri}" alt="{}"{width}></p>"#,
+                escape(alt)
+            )
+        }
+        // **埋め込めなかったものは件数で知らせる**（§17A.5）。
+        // 外部参照は持たないので、画像そのものは落とす
+        None => {
+            *skipped += 1;
+            format!(
+                r#"<p class="mv-missing">［画像を埋め込めません: {}］</p>"#,
+                escape(url)
+            )
+        }
+    }
+}
+
+/// 段落の中身がこれ 1 つだけか（前後の空白は除く）。
+fn alone_in_paragraph<'a>(node: &'a AstNode<'a>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if !matches!(parent.data.borrow().value, NodeValue::Paragraph) {
+        return false;
+    }
+    parent.children().all(|child| {
+        std::ptr::eq(child, node)
+            || matches!(&child.data.borrow().value,
+                NodeValue::Text(text) if text.trim().is_empty())
+            || matches!(child.data.borrow().value, NodeValue::SoftBreak)
     })
 }
 
@@ -369,6 +420,18 @@ mod tests {
         let out = html("![見本](img/sample.png)\n");
         assert!(out.contains("data:image/png;base64,"), "埋め込まれていない");
         assert!(!out.contains("img/sample.png"), "元のパスが残っている");
+    }
+
+    /// **`<img>` タグ 1 つだけのものも埋め込む**（v2.1.0 R-17）。幅は保ち、他の属性は捨てる
+    #[test]
+    fn a_lone_img_tag_is_inlined() {
+        let out =
+            html("<img width=\"200\" alt=\"見本\" onerror=\"alert(1)\" src=\"img/sample.png\">\n");
+        assert!(out.contains("data:image/png;base64,"), "埋め込まれていない");
+        assert!(out.contains(r#"width="200""#), "幅が落ちた");
+        assert!(!out.contains("onerror"), "属性がそのまま出ている");
+        let inline = html("前 <img src=\"img/sample.png\"> 後\n");
+        assert!(!inline.contains("data:image"), "文の中のタグまで埋め込んだ");
     }
 
     /// **外部の画像は埋め込まず、跡を残す**（§17A.5）。

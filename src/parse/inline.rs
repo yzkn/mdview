@@ -69,6 +69,80 @@ pub struct BlockContent {
     /// レイアウト層はこれを見て、段落ではなく画像の箱を置く（§16.12）。
     /// 文章の途中にある画像はここに入らない。
     pub lone_image: Option<String>,
+    /// `<img width="…">` で幅が指定されていれば、その幅（px。v2.1.0）
+    pub lone_image_width: Option<f32>,
+}
+
+/// `<img>` タグ 1 つから読んだもの（v2.1.0 R-17）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImgTag {
+    pub src: String,
+    pub width: Option<f32>,
+    pub alt: String,
+}
+
+/// 文字列が `<img …>` のタグ 1 つだけなら、その中身を読む。
+///
+/// **読むのは `src`・`width`・`alt` だけ。** `onerror` などは見ない
+/// （描くのは画像そのものだけで、属性を HTML として動かすことはない）。
+/// タグの前後に別のものがあれば `None`
+pub fn img_tag(html: &str) -> Option<ImgTag> {
+    let trimmed = html.trim();
+    // **`get` で切る。** 先頭が日本語だと、4 バイト目が字の途中になる
+    let head = trimmed
+        .get(..4)
+        .is_some_and(|head| head.eq_ignore_ascii_case("<img"));
+    if trimmed.len() < 5 || !head || !trimmed.ends_with('>') {
+        return None;
+    }
+    let body = trimmed[4..trimmed.len() - 1].trim_end_matches('/');
+    // 4 文字目の後ろは空白でなければならない（`<imgx>` は別のタグ）
+    if !body.starts_with(char::is_whitespace) || body.contains('<') || body.contains('>') {
+        return None;
+    }
+
+    let mut src = None;
+    let mut width = None;
+    let mut alt = String::new();
+    let mut rest = body.trim_start();
+    while !rest.is_empty() {
+        let name_end = rest
+            .find(|c: char| c == '=' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let name = rest[..name_end].to_ascii_lowercase();
+        rest = rest[name_end..].trim_start();
+        let mut value = String::new();
+        if let Some(after) = rest.strip_prefix('=') {
+            let after = after.trim_start();
+            let (quoted, remain) = match after.chars().next() {
+                Some(quote @ ('"' | '\'')) => {
+                    let inner = &after[1..];
+                    // 閉じの引用符が無ければタグとして読まない
+                    let end = inner.find(quote)?;
+                    (&inner[..end], &inner[end + 1..])
+                }
+                _ => {
+                    let end = after.find(char::is_whitespace).unwrap_or(after.len());
+                    (&after[..end], &after[end..])
+                }
+            };
+            value = quoted.to_owned();
+            rest = remain.trim_start();
+        }
+        match name.as_str() {
+            "src" => src = Some(value),
+            "alt" => alt = value,
+            // `100%` のような書き方は採らない（画面の幅に合わせる）
+            "width" => width = value.trim().trim_end_matches("px").parse::<f32>().ok(),
+            _ => {}
+        }
+    }
+    let src = src.filter(|src| !src.trim().is_empty())?;
+    Some(ImgTag {
+        src,
+        width: width.filter(|w| *w > 0.0),
+        alt,
+    })
 }
 
 /// セルの寄せ方（区切り行の `:` で決まる）。
@@ -177,8 +251,13 @@ pub fn parse_block(source: &str, kind: &BlockKind) -> BlockContent {
     let arena = Arena::new();
     let root = parse_document(&arena, source, &options());
 
+    let (lone_image, lone_image_width) = match lone_image(root) {
+        Some((src, width)) => (Some(src), width),
+        None => (None, None),
+    };
     let mut content = BlockContent {
-        lone_image: lone_image(root),
+        lone_image,
+        lone_image_width,
         ..Default::default()
     };
     collect(root, 0, &mut content);
@@ -195,11 +274,18 @@ pub fn parse_block(source: &str, kind: &BlockKind) -> BlockContent {
 ///
 /// **前後の空白以外に何も無いこと**を条件にする。`![a](x) と書いた` のように
 /// 文章が続く場合は、行の中に箱を置く必要があり、ここでは扱わない。
-fn lone_image<'a>(root: &'a AstNode<'a>) -> Option<String> {
+///
+/// **`<img>` タグ 1 つだけの段落も画像とみなす**（v2.1.0 R-17）。貼り付けた画像を
+/// GitHub と同じ `<img>` で入れるため。戻りの 2 つ目はタグの `width`
+fn lone_image<'a>(root: &'a AstNode<'a>) -> Option<(String, Option<f32>)> {
     let mut children = root.children();
     let paragraph = children.next()?;
     if children.next().is_some() {
         return None;
+    }
+    // 行頭の `<img …>` は HTML のブロックとして読まれる
+    if let NodeValue::HtmlBlock(html) = &paragraph.data.borrow().value {
+        return img_tag(&html.literal).map(|tag| (tag.src, tag.width));
     }
     if !matches!(paragraph.data.borrow().value, NodeValue::Paragraph) {
         return None;
@@ -212,7 +298,14 @@ fn lone_image<'a>(root: &'a AstNode<'a>) -> Option<String> {
                 if url.is_some() {
                     return None;
                 }
-                url = Some(link.url.clone());
+                url = Some((link.url.clone(), None));
+            }
+            NodeValue::HtmlInline(html) => {
+                let tag = img_tag(html)?;
+                if url.is_some() {
+                    return None;
+                }
+                url = Some((tag.src, tag.width));
             }
             // 空白だけなら無視する
             NodeValue::Text(text) if text.trim().is_empty() => {}
@@ -678,6 +771,37 @@ mod tests {
         assert!(code.lines.is_empty());
         let table = parse_block("| a | b |\n|---|---|\n", &BlockKind::Table);
         assert!(table.lines.is_empty());
+    }
+
+    /// **`<img>` タグ 1 つだけの段落**も画像として扱う（v2.1.0 R-17）。
+    #[test]
+    fn a_lone_img_tag_is_an_image() {
+        let content =
+            parse("<img width=\"320\" height=\"200\" alt=\"image\" src=\"images/a.png\">\n");
+        assert_eq!(content.lone_image.as_deref(), Some("images/a.png"));
+        assert_eq!(content.lone_image_width, Some(320.0));
+        // 文の中の `<img>` は画像の箱にしない
+        let inline = parse("前 <img src=\"a.png\"> 後\n");
+        assert_eq!(inline.lone_image, None);
+    }
+
+    #[test]
+    fn img_tags_are_read_safely() {
+        let tag = img_tag("<img src='a b.png' alt=\"図\" onerror=\"alert(1)\" />").expect("読める");
+        assert_eq!(tag.src, "a b.png");
+        assert_eq!(tag.alt, "図");
+        assert_eq!(tag.width, None);
+        assert!(img_tag("<imgx src=\"a\">").is_none());
+        assert!(
+            img_tag("あいうえお>").is_none(),
+            "日本語で始まっても落ちない"
+        );
+        assert!(img_tag("<img alt=\"src が無い\">").is_none());
+        assert!(img_tag("<img src=\"a\"><img src=\"b\">").is_none());
+        assert_eq!(
+            img_tag("<img width=100% src=a>").and_then(|t| t.width),
+            None
+        );
     }
 
     /// **画像 1 つだけの段落**は、参照先が取れる。

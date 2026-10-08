@@ -50,13 +50,15 @@ fn answer_without_a_window() -> Option<String> {
         return Some(format!(
             "{name} {version}\n\
              \n\
-             使い方: {bin} [オプション] [ファイル]\n\
+             使い方: {bin} [オプション] [ファイル…]\n\
              \n\
              オプション:\n\
              \x20 -h, --help     この説明を出す\n\
              \x20 -V, --version  版数を出す\n\
+             \x20 --automation   試験用の操作口を開く（GUI 自動テスト。標準入出力で JSON を交わす）\n\
              \n\
-             ファイルを渡すと、その Markdown を開いた状態で起動する。",
+             ファイルを渡すと、その Markdown を開いた状態で起動する。\n\
+             2 つ以上渡すと、2 つ目からは別のウィンドウで開く。",
             name = APP_NAME,
             version = env!("CARGO_PKG_VERSION"),
             bin = env!("CARGO_PKG_NAME"),
@@ -226,10 +228,25 @@ fn main() -> iced::Result {
 
     // **同梱フォントを読み込んでから窓を出す**（§16.11）。
     // システムフォントに頼ると、日本語に中国語の字形が拾われる（§6.5.5）
+    // **窓の置き方は設定から決める**（v2.1.0 R-02 / R-05）。
+    // 左半分・右半分は、窓が出てからアプリ側で寄せる
+    let placement = app::initial_window(&io::settings::Settings::load());
     let mut application = iced::application(app::App::new, app::App::update, app::App::view)
         .title(app::App::title)
         .subscription(app::App::subscription)
-        .window_size(iced::Size::new(1200.0, 800.0))
+        .window(iced::window::Settings {
+            size: placement.size,
+            position: placement.position,
+            maximized: placement.maximized,
+            level: if placement.on_top {
+                iced::window::Level::AlwaysOnTop
+            } else {
+                iced::window::Level::Normal
+            },
+            // 閉じる要求は自分で受ける（下の `exit_on_close_request` と同じ）
+            exit_on_close_request: false,
+            ..iced::window::Settings::default()
+        })
         .theme(app::App::theme)
         // **閉じる要求を自分で受ける。** 未保存の確認を挟むため（§18.2）
         .exit_on_close_request(false)

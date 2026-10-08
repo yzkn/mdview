@@ -1,6 +1,6 @@
 [package]
 name = "mdview"
-version = "2.0.1"
+version = "2.1.0"
 description = "Markdown viewer and editor"
 authors = []
 edition = "2021"
@@ -66,6 +66,9 @@ encoding_rs = "0.8"
 # PDF の生成（DEC-205）。v1 の WebView 印刷に依存しない。
 # **同梱フォントをそのまま埋め込む**（サブセット化は krilla が行う。§8.5）
 krilla = "0.8"
+# クリップボードの画像を読む（v2.1.0 R-17）。**iced のクリップボードは文字しか扱えない**。
+# 既定の機能は画像の読み書きだけで、ネットワークには出ない
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 [build-dependencies]
 # Windows の実行ファイルへアイコンと版数を埋める（B-2）。

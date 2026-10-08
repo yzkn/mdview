@@ -198,11 +198,21 @@ jobs:
 
           app="$mount/mdview.app"
           test -d "$app" || { echo "バンドルが無い"; exit 1; }
-          test -x "$app/Contents/MacOS/mdview" || { echo "実行ファイルが無い"; exit 1; }
+          editor="$app/Contents/Helpers/mdview.app"
+          test -x "$app/Contents/MacOS/mdview" || { echo "起動用が無い"; exit 1; }
+          test -x "$editor/Contents/MacOS/mdview" || { echo "本体が無い"; exit 1; }
           test -f "$app/Contents/Resources/mdview.icns" || { echo "アイコンが無い"; exit 1; }
           # **plist が壊れていないか確かめる。** 壊れていると起動すらしない
           plutil -lint "$app/Contents/Info.plist"
-          "$app/Contents/MacOS/mdview" --version
+          plutil -lint "$editor/Contents/Info.plist"
+          # **本体は別のバンドル ID**（同じだと Finder の開く要求が本体へ行く。R-08）
+          outer=$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")
+          inner=$(plutil -extract CFBundleIdentifier raw "$editor/Contents/Info.plist")
+          [ "$outer" != "$inner" ] || { echo "バンドル ID が同じ: $outer"; exit 1; }
+          # 本体を直に、そして起動用越しに（引数があれば本体に置き換わる）
+          "$editor/Contents/MacOS/mdview" --version
+          "$app/Contents/MacOS/mdview" --version | grep -q "^mdview " \
+            || { echo "起動用が本体へ引数を渡せない"; exit 1; }
 
           hdiutil detach "$mount" -quiet
           echo "開いて・起動できた"

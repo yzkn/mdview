@@ -80,3 +80,38 @@ jobs:
         # レイアウト層は描画層に依存しないため、ウィンドウ無しで試験できる。
         # **画面の見た目は CI では確かめられない**（字形・IME・滑らかさ）
         run: cargo test --all
+
+      - name: macOS の起動用を型検査する
+        # Finder から開いたファイルを受け取る小さなアプリ（v2.1.0 R-08）。
+        # **Swift は macOS でしか試せない**ので、ここで書き損じを拾う
+        if: runner.os == 'macOS'
+        run: swiftc -typecheck packaging/macos/launcher/main.swift
+
+      # --- GUI 試験（v2.1.0） ---
+      #
+      # 試験用の操作口（`--automation`）で、要件の項目を 1 つずつ確かめる
+      # （docs/GUI自動テストの方針.md）。**窓が要る**ので、Linux は仮想の画面（Xvfb）で動かす。
+      # Windows でしか確かめられない項目（最前面・作業領域）は、他の OS では「未確認」と出る
+      - name: GUI 試験のためにリリースビルドを作る
+        run: cargo build --release
+
+      - name: Linux の仮想の画面を用意する
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y xvfb
+
+      - name: GUI 試験（要件の確認）
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --shots gui-shots
+          else
+            python tools/automation/spec_test.py --shots gui-shots
+          fi
+
+      - name: GUI 試験の画面写真を残す
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-shots-${{ matrix.os }}
+          path: gui-shots
+          if-no-files-found: ignore
