@@ -38,6 +38,16 @@ pub fn requested() -> bool {
     std::env::args().any(|arg| arg == "--automation")
 }
 
+thread_local! {
+    /// 試験で置いたクリップボードの持ち主。
+    ///
+    /// **X11 では置いた側が持ち続けないと中身が消える。** arboard は `Clipboard` を
+    /// 捨てるときクリップボードの管理役へ渡すが、xvfb には管理役が居ないため、
+    /// 置いた直後に空になり貼り付けの試験が落ちていた（Linux の GUI 試験で見つかった）
+    static CLIPBOARD: std::cell::RefCell<Option<arboard::Clipboard>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// 画面写真（`Debug` を持たないので包む）。
 #[derive(Clone)]
 pub struct Shot(pub iced::window::Screenshot);
@@ -1184,7 +1194,11 @@ impl App {
             }
             "set_clipboard" => {
                 // OS のクリップボードへ置く（貼り付けの試験で使う）
-                let result = arboard::Clipboard::new().and_then(|mut clipboard| {
+                let result = CLIPBOARD.with_borrow_mut(|held| {
+                    let clipboard = match held {
+                        Some(clipboard) => clipboard,
+                        None => held.insert(arboard::Clipboard::new()?),
+                    };
                     if let Some(text) = arg("text") {
                         clipboard.set_text(text)
                     } else if let Some(path) = arg("image") {

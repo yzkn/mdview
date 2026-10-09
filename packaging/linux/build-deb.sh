@@ -81,6 +81,8 @@ MIME
 
 # --- 包みの説明 ---
 size_kb="$(du -sk "$root" | cut -f1)"
+# **libxkbcommon-x11-0 も要る。** winit は X11 で動くとき実行時に読み込む（dlopen）ため、
+# 実行ファイルの依存には出ない。無いと起動直後に落ちる（CI の xvfb で見つかった）
 cat > "$root/DEBIAN/control" <<CONTROL
 Package: mdview
 Version: $deb_version
@@ -88,7 +90,7 @@ Section: editors
 Priority: optional
 Architecture: amd64
 Installed-Size: $size_kb
-Depends: libc6, libx11-6, libxkbcommon0
+Depends: libc6, libx11-6, libxkbcommon0, libxkbcommon-x11-0
 Description: Markdown viewer and editor
  A single-file Markdown viewer and editor that opens 10 MB documents
  without slowing down. Fonts are bundled, so text renders the same

@@ -1683,7 +1683,10 @@ def colors_come_from_the_text_color(ctx):
                                       "minimap": False})
         width, height, _ = support.read_png(ctx.shot(app, f"colors-{theme}-0.png"))
         scale = app.window()["scale"]
-        rect = (60 * scale, 50 * scale, width - 40 * scale, 200 * scale)
+        # **上端はメニューバーの下（36px）から。** 1 行目の塗りつぶしの字（文字色）を
+        # 丸ごと入れる。50px からだと倍率 1 では字が欠けて数が足りず、
+        # 選択の色を文字色と取り違えていた（Linux の GUI 試験で見つかった）
+        rect = (60 * scale, 36 * scale, width - 40 * scale, 200 * scale)
         app.caret(1, 0)
         app.caret(2, 0, select=True)
         shot = ctx.shot(app, f"colors-{theme}-selection.png")

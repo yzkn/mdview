@@ -33,7 +33,7 @@ syntect = { version = "5.3", default-features = false, features = [
 # Mermaid の図（DEC-207）。v1 と同じ mermaid 11.17.2 に追従する純 Rust 実装
 merman = "0.8.0-alpha.6"
 # SVG のラスタライズ。画面表示と PDF 出力の双方で要る
-resvg = "0.45"
+resvg = "0.48"
 # merman のサイト設定（htmlLabels の一括無効化）を JSON で渡すため
 serde_json = "1"
 # LaTeX 数式（DEC-210）。出力はすべて <path> で、描画に外部フォントが要らない
@@ -49,9 +49,9 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 # ファイル選択と確認のダイアログ（§14.1 / §18.2）。
 # **OS のものを使う。** 自前で描くと入力補完やネットワークの場所を作り直すことになる
-rfd = "0.16"
+rfd = "0.17"
 # OS の外観（Light / Dark）の取得。iced は内部で追うがアプリへ渡す口が無い
-dark-light = "2"
+dark-light = "3"
 # 検索・置換の正規表現（§8.2）。**後戻りしない実装**を選ぶ。
 # fancy-regex（syntect が使う）は先読みが書けるが、書き方次第で
 # 10MB の文書に対して事実上終わらない照合になりうる

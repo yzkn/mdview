@@ -55,12 +55,16 @@ class Mdview:
         command = [self.exe, "--automation", *self.args]
         if self.document:
             command.append(str(self.document))
+        # **標準エラーは捨てずにファイルへ残す。** 起動直後に落ちたとき、
+        # 理由（panic の文言など）が試験の結果に出ないと切り分けられない
+        self._stderr_path = os.path.join(self.config_dir, "stderr.log")
+        self._stderr = open(self._stderr_path, "w", encoding="utf-8")
         self.process = subprocess.Popen(
             command,
             cwd=self.cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=self._stderr,
             env=env,
             text=True,
             encoding="utf-8",
@@ -95,9 +99,23 @@ class Mdview:
             except queue.Empty:
                 continue
             if message is None:
-                raise RuntimeError("mdview が終わりました")
+                raise RuntimeError("mdview が終わりました" + self._stderr_tail())
             if accept(message):
                 return message
+
+    def _stderr_tail(self, lines=20):
+        """標準エラーの末尾（終わったときの知らせに添える）。"""
+        try:
+            self.process.wait(timeout=2)
+        except (subprocess.TimeoutExpired, AttributeError):
+            pass
+        try:
+            with open(self._stderr_path, encoding="utf-8", errors="replace") as file:
+                tail = file.read().splitlines()[-lines:]
+        except (OSError, AttributeError):
+            return ""
+        code = self.process.returncode if self.process else None
+        return f"（終了コード {code}）\n" + "\n".join(tail) if tail else f"（終了コード {code}）"
 
     def close(self, force=True):
         if self.process and self.process.poll() is None:
@@ -109,6 +127,8 @@ class Mdview:
                 self.process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.process.kill()
+        if getattr(self, "_stderr", None):
+            self._stderr.close()
         if self._own_config:
             import shutil
 

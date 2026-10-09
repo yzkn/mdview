@@ -556,6 +556,15 @@ fn closes_menu(message: &Message) -> bool {
             | Message::ClipboardImage(_)
             | Message::PlaceWindow { .. }
             | Message::Noop
+            // **エディタが自分から出すもの**（利用者の操作ではない）。
+            // IME の開閉は、Linux（X11）では入力の受け口が変わるたびに届く。
+            // キャレットへの追従は再描画のたびに出得る。これで閉じると、
+            // 開いた直後に消える（Linux の GUI 試験で見つかった）
+            | Message::Editor(
+                Action::Ime(ImeAction::Opened | ImeAction::Closed)
+                    | Action::ScrollTo { .. }
+                    | Action::ScrollXTo { .. }
+            )
             // 打鍵は割り当てを引いてから決める（何も無ければ閉じない）
             | Message::KeyChord { .. }
             // 試験の要求は、要求の中身で決める（メニューの項目を押す前に閉じてはいけない）
@@ -4417,6 +4426,33 @@ impl App {
             Some(open) => iced::widget::stack![body, self.dropdown(open)].into(),
             None => body.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod menu_close_tests {
+    use super::*;
+
+    /// **エディタが自分から出す知らせでは、開いたメニューを閉じない**。
+    ///
+    /// Linux（X11）では IME の開閉が入力の受け口の変化のたびに届き、
+    /// 開いた直後に閉じていた（GUI 試験で見つかった）
+    #[test]
+    fn editor_housekeeping_keeps_the_menu_open() {
+        let mut app = App::new().0;
+        let _ = app.update(Message::OpenMenu(menu::Menu::File));
+        for message in [
+            Message::Editor(Action::Ime(ImeAction::Opened)),
+            Message::Editor(Action::Ime(ImeAction::Closed)),
+            Message::Editor(Action::ScrollTo { top_line: 0 }),
+            Message::Editor(Action::ScrollXTo { to: 0.0 }),
+        ] {
+            let _ = app.update(message);
+            assert_eq!(app.open_menu, Some(menu::Menu::File));
+        }
+        // 利用者の操作では閉じる
+        let _ = app.update(Message::Editor(Action::Insert("a".to_owned())));
+        assert_eq!(app.open_menu, None);
     }
 }
 
