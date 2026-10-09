@@ -81,8 +81,22 @@ MIME
 
 # --- 包みの説明 ---
 size_kb="$(du -sk "$root" | cut -f1)"
-# **libxkbcommon-x11-0 も要る。** winit は X11 で動くとき実行時に読み込む（dlopen）ため、
-# 実行ファイルの依存には出ない。無いと起動直後に落ちる（CI の xvfb で見つかった）
+# **実行時に読み込む（dlopen）ものを Depends に並べる。** 実行ファイルの依存
+# （ldd）には出ないので、書き漏らすと利用者の手元で起動直後に落ちる。
+#
+#   - X11: winit が libX11・libXcursor・libX11-xcb・libXi を続けて開き、
+#     1 つでも無いと起動に失敗する（winit x11/xdisplay.rs）。
+#     xkbcommon-dl が libxkbcommon・libxkbcommon-x11 を開く
+#   - Wayland: WAYLAND_DISPLAY があれば Wayland を選び、X11 へは戻らない。
+#     libwayland-client が無いと落ちる
+#
+# **GPU 系（Vulkan・EGL）は Recommends。** 無くても CPU 描画（tiny-skia）に
+# 切り替わって動く。ファイルのダイアログ（libdbus・ポータル・zenity）も、
+# 無ければアプリ内の選択へ切り替わるので Recommends。
+#
+# 2026-10-09 に、まっさらな debian:stable-slim で確かめた。旧来の 4 つだけでは
+# `libXcursor.so.1` が無いと言って落ち、下の Depends だけで起動して描けた。
+# **足したら release.yml の「まっさらな環境で deb を起動する」が見張る。**
 cat > "$root/DEBIAN/control" <<CONTROL
 Package: mdview
 Version: $deb_version
@@ -90,7 +104,8 @@ Section: editors
 Priority: optional
 Architecture: amd64
 Installed-Size: $size_kb
-Depends: libc6, libx11-6, libxkbcommon0, libxkbcommon-x11-0
+Depends: libc6, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0
+Recommends: libvulkan1, libegl1, libdbus-1-3, xdg-desktop-portal | zenity
 Description: Markdown viewer and editor
  A single-file Markdown viewer and editor that opens 10 MB documents
  without slowing down. Fonts are bundled, so text renders the same

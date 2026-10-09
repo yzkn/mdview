@@ -19,8 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "配布するタグ（例: v2.0.1）。空なら起動したブランチの先頭を使う"
-        required: false
+        # **空を許さない。** 空だと Release の名前とタグが枝の名前（`main`）になる
+        description: "配布するタグ（例: v2.1.1）。先に push しておくこと"
+        required: true
         type: string
 
 concurrency:
@@ -69,6 +70,21 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
+
+      # **組み立てる前に、タグと中身が合っているかを見る。** 合わないまま組むと、
+      # ファイル名は Cargo.toml の版、Release の名前はタグの版で、食い違って配られる
+      - name: タグと版数を照合する
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "タグの形でない: $TAG（例: v2.1.1）"; exit 1 ;;
+          esac
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
+          [ "v$version" = "$TAG" ] || { echo "Cargo.toml（$version）とタグ（$TAG）が違う"; exit 1; }
+          echo "照合した: $TAG"
 
       - name: Rust ツールチェーンを用意する
         # 版数は rust-toolchain.toml に従う
@@ -162,16 +178,15 @@ jobs:
           sudo apt-get update >/dev/null
           sudo apt-get install -y "./$package"
 
-          # **実行時に読み込むものが依存から漏れていないか。** 実行ファイルの依存には出ないので、
-          # 落とすと X11 の環境で起動直後に落ちる（CI の xvfb で見つかった）
-          depends=$(dpkg-deb -f "$package" Depends)
-          echo "依存: $depends"
-          case "$depends" in *libxkbcommon-x11-0*) ;; *) echo "依存に libxkbcommon-x11-0 が無い"; exit 1;; esac
+          # 依存の漏れはここでは分からない（ランナーには大抵のものが入っている）。
+          # 次の「まっさらな環境で deb を起動する」が見る
+          echo "依存: $(dpkg-deb -f "$package" Depends)"
 
           test -x /usr/bin/mdview || { echo "入ったはずの実行ファイルが無い"; exit 1; }
           version=$(/usr/bin/mdview --version)
           echo "起動できた: $version"
-          case "$version" in mdview\ *) ;; *) echo "版数を返さない: $version"; exit 1;; esac
+          expected="mdview $(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)"
+          [ "$version" = "$expected" ] || { echo "版数が違う: $version（期待: $expected）"; exit 1; }
 
           # **メニューの定義が妥当か確かめる。** 壊れていると一覧に出ない
           sudo apt-get install -y desktop-file-utils >/dev/null
@@ -180,6 +195,45 @@ jobs:
           sudo dpkg -r mdview
           test ! -e /usr/bin/mdview || { echo "消したはずの実行ファイルが残っている"; exit 1; }
           echo "入れて・起動して・消せた"
+
+      # **まっさらな環境に依存だけを入れ、窓を出して描けるかを見る。**
+      #
+      # 上の煙試験は `--version` だけで窓を出さないうえ、ランナーには大抵の
+      # ライブラリが入っている。winit が実行時に読み込む（dlopen）ものが Depends から
+      # 漏れていても通ってしまい、v2.1.1 で 2 度、利用者の手元で落ちる形で踏んだ
+      # （libxkbcommon-x11・libXcursor ほか）。
+      #
+      # `--no-install-recommends` で **Depends だけ**を入れる。2 段に分ける:
+      #
+      #   1. `.deb` だけを入れて、実行時に読み込むライブラリがそろっているかを見る。
+      #      **xvfb より先に見る。** xvfb は libX11・libX11-xcb を連れてくるので、
+      #      後から見ると漏れが隠れる。Wayland 用は起動の試験では読み込まれないので、
+      #      ここでしか捕まえられない
+      #   2. xvfb を入れ、窓を出して描けるかを見る
+      #
+      # 2026-10-09 に手元の podman で、v2.1.1 の deb が 1 で 4 つの漏れを指摘して落ち、
+      # 依存を足すと通ること、GPU 系を消しても CPU 描画で 2 が通ることを確かめた
+      #
+      # **`--init` を外さない。** 外すと `bash -c` が最後の `xvfb-run` を exec して
+      # PID 1 にし、Xvfb の準備完了の合図（SIGUSR1）が届かずに永久に待つ
+      # （手元で 19 分止まった。2026-10-09）。止まっても早く切れるよう上限も置く
+      - name: まっさらな環境で deb を起動する
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          set -eu
+          package=$(ls dist/*.deb)
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
+          docker run --rm --init -v "$PWD:/w" -w /w -e PACKAGE="$package" -e VERSION="$version" \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            debian:stable-slim bash -euc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends "./$PACKAGE" >/dev/null
+              bash packaging/linux/check-runtime-libs.sh
+              apt-get install -y -qq --no-install-recommends xvfb xauth python3 >/dev/null
+              xvfb-run -a -s "-screen 0 1280x800x24" \
+                python3 tools/automation/launch_check.py /usr/bin/mdview "$VERSION"'
 
       - name: AppImage の煙試験
         if: runner.os == 'Linux'

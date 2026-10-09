@@ -3,6 +3,26 @@
 書き方は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に、
 版数は [Semantic Versioning](https://semver.org/lang/ja/) に従う。
 
+## [2.1.2] - 2026-10-09
+
+v2.1.1 の `.deb` が、最小構成の Linux（WSL・コンテナなど）で起動できなかったのを直した。
+
+### Fixed
+
+- **Linux の `.deb` が、最小構成の環境で起動直後に落ちたのを直した。**
+  winit が実行時に読み込む（dlopen）ライブラリのうち、`libx11-xcb1`・`libxcursor1`・`libxi6`（X11）と
+  `libwayland-client0`（Wayland）が `Depends` から漏れていた。v2.1.1 の `.deb` は、まっさらな Debian に
+  入れると `libXcursor.so.1: cannot open shared object file` で落ちる。
+  GPU 系（`libvulkan1`・`libegl1`）とファイルのダイアログ（`libdbus-1-3`・`xdg-desktop-portal | zenity`）は
+  `Recommends` にした（無くても CPU 描画・アプリ内の選択で動く）
+
+### Changed
+
+- Release: **まっさらな環境（`debian:stable-slim`）に `.deb` の依存だけを入れ、窓を出して描けるか**を
+  確かめる段を足した（`tools/automation/launch_check.py`）。依存の漏れはここで落ちる
+- Release: `.deb` の煙試験で、版数を `Cargo.toml` と照合する。組み立ての前にタグと版数を照合し、
+  手動起動の `tag` を必須にした（空だと Release の名前が `main` になっていた）
+
 ## [2.1.1] - 2026-10-09
 
 v2.1.0 を配ったあと、CI の 3 OS の GUI 試験で見つかったものを直した。
@@ -23,6 +43,7 @@ v2.1.0 を配ったあと、CI の 3 OS の GUI 試験で見つかったもの�
   `UnicodeEncodeError` で落ちていた）。mdview が起動中に終わったときは、終了コードと
   標準エラーの末尾を知らせに添える
 - CI: Linux の GUI 試験に `libxkbcommon-x11-0` を入れる
+- Release: `.deb` の煙試験を `dpkg -i` から `apt-get install ./…` にした（依存を解決させる）
 - 依存の更新: `dark-light` 3.0.0・`rfd` 0.17.2・`resvg` 0.48.1・`lru` 0.18.5・
   `merman` 0.8.0・`encoding_rs` 0.8.42。Actions は `actions/cache` v6・
   `actions/upload-artifact` v6・`actions/download-artifact` v7

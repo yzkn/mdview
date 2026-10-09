@@ -1,9 +1,9 @@
 # リリース手順
 
 対象: v2.0.1 以降
-最終更新: 2026-10-09（v2.1.1 のパッチ配布に合わせた）
+最終更新: 2026-10-09（v2.1.2 のパッチ配布に合わせた）
 
-**パッチ版（v2.1.1 など）を配るときは、§3-2 の通し手順をそのまま上から貼る。**
+**パッチ版（v2.1.2 など）を配るときは、§3-2 の通し手順をそのまま上から貼る。**
 タグを push しただけでは Release は走らない（§1）。
 
 ---
@@ -33,16 +33,17 @@
 |きっかけ|走るか|
 |---|---|
 |`v<major>.<minor>.0` のタグ（`-alpha.1` などを含む）|**走る**|
-|`v2.1.1` のようなパッチのタグ|走らない。**Actions から手動で起動する**|
+|`v2.1.2` のようなパッチのタグ|走らない。**Actions から手動で起動する**|
 |ふだんの push|走らない（CI だけ走る）|
 
-手動起動: Actions → Release → Run workflow。`tag` に版数（例 `v2.1.1`）を入れる。
-コマンドなら `gh workflow run release.yml --ref main -f tag=v2.1.1`。
+手動起動: Actions → Release → Run workflow。`tag` に版数（例 `v2.1.2`）を入れる。
+コマンドなら `gh workflow run release.yml --ref main -f tag=v2.1.2`。
 
 手動起動のときの決まり:
 
 |決まり|理由|
 |---|---|
+|**`tag` は必須**。タグの形（`v2.1.2`）で、`Cargo.toml` の版と同じであること|最初の段「タグと版数を照合する」で止まる。空を許すと Release の名前が枝の名前（`main`）になっていた|
 |**タグを先に push しておく**|ワークフローは `tag` の版を `actions/checkout` で取り出す。無いタグは取り出せずに落ちる|
 |ワークフローの定義は `--ref` の枝（`main`）のものが使われる|組み立てる中身はタグの版、手順は `main` の版。**ワークフローを直したら `main` へ入れてから起動する**|
 |同じタグの Release が既に在ると最後の段で落ちる|`gh release create` は上書きしない。**出来た Release は作り直さない**（§8-6）。欠けた OS を足すなら §3「あとから足したいとき」|
@@ -54,7 +55,7 @@
 ### 2-1. `Cargo.toml`
 
 ```toml
-version = "2.1.1"
+version = "2.1.2"
 ```
 
 **版数の出どころはここだけ。** インストーラも Release の名前も、
@@ -73,7 +74,7 @@ git diff --stat      # Cargo.toml と Cargo.lock が 1 行ずつ変わってい�
 `[未リリース]` を版数の節へ繰り下げ、日付を入れる。
 
 ```markdown
-## [2.1.1] - 2026-10-09
+## [2.1.2] - 2026-10-09
 ```
 
 **「分かっている制限」も書く。** 直っていないものを黙っていると、
@@ -124,7 +125,7 @@ git push origin v2.2.0
 タグを push すると Release ワークフローが走る。
 終わると**下書きではない Release** が出来ている。
 
-### 3-2. パッチ版（`v2.1.1` など）の通し手順
+### 3-2. パッチ版（`v2.1.2` など）の通し手順
 
 **タグの push では走らない**ので、push のあとに手で起動する（§1）。
 
@@ -138,36 +139,36 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all
 cargo build --release
-./target/release/mdview --version                 # mdview 2.1.1
+./target/release/mdview --version                 # mdview 2.1.2
 
 # 3. 記録してタグを打つ
 git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: v2.1.1"
-git tag v2.1.1
+git commit -m "chore: v2.1.2"
+git tag v2.1.2
 git push origin main
 gh run watch "$(gh run list --workflow ci.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')"
                                                   # main の CI が 3 OS とも通るのを待つ
-git push origin v2.1.1                            # 走らない。次で起動する
+git push origin v2.1.2                            # 走らない。次で起動する
 
 # 4. Release を組む
-gh workflow run release.yml --ref main -f tag=v2.1.1
+gh workflow run release.yml --ref main -f tag=v2.1.2
 sleep 5
 gh run list --workflow release.yml --limit 1      # 起動したことを確かめる
 gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 
 # 5. 出来たものを確かめる（§8-7）
-gh release view v2.1.1 --json assets --jq '.assets[].name'   # 8 つ（§3「出来るもの」）
-mkdir -p check && gh release download v2.1.1 --dir check
+gh release view v2.1.2 --json assets --jq '.assets[].name'   # 8 つ（§3「出来るもの」）
+mkdir -p check && gh release download v2.1.2 --dir check
 (cd check && sha256sum -c SHA256SUMS.txt)
 ```
 
-続けて §4 の目で見る確認を行う。**v2.1.1 では Linux の `.deb` を
+続けて §4 の目で見る確認を行う。**v2.1.2 では Linux の `.deb` を
 X11 の環境（または WSLg）で入れて起動できること**を必ず見る
-（`libxkbcommon-x11-0` を依存に足した版のため）。
+（実行時に読み込むライブラリ `libx11-xcb1`・`libxcursor1`・`libxi6`・`libxkbcommon-x11-0`・`libwayland-client0` を依存に足した版のため）。
 
 ```bash
-sudo apt install ./check/mdview-2.1.1-linux-x86_64.deb
-dpkg-deb -f ./check/mdview-2.1.1-linux-x86_64.deb Depends   # libxkbcommon-x11-0 が在ること
+sudo apt install ./check/mdview-2.1.2-linux-x86_64.deb
+dpkg-deb -f ./check/mdview-2.1.2-linux-x86_64.deb Depends   # libxcursor1 などが在ること
 mdview --version
 mdview samples/check-v201.md                                # 窓が出てメニューが開くこと
 sudo dpkg -r mdview
@@ -201,13 +202,13 @@ sudo dpkg -r mdview
 **同じ Release へ足すことはできる。**
 
 ```bash
-gh release upload v2.1.1 ./dist/mdview-2.1.1-macos-aarch64.dmg
-gh release upload v2.1.1 ./dist/mdview-2.1.1-macos-aarch64
+gh release upload v2.1.2 ./dist/mdview-2.1.2-macos-aarch64.dmg
+gh release upload v2.1.2 ./dist/mdview-2.1.2-macos-aarch64
 
 # 照合値を作り直して差し替える（足したものを含める）
-gh release download v2.1.1 --dir dist
+gh release download v2.1.2 --dir dist
 cd dist && sha256sum * > SHA256SUMS.txt && cd -
-gh release upload v2.1.1 ./dist/SHA256SUMS.txt --clobber
+gh release upload v2.1.2 ./dist/SHA256SUMS.txt --clobber
 ```
 
 **`SHA256SUMS.txt` を作り直すのを忘れない。** 足したものが照合値に
@@ -363,7 +364,7 @@ bash packaging/macos/build-dmg.sh       target/release/mdview dist
 
 ```powershell
 # Windows: 入れて・起動して・消す
-Start-Process -FilePath .\dist\mdview-2.1.1-windows-x86_64-setup.exe `
+Start-Process -FilePath .\dist\mdview-2.1.2-windows-x86_64-setup.exe `
   -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
 & "$env:LOCALAPPDATA\Programs\mdview\mdview.exe" --version
 Get-ChildItem "$env:LOCALAPPDATA\Programs\mdview\unins*.exe" |
@@ -374,24 +375,24 @@ Get-ChildItem "$env:LOCALAPPDATA\Programs\mdview\unins*.exe" |
 
 ```bash
 # Linux: deb
-sudo apt install ./dist/mdview-2.1.1-linux-x86_64.deb   # 足りない依存を解決させる
+sudo apt install ./dist/mdview-2.1.2-linux-x86_64.deb   # 足りない依存を解決させる
 /usr/bin/mdview --version
 desktop-file-validate /usr/share/applications/mdview.desktop
 sudo dpkg -r mdview
 
 # Linux: AppImage（FUSE が無い環境では展開して動かす）
-APPIMAGE_EXTRACT_AND_RUN=1 ./dist/mdview-2.1.1-linux-x86_64.AppImage --version
+APPIMAGE_EXTRACT_AND_RUN=1 ./dist/mdview-2.1.2-linux-x86_64.AppImage --version
 
 # 中身だけ見る（root が要らない）
-dpkg-deb -I ./dist/mdview-2.1.1-linux-x86_64.deb   # control
-dpkg-deb -c  ./dist/mdview-2.1.1-linux-x86_64.deb   # ファイルの配置
-dpkg-deb -x  ./dist/mdview-2.1.1-linux-x86_64.deb /tmp/mdview-check
+dpkg-deb -I ./dist/mdview-2.1.2-linux-x86_64.deb   # control
+dpkg-deb -c  ./dist/mdview-2.1.2-linux-x86_64.deb   # ファイルの配置
+dpkg-deb -x  ./dist/mdview-2.1.2-linux-x86_64.deb /tmp/mdview-check
 ```
 
 ```bash
 # macOS: dmg
 mount=$(mktemp -d)
-hdiutil attach ./dist/mdview-2.1.1-macos-aarch64.dmg -mountpoint "$mount" -nobrowse -quiet
+hdiutil attach ./dist/mdview-2.1.2-macos-aarch64.dmg -mountpoint "$mount" -nobrowse -quiet
 plutil -lint "$mount/mdview.app/Contents/Info.plist"
 "$mount/mdview.app/Contents/MacOS/mdview" --version
 hdiutil detach "$mount" -quiet
@@ -401,27 +402,27 @@ hdiutil detach "$mount" -quiet
 
 ```bash
 git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: v2.1.1"
-git tag v2.1.1
+git commit -m "chore: v2.1.2"
+git tag v2.1.2
 git push origin main
-git push origin v2.1.1
+git push origin v2.1.2
 ```
 
 **打ち直すとき**（Release がまだ作られていない場合）:
 
 ```bash
-git push origin :refs/tags/v2.1.1    # リモートのタグを消す
-git tag -f v2.1.1                    # 手元のタグを今の先頭へ
-git push origin v2.1.1
+git push origin :refs/tags/v2.1.2    # リモートのタグを消す
+git tag -f v2.1.2                    # 手元のタグを今の先頭へ
+git push origin v2.1.2
 ```
 
 > **Release が既に出来ているタグは動かさない。** 受け取った人が
 > 見ているものと中身が変わる。版数を上げる。
 
-**パッチ版を手で起動する**（`v2.1.1` は自動では走らない。§1）:
+**パッチ版を手で起動する**（`v2.1.2` は自動では走らない。§1）:
 
 ```bash
-gh workflow run release.yml --ref main -f tag=v2.1.1
+gh workflow run release.yml --ref main -f tag=v2.1.2
 gh run list --workflow release.yml --limit 3
 gh run watch                          # 走っているものを追う
 ```
@@ -429,10 +430,10 @@ gh run watch                          # 走っているものを追う
 ### 8-7. 出来たものを確かめる
 
 ```bash
-gh release view v2.1.1
-gh release view v2.1.1 --json assets --jq '.assets[].name'
-gh release download v2.1.1 --pattern "*.deb"
-gh release edit v2.1.1 --notes-file notes.md     # 説明文を直す
+gh release view v2.1.2
+gh release view v2.1.2 --json assets --jq '.assets[].name'
+gh release download v2.1.2 --pattern "*.deb"
+gh release edit v2.1.2 --notes-file notes.md     # 説明文を直す
 ```
 
 ### 8-8. 落ちたときに原因を見る
@@ -459,7 +460,7 @@ sha256sum -c SHA256SUMS.txt
 
 ```powershell
 # Windows で確かめる
-Get-FileHash .\mdview-2.1.1-windows-x86_64-setup.exe -Algorithm SHA256
+Get-FileHash .\mdview-2.1.2-windows-x86_64-setup.exe -Algorithm SHA256
 ```
 
 **署名を始めるなら、決めることが 3 つある。**
@@ -505,10 +506,10 @@ cargo run --release --example make-icons
 
 ### タグを push したのに Release が走らない
 
-`v2.1.1` のようなパッチ版は**自動では走らない**（§1）。手で起動する。
+`v2.1.2` のようなパッチ版は**自動では走らない**（§1）。手で起動する。
 
 ```bash
-gh workflow run release.yml --ref main -f tag=v2.1.1
+gh workflow run release.yml --ref main -f tag=v2.1.2
 ```
 
 ### `v2.1.0` を push したら走ったが、途中で落ちた
@@ -529,6 +530,8 @@ gh run view <実行 ID> --log-failed
 |ISCC が「ファイルが無い」|`.iss` の相対パスは**スクリプトの置き場**基準。絶対パスで渡す|
 |`.ps1` が `Unexpected attribute 'CmdletBinding'`|本文に BOM が 2 つ入っていた。**BOM は先頭の 1 つだけ**にする|
 |deb の煙試験で `dependency problems - leaving unconfigured`|`dpkg -i` は依存を取りに行かない。**`apt-get install ./…` で入れる**（v2.1.1 で直した）|
+|「まっさらな環境で deb を起動する」が終わらない|`docker run` に `--init` が無い。`xvfb-run` が PID 1 になり、Xvfb の準備完了の合図が届かずに待ち続ける。段の `timeout-minutes: 10` で切れる|
+|「まっさらな環境で deb を起動する」で `cannot open shared object file`|実行時に読み込むライブラリが `.deb` の `Depends` から漏れている。`packaging/linux/build-deb.sh` の `Depends` に足す|
 
 CI（`ci.yml`）の GUI 試験で踏んだもの（v2.1.1 で直した）:
 
@@ -542,29 +545,40 @@ CI（`ci.yml`）の GUI 試験で踏んだもの（v2.1.1 で直した）:
 **タグを push していない。** 手元で打っただけでは公開側に無い。
 
 ```bash
-git ls-remote --tags origin v2.1.1     # 何も出なければ push していない
-git push origin v2.1.1
-gh workflow run release.yml --ref main -f tag=v2.1.1
+git ls-remote --tags origin v2.1.2     # 何も出なければ push していない
+git push origin v2.1.2
+gh workflow run release.yml --ref main -f tag=v2.1.2
 ```
 
 ### Release は作られたが、Linux の実行ファイルが動かない
 
 ```bash
-chmod +x ./mdview-2.1.1-linux-x86_64
-./mdview-2.1.1-linux-x86_64 --version
+chmod +x ./mdview-2.1.2-linux-x86_64
+./mdview-2.1.2-linux-x86_64 --version
 ```
 
 AppImage は FUSE が要る。無い環境では展開して動かす。
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./mdview-2.1.1-linux-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./mdview-2.1.2-linux-x86_64.AppImage
 ```
 
-X11 の環境で起動直後に落ちるときは `libxkbcommon-x11-0` が無い
-（`.deb` は v2.1.1 から依存に含む。単一実行ファイルでは自分で入れる）。
+起動直後に落ちるときは、実行時に読み込むライブラリが無い
+（`.deb` は v2.1.2 から依存に含む。単一実行ファイルと AppImage では自分で入れる）。
+標準エラーに `libXcursor.so.1: cannot open shared object file` のように、無いものの名前が出る。
 
 ```bash
-sudo apt install libxkbcommon-x11-0
+sudo apt install libx11-6 libx11-xcb1 libxcursor1 libxi6 libxkbcommon-x11-0 libwayland-client0 libxkbcommon0
+```
+
+### v2.1.1 の `.deb` を入れたが起動しない
+
+**v2.1.1 の `.deb` は依存が足りない。** 最小構成の環境（まっさらな Debian・WSL など）では
+`libXcursor.so.1: cannot open shared object file` で起動直後に落ちる。v2.1.2 に上げるか、
+足りないものを手で入れる。
+
+```bash
+sudo apt install libx11-xcb1 libxcursor1 libxi6 libwayland-client0
 ```
 
 ### WSL で窓が出ない（`NoCompositor` で落ちる）
