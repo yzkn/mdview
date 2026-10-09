@@ -156,7 +156,17 @@ jobs:
           set -eu
           package=$(ls dist/*.deb)
           echo "試す: $package"
-          sudo dpkg -i "$package"
+          # **`dpkg -i` ではなく `apt-get install ./…` で入れる。** 受け取った側と同じ経路にする。
+          # `dpkg` は足りない依存を取りに行かず、ランナーに無い依存
+          # （v2.1.1 で足した libxkbcommon-x11-0）で設定に失敗していた
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y "./$package"
+
+          # **実行時に読み込むものが依存から漏れていないか。** 実行ファイルの依存には出ないので、
+          # 落とすと X11 の環境で起動直後に落ちる（CI の xvfb で見つかった）
+          depends=$(dpkg-deb -f "$package" Depends)
+          echo "依存: $depends"
+          case "$depends" in *libxkbcommon-x11-0*) ;; *) echo "依存に libxkbcommon-x11-0 が無い"; exit 1;; esac
 
           test -x /usr/bin/mdview || { echo "入ったはずの実行ファイルが無い"; exit 1; }
           version=$(/usr/bin/mdview --version)

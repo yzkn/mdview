@@ -528,6 +528,7 @@ gh run view <実行 ID> --log-failed
 |`Permission denied`（終了コード 126）|`.sh` の実行ビットが落ちていた。**`bash` を頭に付けて呼ぶ**|
 |ISCC が「ファイルが無い」|`.iss` の相対パスは**スクリプトの置き場**基準。絶対パスで渡す|
 |`.ps1` が `Unexpected attribute 'CmdletBinding'`|本文に BOM が 2 つ入っていた。**BOM は先頭の 1 つだけ**にする|
+|deb の煙試験で `dependency problems - leaving unconfigured`|`dpkg -i` は依存を取りに行かない。**`apt-get install ./…` で入れる**（v2.1.1 で直した）|
 
 CI（`ci.yml`）の GUI 試験で踏んだもの（v2.1.1 で直した）:
 
