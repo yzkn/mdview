@@ -52,7 +52,7 @@ jobs:
       # 版を固定してあるので、鍵にはその取得スクリプトを使う
       - name: 同梱フォントのキャッシュ
         id: fonts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: assets/fonts
           key: fonts-${{ hashFiles('tools/fetch-fonts.py') }}
@@ -97,7 +97,10 @@ jobs:
 
       - name: Linux の仮想の画面を用意する
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y xvfb
+        # **xvfb だけでは窓が出ない。** winit は X11 で動くとき libxkbcommon-x11 を
+        # 実行時に読み込む（dlopen）。ビルド依存の libxkbcommon-dev には含まれず、
+        # ランナーにも入っていないため、起動直後に落ちて全項目が失敗していた
+        run: sudo apt-get install -y xvfb libxkbcommon-x11-0
 
       - name: GUI 試験（要件の確認）
         shell: bash
@@ -110,7 +113,7 @@ jobs:
 
       - name: GUI 試験の画面写真を残す
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: gui-shots-${{ matrix.os }}
           path: gui-shots

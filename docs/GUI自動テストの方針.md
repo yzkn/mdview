@@ -197,6 +197,19 @@ python tools/automation/spec_test.py --strict        # 「未確認」も失敗�
 - **`未網羅` が 1 つでもあれば失敗にする。** 試験を足し忘れたことを黙らせない
 - 項目を確かめる試験のうち **1 つでも飛ばしたものがあれば `未確認`** にする（残りの試験が別の面しか見ていないことがある）。`--strict` なら失敗にする
 
+**OS ごとの動かし方（CI と同じ）。** Windows・macOS はそのまま動かす。Linux は窓が要るので
+仮想の画面（Xvfb）で動かし、`libxkbcommon-x11-0` を入れておく（winit が X11 で実行時に読み込む。
+無いと mdview が起動直後に落ち、全項目が「mdview が終わりました」で失敗する）。
+
+```bash
+sudo apt-get install -y xvfb libxkbcommon-x11-0
+xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --shots gui-shots
+```
+
+- 試験の道具の出力は UTF-8 に固定してある（Windows の CI ランナーは標準出力が cp1252 で、
+  結果の表示で `UnicodeEncodeError` になっていた。v2.1.1 で直した）
+- mdview が起動中に終わったときは、終了コードと標準エラーの末尾 20 行を知らせに添える
+
 ### 6.1 画面を見る項目の確かめ方
 
 見た目の要件は、**画面写真の画素**で確かめる（標準ライブラリだけで PNG を読む。`support.py`）。
@@ -251,3 +264,4 @@ python tools/automation/spec_test.py --strict        # 「未確認」も失敗�
 |2026-10-08|要件の試験（`spec_test.py`）の節を足した。命令に `drop` `set_clipboard` `editor_click` `window` を足した|
 |2026-10-08|網羅の敵対的検証を受けて直した: 状態に `visible_line_count` `spawned` `external_opens`、`drop` に `paths`、保存のファイル選択に BOM・改行、退避の置き場の差し替え、`--strict`、画面の確かめ方（§6.1）|
 |2026-10-08|2 回目の敵対的検証の残りを直した: 要素に `options`、割り当て待ちの打鍵をアプリ側で断る、ミニマップの押す・掴むを単体試験で、配色の色の作り方を画素で確かめる（§6.1・§6.3）|
+|2026-10-09|v2.1.1: §6 に OS ごとの動かし方（Linux は Xvfb と `libxkbcommon-x11-0`）と、出力の UTF-8 固定・起動中に終わったときの知らせを足した|

@@ -154,6 +154,10 @@ def disabled_items_cannot_be_invoked(app, work, shots):
 
 
 def main():
+    # **出力は UTF-8 に固定する。** Windows の CI ランナーは標準出力が cp1252 で、
+    # 日本語を書けずに落ちる（spec_test.py と同じ）
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
     exe = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_EXE
     shots = sys.argv[2] if len(sys.argv) > 2 else None
     if shots:

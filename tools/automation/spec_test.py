@@ -2310,6 +2310,10 @@ def check_spec_against_document():
 
 
 def main():
+    # **出力は UTF-8 に固定する。** Windows の CI ランナーは標準出力が cp1252 で、
+    # 結果の 1 行目（全角の括弧）を書けずに落ちていた（公開側の CI で見つかった）
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", default=DEFAULT_EXE)
     parser.add_argument("--only", default="", help="この接頭辞の項目を含む試験だけ（例: R-14）")

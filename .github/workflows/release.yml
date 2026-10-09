@@ -86,7 +86,7 @@ jobs:
       # **同梱フォントはリポジトリに無い**（21.56MB あるため。assets/README.md）
       - name: 同梱フォントのキャッシュ
         id: fonts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: assets/fonts
           key: fonts-${{ hashFiles('tools/fetch-fonts.py') }}
@@ -260,7 +260,7 @@ jobs:
           if (Test-Path $exe) { throw "消したはずの $exe が残っている" }
           Write-Host "入れて・起動して・消せた"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.label }}
           path: dist/*
@@ -278,7 +278,7 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
