@@ -20,7 +20,7 @@ unicode-linebreak = "0.1"
 lru = "0.18"
 # Markdown の解析（DEC-203）。可視範囲のインライン要素と、出力用の全文解析に使う。
 # 既定の機能だけで足りる（HTML 出力は使わない。§12.7）
-comrak = { version = "0.55", default-features = false }
+comrak = { version = "0.56", default-features = false }
 # コードブロックの着色（DEC-211）。構文定義 75 種が最初から入る。
 # **テーマは入れない。** 色は役割で持ち描画時に解決するため（§16.10）。
 # 正規表現は fancy-regex（純 Rust）を使う。onig は C の依存が増え、
