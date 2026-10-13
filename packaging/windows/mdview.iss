@@ -19,6 +19,10 @@
 #ifndef MySourceExe
   #define MySourceExe "..\..\target\release\mdview.exe"
 #endif
+; 端末用の入口（v2.1.3）。**mdview.com として本体の隣に入れる**
+#ifndef MyConsoleExe
+  #define MyConsoleExe "..\..\target\release\mdview-console.exe"
+#endif
 #ifndef MyOutputDir
   #define MyOutputDir "..\..\dist"
 #endif
@@ -71,6 +75,9 @@ Name: "associate"; Description: "{cm:AssociateMd}"; Flags: unchecked
 
 [Files]
 Source: "{#MySourceExe}"; DestDir: "{app}"; DestName: "{#MyAppExe}"; Flags: ignoreversion
+; **端末から `mdview -v` と打つと、こちらが起きる**（.com は .exe より先に選ばれる）。
+; 本体は GUI のアプリなので端末は終わりを待たないが、こちらはコンソールのアプリなので待つ
+Source: "{#MyConsoleExe}"; DestDir: "{app}"; DestName: "mdview.com"; Flags: ignoreversion
 Source: "..\..\assets\icons\mdview-doc.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 

@@ -677,9 +677,14 @@ impl<'a> EditorView<'a> {
     }
 
     /// 縦の「全体・見えている量・いまの位置」（単位は**段**。R-20）。
+    ///
+    /// **最終行が先頭に来るまで送れる**（v2.1.3。最終行の下は空けて描く）。
+    /// そのため全体は「段の数 + 見えている量 - 1」とする。スクロールできる量が
+    /// 「段の数 - 1」になり、つまみ・ホイール・ミニマップの上限がそろう
     fn vertical_span(&self, bounds: Rectangle) -> (f32, f32, f32) {
-        let total = self.total_rows() as f32;
+        let rows = self.total_rows() as f32;
         let visible = (bounds.height / self.line_height).max(0.0);
+        let total = (rows - 1.0).max(0.0) + visible;
         (total, visible, self.top_row() as f32)
     }
 
@@ -689,12 +694,31 @@ impl<'a> EditorView<'a> {
     /// つまみの位置も同じ縮尺で決めるので、帯の絵と枠がずれない
     fn minimap_geometry(&self, bounds: Rectangle) -> (f32, f32, f32) {
         let track = self.vertical_track(bounds).height;
+        let (scale, step, length) = self.minimap_scales(bounds);
+        let position = (self.top_row() as f32 * step).min(track - length).max(0.0);
+        (scale, position, length)
+    }
+
+    /// ミニマップの縮尺 2 つと枠の長さ: (帯の 1 段の高さ, 枠を 1 段動かす量, 枠の長さ)。
+    ///
+    /// **枠を動かす量は、帯の縮尺と同じとは限らない**（v2.1.3）。長い文書では
+    /// 見えている範囲が 1px に満たず、枠を `MIN_VIEWPORT` へ広げて描く。
+    /// 帯の縮尺のまま動かすと、広げた分だけ枠が先に下端へ着き、最後の行へ
+    /// 届かなかった。**枠が動ける幅をスクロールできる段数で割る**。
+    /// 広げていないときは帯の縮尺と同じ値になる（絵と枠はずれない）
+    fn minimap_scales(&self, bounds: Rectangle) -> (f32, f32, f32) {
+        let track = self.vertical_track(bounds).height;
         let rows = self.total_rows().max(1) as f32;
         let scale = (track / rows).min(scrollbar::MINIMAP_LINE);
         let visible = (bounds.height / self.line_height).max(1.0);
         let length = (visible * scale).max(scrollbar::MIN_VIEWPORT).min(track);
-        let position = (self.top_row() as f32 * scale).min(track - length).max(0.0);
-        (scale, position, length)
+        let scrollable = self.scrollable_rows() as f32;
+        let step = if scrollable > 0.0 {
+            ((track - length).max(0.0) / scrollable).min(scale)
+        } else {
+            scale
+        };
+        (scale, step, length)
     }
 
     /// 横の「全体・見えている量・いまの位置」（単位は px）。
@@ -712,9 +736,16 @@ impl<'a> EditorView<'a> {
     /// **スクロールバーのつまみが下端に着く位置と同じにする。**
     /// 揃えないと、つまみが下端に着いたあともホイールで送れてしまい、
     /// 文書が画面から出ていく（§10.58）
-    fn max_top_line(&self, bounds: Rectangle) -> usize {
-        let (total, visible, _) = self.vertical_span(bounds);
-        self.folds.line_of((total - visible).max(0.0) as usize)
+    fn max_top_line(&self, _bounds: Rectangle) -> usize {
+        self.folds.line_of(self.scrollable_rows())
+    }
+
+    /// スクロールできる段の数（= 先頭に置ける最後の段）。**最終行の段**（v2.1.3）。
+    ///
+    /// **整数で出す。** `vertical_span` の差（浮動小数）から出すと、丸めで
+    /// 9998.999 のようになり、切り捨てで最終行へ 1 段届かないことがある
+    fn scrollable_rows(&self) -> usize {
+        self.total_rows().saturating_sub(1)
     }
 
     /// 段を先頭行へ直す（バーを掴んだときの行き先）。
@@ -786,7 +817,7 @@ impl<'a> EditorView<'a> {
             if track.contains(absolute) {
                 let along = absolute.y - track.y;
                 let (total, visible, offset) = self.vertical_span(bounds);
-                let max_row = (total - visible).max(0.0);
+                let max_row = self.scrollable_rows() as f32;
                 let grabbed = along >= at && along <= at + length;
                 // **ミニマップは絵と同じ縮尺で動かす**（R-01）。押したところの
                 // 行が枠の中ほどへ来る
@@ -857,9 +888,10 @@ impl<'a> EditorView<'a> {
             let (total, visible, _) = self.vertical_span(bounds);
             let along = point.y - track.y;
             let moved = if self.minimap.is_some() {
-                let (scale, _, _) = self.minimap_geometry(bounds);
-                (held.start_offset + (along - held.from) / scale)
-                    .clamp(0.0, (total - visible).max(0.0))
+                // 枠を動かした量で動かす（帯の縮尺ではない。`minimap_scales`）
+                let (_, step, _) = self.minimap_scales(bounds);
+                (held.start_offset + (along - held.from) / step.max(f32::EPSILON))
+                    .clamp(0.0, self.scrollable_rows() as f32)
             } else {
                 scrollbar::offset_after_drag(
                     track.height,
@@ -1343,10 +1375,13 @@ impl<'a> EditorView<'a> {
     /// 概算で寄せるしかなかった。`PageUp` のように一度に大きく動く移動では
     /// 概算が外れ、桁表示だけが動いて画面が止まって見えた（§10.48）
     fn follow_caret_y(&self, bounds: Rectangle) -> Option<usize> {
-        let rows = self.visible_rows(bounds.height);
-        if rows == 0 {
-            return None;
-        }
+        // **全部見えている段の数で比べる**（v2.1.3）。描く段の数（`visible_rows`）は
+        // 下端からはみ出す段と横のバーに隠れる段まで含むので、それで比べると
+        // キャレットが下端の外にあっても「見えている」と判断していた
+        // （`-g 120` で 120 行目が画面の外だった）
+        let rows = ((bounds.height - scrollbar::THICKNESS) / self.line_height)
+            .floor()
+            .max(1.0) as usize;
         // **段で比べる**（R-20）。畳んだ行は画面の行数に入らない
         let first = self.top_row();
         let line = self.folds.row_of(self.state.cursor_line);
@@ -3245,7 +3280,10 @@ mod minimap_press_tests {
         );
     }
 
-    /// 枠（つまみ）を掴んでも飛ばず、動かした分だけ帯の縮尺で動く。
+    /// 枠（つまみ）を掴んでも飛ばず、**動かした分だけ枠が指に付いてくる**。
+    ///
+    /// 枠を広げて描かないときは帯の縮尺と同じ。広げたときは、枠が動ける幅を
+    /// スクロールできる段数で割った量になる（v2.1.3。`minimap_scales`）
     #[test]
     fn dragging_the_frame_moves_by_the_minimap_scale() {
         let document = document(500);
@@ -3253,7 +3291,8 @@ mod minimap_press_tests {
         let view = EditorView::new(&document, &state, |_| super::super::Message::BlinkCaret)
             .minimap(Some(80.0));
         let track = view.vertical_track(bounds());
-        let (scale, position, _) = view.minimap_geometry(bounds());
+        let (_, position, _) = view.minimap_geometry(bounds());
+        let (_, scale, _) = view.minimap_scales(bounds());
         let grab = Point::new(track.x + 5.0, track.y + position + 2.0);
         let mut tree = tree();
 
@@ -3268,6 +3307,85 @@ mod minimap_press_tests {
         assert!(
             line.abs_diff(expected) <= 1,
             "動いた量が違う: {line} / {expected}"
+        );
+    }
+
+    /// **長い文書でも、枠を下端まで動かせば最終行まで届く**（v2.1.3）。
+    ///
+    /// 長い文書では見えている範囲が 1px に満たず、枠を最小の大きさ
+    /// （`MIN_VIEWPORT`）へ広げて描く。動かす量を帯の縮尺のままにしていたため、
+    /// 広げた分だけ枠が先に下端へ着き、最後の数十〜数千行へ届かなかった
+    #[test]
+    fn dragging_the_frame_to_the_bottom_reaches_the_last_line() {
+        let document = document(10_000);
+        let state = EditorState::default();
+        let view = EditorView::new(&document, &state, |_| super::super::Message::BlinkCaret)
+            .minimap(Some(80.0));
+        let track = view.vertical_track(bounds());
+        let (_, position, length) = view.minimap_geometry(bounds());
+        assert!(length > 1.0, "前提: 枠を広げて描いている（{length}px）");
+        let grab = Point::new(track.x + 5.0, track.y + position + length / 2.0);
+        let mut tree = tree();
+        view.press_bar::<()>(&mut tree, bounds(), grab);
+
+        // 枠の下端が軌道の下端に着くところまで動かす（それより下へは動かさない）
+        let to = Point::new(grab.x, track.y + track.height - length / 2.0);
+        let line = top_line(view.drag_bar::<()>(&mut tree, bounds(), mouse::Cursor::Available(to)));
+        let last = view.max_top_line(bounds());
+        assert!(
+            line.abs_diff(last) <= 1,
+            "最終行まで届かない: 先頭行 {line} / 上限 {last}"
+        );
+    }
+
+    /// **最終行が先頭に来るまで送れる**（v2.1.3）。最終行の下は空けて描く
+    #[test]
+    fn the_last_line_can_reach_the_top() {
+        let document = document(300);
+        let state = EditorState::default();
+        let view = EditorView::new(&document, &state, |_| super::super::Message::BlinkCaret)
+            .minimap(Some(80.0));
+        let last = document.text().len_lines() - 1;
+        assert_eq!(view.max_top_line(bounds()), last);
+    }
+
+    /// **キャレットが下端の外に出たら寄せる**（v2.1.3）。描く段の数ではなく、
+    /// 全部見えている段の数で比べる（`-g 120` で 120 行目が画面の外だった）
+    #[test]
+    fn a_caret_just_below_the_bottom_is_followed() {
+        let document = document(300);
+        // 高さ 200px・行高 20px で全部見えるのは、横のバーの分を除いて 9 段
+        let state = EditorState {
+            cursor_line: 9,
+            ..EditorState::default()
+        };
+        let view = EditorView::new(&document, &state, |_| super::super::Message::BlinkCaret)
+            .minimap(Some(80.0));
+        let to = view.follow_caret_y(bounds());
+        assert!(
+            to.is_some_and(|top| top >= 1),
+            "下端の外のキャレットへ寄せていない: {to:?}"
+        );
+    }
+
+    /// 最終行まで送ったとき、枠は軌道の下端に着いている（絵と枠がずれない）。
+    #[test]
+    fn the_frame_sits_at_the_bottom_at_the_last_line() {
+        let document = document(10_000);
+        let mut state = EditorState::default();
+        let last = EditorView::new(&document, &state, |_| super::super::Message::BlinkCaret)
+            .minimap(Some(80.0))
+            .max_top_line(bounds());
+        state.top_line = last;
+        let view = EditorView::new(&document, &state, |_| super::super::Message::BlinkCaret)
+            .minimap(Some(80.0));
+        let track = view.vertical_track(bounds());
+        let (_, position, length) = view.minimap_geometry(bounds());
+        assert!(
+            (position + length - track.height).abs() < 0.5,
+            "枠が下端に着いていない: {} / {}",
+            position + length,
+            track.height
         );
     }
 }

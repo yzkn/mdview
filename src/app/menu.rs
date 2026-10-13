@@ -216,6 +216,8 @@ pub struct Context<'a> {
     pub table_format: bool,
     /// 常に最前面か（R-02）
     pub on_top: bool,
+    /// 読み取り専用か（v2.1.3）
+    pub read_only: bool,
     /// 畳んでいる見出しがあるか（R-20）
     pub has_folds: bool,
 }
@@ -484,6 +486,14 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
             )
             .checked(context.on_top)
             .access('F'),
+            // **見るだけに使う**（v2.1.3）。起動引数 `-r` / `--readonly` でも入る
+            Item::action(
+                "読み取り専用",
+                c(Command::ReadOnly),
+                Message::ToggleReadOnly,
+            )
+            .checked(context.read_only)
+            .access('L'),
         ],
 
         // 移動（R-07 / R-18 / R-19 / R-20）
@@ -827,6 +837,7 @@ mod tests {
             keymap: keymap(),
             table_format: true,
             on_top: false,
+            read_only: false,
             has_folds: true,
         }
     }

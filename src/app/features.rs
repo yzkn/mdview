@@ -451,6 +451,11 @@ impl App {
     ///
     /// **画像を貼る設定なら、まず画像を見に行く。** 無ければ文字として貼る
     pub(super) fn paste(&mut self) -> Task<Message> {
+        // **画像を保存する前に断る**（読み取り専用。v2.1.3）。貼れないのに
+        // `images/` へファイルだけが増えるのを避ける
+        if self.refuse_edit() {
+            return Task::none();
+        }
         if !self.settings.paste_images {
             return iced::clipboard::read().map(Message::Pasted);
         }
@@ -531,6 +536,10 @@ impl App {
     pub(super) fn drop_image(&mut self, path: &std::path::Path) -> bool {
         if !self.settings.paste_images || !is_image(path) || self.mode == ViewMode::Preview {
             return false;
+        }
+        // 写す前に断る（読み取り専用。v2.1.3）
+        if self.refuse_edit() {
+            return true;
         }
         let Some(base) = self.meta.base_dir().map(std::path::Path::to_path_buf) else {
             self.notice = Some(notice::Notice::plain(

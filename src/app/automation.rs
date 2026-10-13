@@ -20,7 +20,7 @@
 //!
 //! 要求: `{"id": 1, "cmd": "invoke", "target": "menu.file.0"}`
 //! 応答: `{"id": 1, "ok": true, "result": …}` ／ `{"id": 1, "ok": false, "error": "…"}`
-//! 起動時に 1 度だけ `{"event": "ready", "version": "2.1.0"}` を出す。
+//! 起動時に 1 度だけ `{"event": "ready", "version": "2.1.3"}`（版数は `Cargo.toml` のもの） を出す。
 //!
 //! 命令の一覧は `GUI自動テストの方針.md（本体は doc/、公開側は docs/）` §3。
 
@@ -966,6 +966,7 @@ impl App {
             "folded_ranges": self.folds.ranges().iter()
                 .map(|r| json!([r.start, r.end])).collect::<Vec<_>>(),
             "on_top": self.on_top,
+            "read_only": self.read_only,
             "zoom": self.settings.zoom,
             "theme": self.settings.theme.to_string(),
             "toc_visible": self.settings.toc_visible,

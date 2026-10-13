@@ -341,6 +341,8 @@ pub enum Command {
     ZoomOut,
     ZoomReset,
     AlwaysOnTop,
+    // 読み取り専用（v2.1.3）。既定の打鍵は無い
+    ReadOnly,
     // --- 既定の打鍵が無いもの（メニューにあるので割り当てられる。R-10） ---
     OpenInApp,
     SaveWithBom,
@@ -360,7 +362,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 70] = [
+    pub const ALL: [Command; 71] = [
         Self::New,
         Self::NewWindow,
         Self::Open,
@@ -407,6 +409,7 @@ impl Command {
         Self::ZoomOut,
         Self::ZoomReset,
         Self::AlwaysOnTop,
+        Self::ReadOnly,
         Self::OpenInApp,
         Self::SaveWithBom,
         Self::ExportPdf,
@@ -482,6 +485,7 @@ impl Command {
             Self::ZoomOut => "zoom_out",
             Self::ZoomReset => "zoom_reset",
             Self::AlwaysOnTop => "always_on_top",
+            Self::ReadOnly => "read_only",
             Self::OpenInApp => "open_in_app",
             Self::SaveWithBom => "save_with_bom",
             Self::ExportPdf => "export_pdf",
@@ -562,6 +566,7 @@ impl Command {
             Self::ZoomOut => "縮小",
             Self::ZoomReset => "等倍に戻す",
             Self::AlwaysOnTop => "常に最前面に表示",
+            Self::ReadOnly => "読み取り専用",
             // **メニューと同じ名前にする**（どの項目のことか、見て分かるように）
             Self::OpenInApp => "アプリ内で開く",
             Self::SaveWithBom => "BOM を付けて保存",
@@ -632,6 +637,7 @@ impl Command {
             Self::ZoomOut => &["Ctrl+-"],
             Self::ZoomReset => &["Ctrl+0"],
             Self::AlwaysOnTop => &[],
+            Self::ReadOnly => &[],
             Self::OpenInApp
             | Self::SaveWithBom
             | Self::ExportPdf
@@ -671,6 +677,7 @@ impl Command {
                 | Self::ZoomOut
                 | Self::ZoomReset
                 | Self::AlwaysOnTop
+                | Self::ReadOnly
                 | Self::OpenInApp
                 | Self::SaveWithBom
                 | Self::ExportPdf
@@ -735,6 +742,7 @@ impl Command {
             Self::ZoomOut => Message::ZoomOut,
             Self::ZoomReset => Message::ZoomReset,
             Self::AlwaysOnTop => Message::ToggleAlwaysOnTop,
+            Self::ReadOnly => Message::ToggleReadOnly,
             Self::OpenInApp => Message::OpenBrowser,
             Self::SaveWithBom => Message::File(FileCommand::SaveWithBom),
             Self::ExportPdf => Message::File(FileCommand::ExportPdf),

@@ -25,9 +25,21 @@ pub struct Status {
     pub mode: &'static str,
     /// 文書の大きさ（バイト）
     pub bytes: usize,
+    /// 読み取り専用か（v2.1.3）
+    pub read_only: bool,
 }
 
 impl Status {
+    /// 保存状態の欄。**読み取り専用はここに出す**（いちばん目に入る場所）
+    fn state(&self) -> &'static str {
+        match (self.read_only, self.saved) {
+            (true, true) => "読み取り専用",
+            (true, false) => "未保存・読み取り専用",
+            (false, true) => "保存済み",
+            (false, false) => "未保存",
+        }
+    }
+
     /// 1 行の文字にする。
     ///
     /// **区切りは全角の中黒。** 半角の記号だと、日本語のファイル名と
@@ -40,11 +52,7 @@ impl Status {
             format!(
                 "{} ・ {} ・ Ln {}, Col {} ・ ",
                 self.name,
-                if self.saved {
-                    "保存済み"
-                } else {
-                    "未保存"
-                },
+                self.state(),
                 self.line,
                 self.column,
             ),
@@ -57,11 +65,7 @@ impl Status {
         format!(
             "{} ・ {} ・ Ln {}, Col {} ・ {} ・ {} ・ {}",
             self.name,
-            if self.saved {
-                "保存済み"
-            } else {
-                "未保存"
-            },
+            self.state(),
             self.line,
             self.column,
             self.encoding,
@@ -124,6 +128,7 @@ mod tests {
             encoding: "UTF-8 / BOM なし / LF".to_owned(),
             mode: "Split",
             bytes: 2_048,
+            read_only: false,
         }
     }
 
@@ -151,6 +156,23 @@ mod tests {
             ..status()
         };
         assert!(status.line_text().contains("未保存"));
+    }
+
+    /// **読み取り専用が分かる**（v2.1.3）。未保存の印も消さない
+    #[test]
+    fn read_only_is_visible() {
+        let clean = Status {
+            read_only: true,
+            ..status()
+        };
+        assert!(clean.line_text().contains("読み取り専用"));
+        assert!(!clean.line_text().contains("保存済み"));
+        let dirty = Status {
+            read_only: true,
+            saved: false,
+            ..status()
+        };
+        assert!(dirty.line_text().contains("未保存・読み取り専用"));
     }
 
     /// **計測値は出さない**（正式版の要件）。

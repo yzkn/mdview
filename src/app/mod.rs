@@ -1,11 +1,12 @@
 //! アプリ層。状態・メッセージ・更新（§13.1）。
 //!
-//! P1（骨格）で扱うのは次の 4 つ。
+//! 窓 1 つぶんの状態（文書・エディタ・プレビュー・設定・ダイアログ）を持ち、
+//! `update` でメッセージを受けて状態を変える。画面の組み立ては `view`。
 //!
-//!   - ファイルを開く（起動引数）
-//!   - エディタの表示とスクロール
-//!   - 文字入力と後退（ロープへの適用・索引の差分更新）
-//!   - **IME**（設計メモ OPEN-207 の確認）
+//!   - 起動引数は `window::parse_launch`（ファイル・`-g`・`-r`・`-t`）
+//!   - **本文を書き換える入口は `apply_edits` 1 つ。** 読み取り専用（v2.1.3）も
+//!     ここと `save_now`（上書き）・画像の貼り付けで断る
+//!   - 試験の口（`--automation`）は `automation`
 
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Length, Task};
@@ -263,6 +264,8 @@ pub struct App {
     results: Option<navigation::Results>,
     /// いま最前面か（R-02）
     on_top: bool,
+    /// 読み取り専用か（v2.1.3）。**本文も元のファイルも書き換えない**
+    read_only: bool,
     /// 窓の位置と大きさ（R-05 の「前回終了時」に使う）
     window_position: Option<iced::Point>,
     window_size: Option<iced::Size>,
@@ -465,6 +468,10 @@ fn export_picker(meta: &DocumentMeta, format: Format) -> picker::Picker {
     picker::Picker::save(format.label(), format.extension(), name)
         .in_directory(meta.base_dir().map(Path::to_path_buf))
 }
+
+/// 読み取り専用のときに書き換えようとしたら出す（v2.1.3）。
+const READ_ONLY_NOTICE: &str =
+    "読み取り専用です。書き換えるには 表示 → 読み取り専用 を外してください";
 
 /// 画面に出すアプリの名前。
 ///
@@ -686,12 +693,14 @@ impl App {
         // **ファイルは何個でも受ける**（R-08）。1 つ目はこの窓、
         // 2 つ目以降は別の窓で開く（R-09）
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let mut files = window::files_from_args(&args).into_iter();
+        // **行・読み取り専用・最前面も起動引数から取る**（v2.1.3。`-g` / `-r` / `-t`）
+        let launch = window::parse_launch(&args);
+        let mut files = launch.files.clone().into_iter();
         let path = files.next();
         let mut spawned = Vec::new();
         if !cfg!(test) {
             for extra in files {
-                if let Ok(pid) = window::spawn(Some(&extra)) {
+                if let Ok(pid) = window::spawn(Some(&extra), launch.read_only, launch.on_top) {
                     spawned.push(pid);
                 }
             }
@@ -728,7 +737,14 @@ impl App {
             Vec::new()
         };
         let keymap = keymap::Keymap::new(&settings.keys);
-        let on_top = window::initial(&settings).on_top;
+        // `-t` は設定より強い（その起動だけ。設定は書き換えない）
+        let on_top = window::initial(&settings).on_top || launch.on_top;
+        // 起動引数の読めなかった指定を知らせる（端末が無いことがあるので、窓に出す）
+        let notice = if launch.problems.is_empty() {
+            notice
+        } else {
+            Some(notice::Notice::plain(launch.problems.join(" / ")))
+        };
 
         let mut app = (
             Self {
@@ -802,6 +818,7 @@ impl App {
                 toc_filter: String::new(),
                 results: None,
                 on_top,
+                read_only: launch.read_only,
                 window_position: None,
                 window_size: None,
                 maximized: false,
@@ -839,8 +856,13 @@ impl App {
                 "version": env!("CARGO_PKG_VERSION"),
             }));
         }
-        // **窓が出てから左半分・右半分へ寄せる**（R-05）
-        app.1 = app.0.begin_placement();
+        // **`-g` の行へキャレットを置き、その行を先頭に出す**（v2.1.3）。
+        // 行が足りなければ最終行。最終行も先頭まで送れるので、どの行でも先頭に来る
+        if let Some(number) = launch.goto {
+            app.0.open_at_line(number);
+        }
+        // **窓が出てから左半分・右半分へ寄せる**（R-05）。アイコンも窓が出てから当てる
+        app.1 = Task::batch([app.0.begin_placement(), app.0.apply_window_icon()]);
         // **起動時の最前面も、窓が出てから当てる**（R-02）。窓を作るときの指定だけでは、
         // OS から見て最前面にならないことがあった（GUI の要件試験で見つかった）
         if app.0.on_top {
@@ -1309,6 +1331,7 @@ impl App {
             keymap: &self.keymap,
             table_format: self.settings.table_format,
             on_top: self.on_top,
+            read_only: self.read_only,
             has_folds: !self.folded.is_empty(),
         }
     }
@@ -1372,6 +1395,7 @@ impl App {
                 ViewMode::Split => "Split",
             },
             bytes: self.document.text().len_bytes(),
+            read_only: self.read_only,
         }
     }
 
@@ -1553,7 +1577,28 @@ impl App {
     }
 
     pub fn title(&self) -> String {
-        format!("{} — {APP_NAME}", self.meta.display_name())
+        // **読み取り専用は題名でも分かるようにする**（タスクバーでも見える）
+        let mark = if self.read_only {
+            "［読み取り専用］ "
+        } else {
+            ""
+        };
+        format!("{mark}{} — {APP_NAME}", self.meta.display_name())
+    }
+
+    /// 読み取り専用なら知らせて `true`（v2.1.3）。**書き換える操作の入口で呼ぶ**
+    pub(super) fn refuse_edit(&mut self) -> bool {
+        if self.read_only {
+            self.notice = Some(notice::Notice::plain(READ_ONLY_NOTICE.to_owned()));
+        }
+        self.read_only
+    }
+
+    /// 読み取り専用を切り替える（v2.1.3）。
+    fn toggle_read_only(&mut self) {
+        self.read_only = !self.read_only;
+        // 前に出した「読み取り専用です」を残さない
+        self.notice = None;
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -2112,6 +2157,7 @@ impl App {
             Message::Unfold => self.unfold_here(),
             Message::FoldAll => self.fold_all(),
             Message::UnfoldAll => self.unfold_all(),
+            Message::ToggleReadOnly => self.toggle_read_only(),
             Message::ToggleAlwaysOnTop => return self.toggle_on_top(),
             Message::ExitGeometry {
                 maximized,
@@ -2390,7 +2436,8 @@ impl App {
 
     /// カーソル位置へ文字列を挿入する。
     fn insert(&mut self, text: &str) {
-        if text.is_empty() {
+        // **先に断る**（v2.1.3）。この下で未保存の印を立て、キャレットも動かすため
+        if text.is_empty() || self.refuse_edit() {
             return;
         }
         // **矩形が掛かっていれば各行へ入れる**（§4.13）
@@ -2508,6 +2555,10 @@ impl App {
 
     /// カーソルの直前の 1 文字を消す。
     fn backspace(&mut self) {
+        // 先に断る（`insert` と同じ理由。v2.1.3）
+        if self.refuse_edit() {
+            return;
+        }
         // **矩形が掛かっていればそれを消す**（§4.13）
         if self.editor.rect.is_some() {
             self.delete_rect();
@@ -2740,7 +2791,9 @@ impl App {
             .map(|edit| edit.at + edit.inserted.len())
             .unwrap_or(before);
 
-        self.apply_edits(&plan.edits);
+        if !self.apply_edits(&plan.edits) {
+            return;
+        }
         self.history.push(history::Transaction {
             edits: plan.edits,
             cursor_before: before,
@@ -2848,7 +2901,9 @@ impl App {
 
     /// 編集を文書へ当て、履歴へ積む。
     fn apply_and_record(&mut self, edit: history::Edit, before: usize, after: usize) {
-        self.apply_edits(std::slice::from_ref(&edit));
+        if !self.apply_edits(std::slice::from_ref(&edit)) {
+            return;
+        }
         self.history
             .push(history::Transaction::single(edit, before, after));
     }
@@ -2857,7 +2912,13 @@ impl App {
     ///
     /// **並びのまま当てる。** 取り消しと置換は後ろから並べてあるので、
     /// ここで並べ替えると位置がずれる
-    fn apply_edits(&mut self, edits: &[history::Edit]) {
+    ///
+    /// **当てなかったら `false`**（読み取り専用。v2.1.3）。呼ぶ側は履歴へ積まない。
+    /// 積むと、取り消したときに当てていない編集を戻して本文が壊れる
+    fn apply_edits(&mut self, edits: &[history::Edit]) -> bool {
+        if self.refuse_edit() {
+            return false;
+        }
         // **控えてある一致は、当てた瞬間に古くなる**（§10.38）
         self.search.invalidate();
         for edit in edits {
@@ -2878,6 +2939,7 @@ impl App {
         // **図と数式は打鍵のたびに描き直さない**（§16.12）。
         // 本文の再レイアウトは待たせない——待たせるのは図だけである
         self.embeds.touch();
+        true
     }
 
     /// 前回の異常終了で残ったものを本文へ戻す（§18.3）。
@@ -3089,13 +3151,27 @@ impl App {
         let Ok(number) = input.parse::<usize>() else {
             return self.focus_editor_now();
         };
+        self.jump_to_line(number);
+        self.focus_editor_now()
+    }
+
+    /// `number` 行目（1 始まり）を**先頭の行として**開く（起動引数 `-g`。v2.1.3）。
+    ///
+    /// キャレットを置くだけだと、描画側が「下端にちょうど見える位置」まで送るので、
+    /// 指定した行が画面の最後の行になる。読み始める行として渡されるので、先頭に出す
+    fn open_at_line(&mut self, number: usize) {
+        self.jump_to_line(number);
+        self.set_top_line(self.editor.cursor_line);
+    }
+
+    /// `number` 行目（1 始まり）の頭へキャレットを置く。**範囲の外は端に寄せる**
+    fn jump_to_line(&mut self, number: usize) {
         let total = self.document.text().len_lines();
         // **1 から数える。** 画面の行番号と合わせる（§7.4）
         let line = number.clamp(1, total.max(1)) - 1;
         self.editor.anchor = None;
         let byte = self.document.byte_at(line, 0);
         self.move_caret_to_byte(byte);
-        self.focus_editor_now()
     }
 
     /// 入力欄から本文へ焦点を戻す。
@@ -3174,7 +3250,9 @@ impl App {
 
         // **先頭の行の頭へ寄せる**（消えた場所の左端）
         let after = edits.last().map(|edit| edit.at).unwrap_or(before);
-        self.apply_edits(&edits);
+        if !self.apply_edits(&edits) {
+            return;
+        }
         self.history.push(history::Transaction {
             edits,
             cursor_before: before,
@@ -3206,7 +3284,9 @@ impl App {
             .last()
             .map(|edit| edit.at + edit.inserted.len())
             .unwrap_or(before);
-        self.apply_edits(&edits);
+        if !self.apply_edits(&edits) {
+            return;
+        }
         self.history.push(history::Transaction {
             edits,
             cursor_before: before,
@@ -3256,6 +3336,10 @@ impl App {
 
     /// 取り消す（§4.7）。
     fn undo(&mut self) {
+        // **履歴を動かす前に断る。** 動かしてから断ると、履歴の位置と本文がずれる
+        if self.refuse_edit() {
+            return;
+        }
         let Some((edits, cursor)) = self.history.undo() else {
             return;
         };
@@ -3265,6 +3349,9 @@ impl App {
 
     /// やり直す。
     fn redo(&mut self) {
+        if self.refuse_edit() {
+            return;
+        }
         let Some((edits, cursor)) = self.history.redo() else {
             return;
         };
@@ -3507,6 +3594,12 @@ impl App {
     /// **聞く場合は待たない。** ダイアログは親を渡すために `Task` 越しに出すので、
     /// 結果は `Message::PickedSave` で戻ってくる
     fn save_now(&mut self, ask: bool, how: SaveAs) -> Task<Message> {
+        // **元のファイルは書き換えない**（読み取り専用。v2.1.3）。
+        // 名前を付けて保存（新しいファイルへ書く）は許す
+        if !ask && self.read_only {
+            self.notice = Some(notice::Notice::plain(READ_ONLY_NOTICE.to_owned()));
+            return Task::none();
+        }
         if ask {
             return self
                 .ask(save_picker(&self.meta))
@@ -4207,9 +4300,15 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        // 初回描画の時刻を 1 度だけ出す（設計メモ DD-OPEN-01）
+        // 初回描画の時刻を 1 度だけ出す（設計メモ DD-OPEN-01）。
+        //
+        // **計測のときだけ出す**（v2.1.3。`MDVIEW_STARTUP_LOG=1`）。いつも出していたため、
+        // 端末から起動すると経過時間が流れていた。`measure-startup.ps1` が立てる
         static LOGGED: std::sync::Once = std::sync::Once::new();
         LOGGED.call_once(|| {
+            if std::env::var("MDVIEW_STARTUP_LOG").as_deref() != Ok("1") {
+                return;
+            }
             if let Some(start) = crate::PROCESS_START.get() {
                 eprintln!(
                     "STARTUP 起動〜初回描画 {:.0}ms",
@@ -4916,5 +5015,112 @@ mod tests {
     #[test]
     fn text_without_cr_is_untouched() {
         assert_eq!(normalize_newlines("a\nb"), "a\nb");
+    }
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+
+    fn app() -> App {
+        App::new().0
+    }
+
+    /// **読み取り専用では打っても本文が変わらず、履歴にも積まない**（v2.1.3）。
+    #[test]
+    fn typing_does_not_change_the_text() {
+        let mut app = app();
+        let before = app.document.text().to_string();
+        let _ = app.update(Message::ToggleReadOnly);
+        assert!(app.read_only);
+        let _ = app.update(Message::Editor(Action::Insert("a".to_owned())));
+        assert_eq!(app.document.text().to_string(), before, "本文が変わった");
+        assert!(!app.meta.dirty, "未保存になった");
+        assert!(app.notice.is_some(), "断ったことを知らせていない");
+        assert!(app.title().contains("読み取り専用"), "題名で分からない");
+    }
+
+    /// 編集してから読み取り専用にしても、**取り消しで本文と履歴がずれない**。
+    ///
+    /// 履歴を動かしてから断ると、外したあとの取り消しが当てていない編集を戻して壊れる
+    #[test]
+    fn undo_is_refused_without_moving_the_history() {
+        let mut app = app();
+        let _ = app.update(Message::Editor(Action::Insert("x".to_owned())));
+        let edited = app.document.text().to_string();
+        let _ = app.update(Message::ToggleReadOnly);
+        let _ = app.update(Message::Undo);
+        assert_eq!(
+            app.document.text().to_string(),
+            edited,
+            "読み取り専用なのに戻した"
+        );
+
+        // 外せば、1 回の取り消しで打つ前へ戻る（履歴の位置が動いていない）
+        let _ = app.update(Message::ToggleReadOnly);
+        let _ = app.update(Message::Undo);
+        assert!(
+            !app.document.text().to_string().contains('x'),
+            "取り消せない"
+        );
+    }
+
+    /// **元のファイルへ上書きしない。** 名前を付けて保存は止めない
+    #[test]
+    fn overwriting_the_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("mdview-ro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("置き場を作れる");
+        let path = dir.join("a.md");
+        std::fs::write(&path, "# 元のまま\n").expect("書ける");
+        let file = crate::io::load(&path).expect("読める");
+
+        let mut app = app();
+        app.meta = DocumentMeta::opened(file.path, file.format);
+        app.read_only = true;
+        let _ = app.save_now(false, SaveAs::Keep);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("読める"),
+            "# 元のまま\n"
+        );
+        assert!(app.notice.is_some(), "断ったことを知らせていない");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod goto_tests {
+    use super::*;
+
+    fn app_with(lines: usize) -> App {
+        let mut app = App::new().0;
+        let text: String = (1..=lines)
+            .map(|n| {
+                format!(
+                    "{n} 行目
+"
+                )
+            })
+            .collect();
+        app.document = Document::from_text(text);
+        app
+    }
+
+    /// **`-g 120` は 120 行目を先頭に出す**（v2.1.3）。キャレットもそこに置く
+    #[test]
+    fn goto_puts_the_line_at_the_top() {
+        let mut app = app_with(300);
+        app.open_at_line(120);
+        assert_eq!(app.editor.cursor_line, 119);
+        assert_eq!(app.editor.top_line, 119, "120 行目が先頭に来ていない");
+    }
+
+    /// 行が足りなければ最終行。**最終行も先頭に出す**（最終行の先まで送れるため）
+    #[test]
+    fn goto_past_the_end_puts_the_last_line_at_the_top() {
+        let mut app = app_with(300);
+        app.open_at_line(9_999);
+        let last = app.document.text().len_lines() - 1;
+        assert_eq!(app.editor.cursor_line, last);
+        assert_eq!(app.editor.top_line, last);
     }
 }

@@ -64,6 +64,8 @@ chmod +x mdview-<版数>-linux-x86_64.AppImage
 - **管理者権限は要りません。** `%LOCALAPPDATA%\Programs\mdview` へ入ります
 - `.md` / `.markdown` の関連付けは**選択制**です（既定では付けません）
 - 消すときは「設定 > アプリ > インストールされているアプリ」から
+- **端末からは `mdview`（拡張子無し）で使えます**（`mdview -h` で使い方）。
+  端末用の入口 `mdview.com` が一緒に入ります
 
 ### macOS
 
@@ -73,9 +75,12 @@ chmod +x mdview-<版数>-linux-x86_64.AppImage
 ### Linux
 
 ```
-sudo dpkg -i mdview-<版数>-linux-x86_64.deb   # 入れる
-sudo dpkg -r mdview                            # 消す
+sudo apt install ./mdview-<版数>-linux-x86_64.deb   # 入れる（足りない依存も入る）
+sudo apt remove mdview                               # 消す
 ```
+
+**`dpkg -i` ではなく `apt install ./…` を使ってください。** `dpkg` は足りない依存を
+取りに行かないため、最小構成の環境では入りません。
 
 AppImage は入れずに使えます。消すときはファイルを捨てるだけです。
 

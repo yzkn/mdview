@@ -1,16 +1,20 @@
-//! mdview v2.0.0（Markdown Viewer）
+//! mdview（Markdown Viewer）。版数は `Cargo.toml` が唯一の出どころ。
 //!
 //! 設計は `design/` を参照する。
 //!   - 設計メモ: 何を使うか（DEC-201〜211）
 //!   - 設計メモ: どう構成するか
 //!   - 設計メモ: どう作るか
 //!
-//! 実装は§10 のフェーズ順に進める。現在は **P1（骨格）**。
+//! v2.1 の要件は `doc/v2.1.0の要件定義書.md`、変更の記録は `CHANGELOG.md`。
+//! 起動引数は下の `answer_without_a_window` の説明（`-h`）が正。
 
-// P1（骨格）の時点では、レイアウト層の API を使う側（描画層）がまだ無い。
-// §10.3 のとおりアンカー補正を先に作り、試験で挙動を固めてあるため、
-// 未使用の警告は P2 で描画層を載せるまで抑止する。
+// P1（骨格）のときに、描画層より先にレイアウト層を作るため入れたもの。
+// **そのまま残っている。** 外したときにどれだけ警告が出るかは洗っていない
 #![allow(dead_code)]
+// **Windows のリリース版はコンソールを開かない**（v2.1.3）。開くと、起動のたびに
+// 黒い窓が後ろに出る。端末へ答える引数（`-v` など）は `console::attach` で
+// 起動した端末につなぐ。デバッグ版は開いたままにする（panic の文言を見るため）
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod document;
@@ -43,7 +47,11 @@ pub static PROCESS_START: std::sync::OnceLock<std::time::Instant> = std::sync::O
 fn answer_without_a_window() -> Option<String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+    // `-V` は v2.1.2 までの書き方（残しておく）
+    if args
+        .iter()
+        .any(|arg| arg == "--version" || arg == "-v" || arg == "-V")
+    {
         return Some(format!("{} {}", APP_NAME, env!("CARGO_PKG_VERSION")));
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -53,12 +61,15 @@ fn answer_without_a_window() -> Option<String> {
              使い方: {bin} [オプション] [ファイル…]\n\
              \n\
              オプション:\n\
-             \x20 -h, --help     この説明を出す\n\
-             \x20 -V, --version  版数を出す\n\
-             \x20 --automation   試験用の操作口を開く（GUI 自動テスト。標準入出力で JSON を交わす）\n\
+             \x20 -g, --goto <行>      その行（1 始まり）を開く。行が足りなければ最終行\n\
+             \x20 -r, --readonly       読み取り専用で開く（本文も元のファイルも書き換えない）\n\
+             \x20 -t, --always-on-top  常に最前面で開く（設定より優先する。設定は変えない）\n\
+             \x20 -v, --version        版数を出す\n\
+             \x20 -h, --help           この説明を出す\n\
+             \x20 --automation         試験用の操作口を開く（GUI 自動テスト。標準入出力で JSON を交わす）\n\
              \n\
              ファイルを渡すと、その Markdown を開いた状態で起動する。\n\
-             2 つ以上渡すと、2 つ目からは別のウィンドウで開く。",
+             2 つ以上渡すと、2 つ目からは別のウィンドウで開く（-r と -t は引き継ぐ）。",
             name = APP_NAME,
             version = env!("CARGO_PKG_VERSION"),
             bin = env!("CARGO_PKG_NAME"),
@@ -103,8 +114,12 @@ fn export_without_a_window() -> Option<i32> {
             skip_next = false;
             return false;
         }
-        if arg.starts_with("--") {
-            skip_next = matches!(arg.as_str(), "--export-html" | "--export-pdf");
+        // 短い旗（`-r` など。v2.1.3）も入力にしない
+        if arg.starts_with('-') {
+            skip_next = matches!(
+                arg.as_str(),
+                "--export-html" | "--export-pdf" | "-g" | "--goto"
+            );
             return false;
         }
         true
@@ -201,7 +216,8 @@ fn main() -> iced::Result {
 
     // **窓を出す前に答える。** フォントの読み込み（約 60〜90ms）も走らせない
     if let Some(answer) = answer_without_a_window() {
-        println!("{answer}");
+        console::attach();
+        console::print_answer(&answer);
         return Ok(());
     }
 
@@ -211,6 +227,10 @@ fn main() -> iced::Result {
     //   - 出力の所要を**同じ条件で何度でも**測れる（画面の操作が要らない）
     //   - CI で 3 OS ぶんの出力物を集められる。**見た目の判断は人がするが、
     //     見るための材料は自動で用意できる**
+    // 窓を出さずに出力するときは、結果を端末へ出す
+    if std::env::args().any(|arg| arg == "--export-html" || arg == "--export-pdf") {
+        console::attach();
+    }
     if let Some(code) = export_without_a_window() {
         return if code == 0 {
             Ok(())
@@ -221,6 +241,7 @@ fn main() -> iced::Result {
 
     // `--report` は UI を出さずに解析結果だけを出す（10MB の計測に使う）
     if std::env::args().any(|arg| arg == "--report") {
+        console::attach();
         let path = std::env::args().nth(1).unwrap_or_default();
         report(&path);
         return Ok(());
@@ -271,6 +292,194 @@ fn main() -> iced::Result {
     }
 
     application.run()
+}
+
+/// 端末へ答えるときに、起動した端末へつなぐ（Windows のリリース版。v2.1.3）。
+///
+/// リリース版は GUI のアプリとして作る（コンソールを開かない）ので、端末から
+/// 起動しても標準出力がどこにもつながっていない。**つながっていないときだけ**
+/// 親の端末につなぐ。リダイレクトやパイプ（`mdview -v > out.txt`・試験の道具）は
+/// 既にそちらへつながっているので、そのままにする。
+///
+/// **cmd や PowerShell は GUI のアプリの終わりを待たない。** 版数がプロンプトの
+/// 後ろに出ることがある。待たせたいときは `mdview -v | more` のようにパイプでつなぐ
+mod console {
+    #[cfg(all(windows, not(debug_assertions)))]
+    pub fn attach() {
+        use std::ffi::c_void;
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_SHARE_READ: u32 = 1;
+        const FILE_SHARE_WRITE: u32 = 2;
+        const OPEN_EXISTING: u32 = 3;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn AttachConsole(process: u32) -> i32;
+            fn GetStdHandle(which: u32) -> *mut c_void;
+            fn SetStdHandle(which: u32, handle: *mut c_void) -> i32;
+            fn CreateFileW(
+                name: *const u16,
+                access: u32,
+                share: u32,
+                security: *mut c_void,
+                disposition: u32,
+                flags: u32,
+                template: *mut c_void,
+            ) -> *mut c_void;
+        }
+
+        // 無い handle は NULL か INVALID_HANDLE_VALUE（-1）で返る
+        let unset = |handle: *mut c_void| handle.is_null() || handle as isize == -1;
+        // SAFETY: 引数は Win32 の決まりどおり。返ってきた handle は確かめてから渡す
+        unsafe {
+            let out_unset = unset(GetStdHandle(STD_OUTPUT_HANDLE));
+            let err_unset = unset(GetStdHandle(STD_ERROR_HANDLE));
+            if !out_unset && !err_unset {
+                return;
+            }
+            if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+                // 端末から起こされていない（エクスプローラーから起動した等）
+                return;
+            }
+            let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+            let console = CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            );
+            if unset(console) {
+                return;
+            }
+            if out_unset {
+                SetStdHandle(STD_OUTPUT_HANDLE, console);
+            }
+            if err_unset {
+                SetStdHandle(STD_ERROR_HANDLE, console);
+            }
+        }
+        // **`mdview.exe` を直接打ったときだけ、改行を 1 つ挟む。** 端末は GUI のアプリを
+        // 待たずにプロンプトを出すので、挟まないと版数がプロンプトの後ろに詰まって出る。
+        // 端末用の入口（mdview.com）を通ったときは端末が待つので挟まない（空行になる）
+        if std::env::var_os("MDVIEW_CONSOLE_WAITS").is_none() {
+            println!();
+        }
+    }
+
+    /// コンソールを持つ版（Windows のデバッグ版・他の OS）では何もしない
+    #[cfg(not(all(windows, not(debug_assertions))))]
+    pub fn attach() {}
+
+    /// `-v` / `-h` の答えを書く（v2.1.3）。
+    ///
+    /// **書き先で文字コードを変える。** 端末へは Rust が UTF-16 で書くので化けない。
+    /// **パイプやリダイレクトへは、端末の文字コード（日本語の Windows では cp932）で書く。**
+    /// UTF-8 のまま書くと、PowerShell 7 で `mdview -h | more` としたときに化けた
+    /// （PowerShell も `more` も、受け取ったものを端末の文字コードで読む）。
+    /// 端末の文字コードが UTF-8（65001）なら UTF-8 のまま書く
+    #[cfg(windows)]
+    pub fn print_answer(text: &str) {
+        use std::io::{IsTerminal, Write};
+        let mut out = std::io::stdout();
+        if out.is_terminal() {
+            let _ = writeln!(out, "{text}");
+            return;
+        }
+        let line = format!("{text}\n");
+        let bytes = match output_code_page() {
+            0 | 65001 => line.into_bytes(),
+            code_page => encode(&line, code_page).unwrap_or_else(|| line.into_bytes()),
+        };
+        let _ = out.write_all(&bytes);
+        let _ = out.flush();
+    }
+
+    #[cfg(not(windows))]
+    pub fn print_answer(text: &str) {
+        println!("{text}");
+    }
+
+    /// 端末の出力の文字コード。**自分に端末が無ければ、起こした端末のもの**を聞く
+    #[cfg(windows)]
+    fn output_code_page() -> u32 {
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleOutputCP() -> u32;
+            fn AttachConsole(process: u32) -> i32;
+            fn FreeConsole() -> i32;
+        }
+        // SAFETY: 引数の無い問い合わせと、つないだ端末を離すだけ
+        unsafe {
+            let code_page = GetConsoleOutputCP();
+            if code_page != 0 {
+                return code_page;
+            }
+            // GUI の版は端末を持たない。聞くあいだだけ起こした端末へつなぐ
+            // （標準入出力の行き先は変えない）
+            if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+                return 0;
+            }
+            let code_page = GetConsoleOutputCP();
+            FreeConsole();
+            code_page
+        }
+    }
+
+    /// 文字列を指定の文字コードのバイト列にする。表せない字は `?` になる
+    #[cfg(windows)]
+    fn encode(text: &str, code_page: u32) -> Option<Vec<u8>> {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn WideCharToMultiByte(
+                code_page: u32,
+                flags: u32,
+                wide: *const u16,
+                wide_len: i32,
+                out: *mut u8,
+                out_len: i32,
+                default_char: *const u8,
+                used_default: *mut i32,
+            ) -> i32;
+        }
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let wide_len = i32::try_from(wide.len()).ok()?;
+        // SAFETY: 1 回目で長さを聞き、その長さの領域へ 2 回目で書かせる
+        unsafe {
+            let size = WideCharToMultiByte(
+                code_page,
+                0,
+                wide.as_ptr(),
+                wide_len,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            );
+            if size <= 0 {
+                return None;
+            }
+            let mut out = vec![0u8; size as usize];
+            let written = WideCharToMultiByte(
+                code_page,
+                0,
+                wide.as_ptr(),
+                wide_len,
+                out.as_mut_ptr(),
+                size,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            );
+            (written > 0).then_some(out)
+        }
+    }
 }
 
 /// 文書を読み込み、解析結果の要約を出す。

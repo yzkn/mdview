@@ -301,6 +301,8 @@ pub enum Message {
     UnfoldAll,
     /// 常に最前面（R-02）
     ToggleAlwaysOnTop,
+    /// 読み取り専用を切り替える（v2.1.3）
+    ToggleReadOnly,
     /// 窓の位置が変わった（R-05 の「前回終了時」に使う）
     WindowMoved(iced::Point),
     /// 窓の大きさが変わった

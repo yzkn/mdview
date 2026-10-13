@@ -50,7 +50,7 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 ← {"id": 2, "ok": false, "error": "要素が見つかりません: …"}
 ```
 
-起動したら 1 度だけ `{"event": "ready", "version": "2.1.0"}` が出る。`id` は何でもよく、
+起動したら 1 度だけ `{"event": "ready", "version": "2.1.3"}`（版数は `Cargo.toml` のもの） が出る。`id` は何でもよく、
 応答にそのまま返る。
 
 ### 3.2 命令
@@ -94,7 +94,7 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 |`search`|`open` `query` `matches` `searching`|
 |`results`|参照・リンク切れの一覧（`title` `count`）|
 |`folded_ranges`|畳んで隠している行の範囲|
-|`on_top` `zoom` `theme` `toc_visible` `external_changed` `busy` `can_undo` `can_redo`|そのまま|
+|`on_top` `read_only`（v2.1.3） `zoom` `theme` `toc_visible` `external_changed` `busy` `can_undo` `can_redo`|そのまま|
 |`status`|ステータスバーの文字|
 |`editor_text_size` `editor_line_height` `preview_factor`|エディタの文字の大きさと行の高さ・プレビューの倍率（設定 × 表示倍率）|
 |`recent`|最近使ったファイル|
@@ -265,3 +265,4 @@ xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --
 |2026-10-08|網羅の敵対的検証を受けて直した: 状態に `visible_line_count` `spawned` `external_opens`、`drop` に `paths`、保存のファイル選択に BOM・改行、退避の置き場の差し替え、`--strict`、画面の確かめ方（§6.1）|
 |2026-10-08|2 回目の敵対的検証の残りを直した: 要素に `options`、割り当て待ちの打鍵をアプリ側で断る、ミニマップの押す・掴むを単体試験で、配色の色の作り方を画素で確かめる（§6.1・§6.3）|
 |2026-10-09|v2.1.1: §6 に OS ごとの動かし方（Linux は Xvfb と `libxkbcommon-x11-0`）と、出力の UTF-8 固定・起動中に終わったときの知らせを足した|
+|2026-10-13|v2.1.3: 状態に `read_only` を足した|

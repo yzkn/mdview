@@ -19,7 +19,9 @@
 param(
     # 既定は手元のリリースビルド
     [string]$SourceExe,
-    [string]$OutputDir
+    [string]$OutputDir,
+    # 端末用の入口（mdview.com として入れる。v2.1.3）。既定は SourceExe の隣
+    [string]$ConsoleExe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +49,8 @@ function Resolve-Full([string]$path) {
 
 $SourceExe = Resolve-Full $SourceExe
 $OutputDir = Resolve-Full $OutputDir
+if (-not $ConsoleExe) { $ConsoleExe = Join-Path (Split-Path $SourceExe -Parent) 'mdview-console.exe' }
+$ConsoleExe = Resolve-Full $ConsoleExe
 
 function Fail([string]$message) {
     Write-Host "失敗: $message" -ForegroundColor Red
@@ -69,6 +73,10 @@ Write-Host "版数: $version（リソース: $fileVersion）"
 # --- 材料がそろっているか ---
 if (-not (Test-Path $SourceExe)) {
     Fail "実行ファイルが無い: $SourceExe`n  cargo build --release を先に実行する"
+}
+# **端末用の入口も要る。** 無いと、端末で `mdview -v` と打ったときに待たれない
+if (-not (Test-Path $ConsoleExe)) {
+    Fail "端末用の入口が無い: $ConsoleExe`n  cargo build --release で mdview.exe と一緒に出来る"
 }
 $icon = Join-Path $repo 'assets\icons\mdview.ico'
 if (-not (Test-Path $icon)) {
@@ -103,6 +111,7 @@ $script = Join-Path $PSScriptRoot 'mdview.iss'
     "/DMyAppVersion=$version" `
     "/DMyFileVersion=$fileVersion" `
     "/DMySourceExe=$SourceExe" `
+    "/DMyConsoleExe=$ConsoleExe" `
     "/DMyOutputDir=$OutputDir" `
     $script
 

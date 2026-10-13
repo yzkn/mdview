@@ -159,51 +159,170 @@ pub fn half(
     Some((Point::new(left, y), Size::new(half, height)))
 }
 
+/// 窓へ、実行ファイルのアイコン（リソース番号 1。build.rs が埋める）を大小とも設定する。
+///
+/// **埋めていなければ何もしない**（`make-icons` を走らせずに作った版）。
+#[cfg(windows)]
+fn set_icons(window: &dyn iced::window::Window) {
+    use raw_window_handle::RawWindowHandle;
+    use std::ffi::c_void;
+
+    const IMAGE_ICON: u32 = 1;
+    const LR_SHARED: u32 = 0x8000;
+    const WM_SETICON: u32 = 0x0080;
+    const ICON_SMALL: usize = 0;
+    const ICON_BIG: usize = 1;
+    const SM_CXICON: i32 = 11;
+    const SM_CYICON: i32 = 12;
+    const SM_CXSMICON: i32 = 49;
+    const SM_CYSMICON: i32 = 50;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn LoadImageW(
+            instance: *mut c_void,
+            name: *const u16,
+            kind: u32,
+            width: i32,
+            height: i32,
+            flags: u32,
+        ) -> *mut c_void;
+        fn SendMessageW(window: isize, message: u32, wparam: usize, lparam: isize) -> isize;
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32.hwnd.get();
+    // SAFETY: Win32 の決まりどおりに呼ぶ。リソース番号は MAKEINTRESOURCE（番号をそのまま
+    // ポインタとして渡す）。LR_SHARED で読んだものは解放しない（OS が持つ）
+    unsafe {
+        let instance = GetModuleHandleW(std::ptr::null());
+        // MAKEINTRESOURCE(1): 番号をポインタの値として渡す（指す先は無い）
+        let resource = std::ptr::without_provenance::<u16>(1);
+        for (kind, w, h) in [
+            (ICON_BIG, SM_CXICON, SM_CYICON),
+            (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
+        ] {
+            let icon = LoadImageW(
+                instance,
+                resource,
+                IMAGE_ICON,
+                GetSystemMetrics(w),
+                GetSystemMetrics(h),
+                LR_SHARED,
+            );
+            if !icon.is_null() {
+                SendMessageW(hwnd, WM_SETICON, kind, icon as isize);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_icons(_window: &dyn iced::window::Window) {}
+
 /// 自分の実行ファイルを、引数を付けて起こす（R-09）。
-pub fn spawn(path: Option<&Path>) -> std::io::Result<u32> {
+///
+/// **読み取り専用と最前面は引き継ぐ**（v2.1.3）。`mdview -r a.md b.md` の 2 つ目も
+/// 読み取り専用で開く。行の指定（`-g`）は 1 つ目の文書だけに効かせる
+pub fn spawn(path: Option<&Path>, read_only: bool, on_top: bool) -> std::io::Result<u32> {
     let exe = std::env::current_exe()?;
     let mut command = std::process::Command::new(exe);
+    if read_only {
+        command.arg("--readonly");
+    }
+    if on_top {
+        command.arg("--always-on-top");
+    }
     if let Some(path) = path {
         command.arg(path);
     }
     command.spawn().map(|child| child.id())
 }
 
-/// 起動引数から開くファイルを集める（R-08）。
+/// 起動引数で決まること（R-08 / v2.1.3）。
+#[derive(Debug, Default, PartialEq)]
+pub struct Launch {
+    /// 開くファイル。1 つ目はこの窓、2 つ目からは別の窓
+    pub files: Vec<PathBuf>,
+    /// `-g` / `--goto`: この行（1 始まり）へキャレットを置く
+    pub goto: Option<usize>,
+    /// `-r` / `--readonly`: 読み取り専用で開く
+    pub read_only: bool,
+    /// `-t` / `--always-on-top`: 常に最前面で開く（設定より優先する）
+    pub on_top: bool,
+    /// 読めなかった指定（窓に知らせる。端末が無いことがあるので黙って捨てない）
+    pub problems: Vec<String>,
+}
+
+/// 起動引数を読む（R-08 / v2.1.3）。
 ///
-/// **`--` で始まるものと、その値は除く。** 相対パスは起動したときの
-/// 作業フォルダから解く
-pub fn files_from_args(args: &[String]) -> Vec<PathBuf> {
+/// **`-` で始まるものと、その値はファイルとして扱わない。** 相対パスは
+/// 起動したときの作業フォルダから解く。`-g 120`・`--goto 120`・`--goto=120` を受ける
+pub fn parse_launch(args: &[String]) -> Launch {
     // 値を取る旗（`--export-html 出力.html` の `出力.html` はファイルではない）
-    const TAKES_VALUE: [&str; 2] = ["--export-html", "--export-pdf"];
-    let mut files = Vec::new();
-    let mut skip = false;
-    for arg in args {
-        if skip {
-            skip = false;
-            continue;
-        }
-        if arg.starts_with("--") {
-            skip = TAKES_VALUE.contains(&arg.as_str());
-            continue;
-        }
-        let path = PathBuf::from(arg);
-        let path = if path.is_relative() {
-            std::env::current_dir()
-                .map(|dir| dir.join(&path))
-                .unwrap_or(path)
-        } else {
-            path
+    const TAKES_VALUE: [&str; 4] = ["--export-html", "--export-pdf", "-g", "--goto"];
+    let mut launch = Launch::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        index += 1;
+
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+            _ => (arg, None),
         };
-        files.push(path);
+        match flag {
+            "-r" | "--readonly" => launch.read_only = true,
+            "-t" | "--always-on-top" => launch.on_top = true,
+            "-g" | "--goto" => {
+                let value = inline.map(str::to_owned).or_else(|| {
+                    let value = args.get(index).cloned();
+                    index += 1;
+                    value
+                });
+                match value.as_deref().map(str::parse::<usize>) {
+                    Some(Ok(line)) if line >= 1 => launch.goto = Some(line),
+                    _ => launch.problems.push(format!(
+                        "{flag} には 1 以上の行番号を指定してください（例: {flag} 120）"
+                    )),
+                }
+            }
+            _ if flag.starts_with('-') && flag.len() > 1 => {
+                if TAKES_VALUE.contains(&flag) && inline.is_none() {
+                    index += 1;
+                }
+            }
+            _ => {
+                let path = PathBuf::from(arg);
+                let path = if path.is_relative() {
+                    std::env::current_dir()
+                        .map(|dir| dir.join(&path))
+                        .unwrap_or(path)
+                } else {
+                    path
+                };
+                launch.files.push(path);
+            }
+        }
     }
-    files
+    launch
 }
 
 impl App {
     /// 新しい窓を起こす（R-09）。**起こせなかったことも知らせる**
     pub(super) fn spawn_window(&mut self, path: Option<&Path>) {
-        match spawn(path) {
+        // **メニューから起こす新しい窓は、まっさらで開く**（読み取り専用・最前面を引き継がない）
+        match spawn(path, false, false) {
             // 起こした窓を覚える（試験の口が「この窓が起こした窓」を見分けるため）
             Ok(pid) => self.spawned.push(pid),
             Err(error) => {
@@ -264,6 +383,22 @@ impl App {
         };
         iced::window::latest().then(move |id| match id {
             Some(id) => iced::window::set_level(id, level),
+            None => Task::none(),
+        })
+    }
+
+    /// 窓のアイコンを、実行ファイルに埋めたものにする（Windows。v2.1.3）。
+    ///
+    /// **大きい方（タスクバー）も設定する。** iced は小さい方しか設定せず、
+    /// 設定も渡さないと題名の左端は既定のアイコンになる。タスクバーは窓の
+    /// 大きいアイコンが無いと別のところから拾うため、後から起こした窓では
+    /// 既定のアイコンになっていた（利用者の指摘）
+    pub(super) fn apply_window_icon(&self) -> Task<Message> {
+        if !cfg!(windows) || cfg!(test) {
+            return Task::none();
+        }
+        iced::window::latest().then(|id| match id {
+            Some(id) => iced::window::run(id, |window| set_icons(window)).discard(),
             None => Task::none(),
         })
     }
@@ -512,10 +647,61 @@ mod tests {
         let args: Vec<String> = ["a.md", "--report", "--export-html", "out.html", "/abs/b.md"]
             .map(str::to_owned)
             .to_vec();
-        let files = files_from_args(&args);
+        let files = parse_launch(&args).files;
         assert_eq!(files.len(), 2);
         assert!(files[0].ends_with("a.md"));
         assert!(files[0].is_absolute(), "相対パスは作業フォルダから解く");
         assert!(!files.iter().any(|f| f.ends_with("out.html")));
+    }
+
+    fn launch(args: &[&str]) -> Launch {
+        parse_launch(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    /// `-g` / `--goto` は値を取り、その値をファイルにしない（v2.1.3）。
+    #[test]
+    fn goto_takes_a_line_number() {
+        for args in [
+            &["-g", "120", "a.md"][..],
+            &["a.md", "--goto", "120"][..],
+            &["--goto=120", "a.md"][..],
+        ] {
+            let parsed = launch(args);
+            assert_eq!(parsed.goto, Some(120), "{args:?}");
+            assert_eq!(parsed.files.len(), 1, "{args:?} の 120 をファイルにした");
+            assert!(parsed.problems.is_empty(), "{args:?}");
+        }
+    }
+
+    /// 行番号が無い・数でない・0 のときは、知らせて無視する。
+    #[test]
+    fn a_bad_goto_is_reported_not_opened() {
+        for args in [
+            &["a.md", "-g"][..],
+            &["-g", "abc", "a.md"][..],
+            &["--goto=0", "a.md"][..],
+        ] {
+            let parsed = launch(args);
+            assert_eq!(parsed.goto, None, "{args:?}");
+            assert_eq!(parsed.problems.len(), 1, "{args:?}");
+        }
+    }
+
+    /// `-r` / `--readonly` で読み取り専用。短い旗をファイルとして開かない。
+    #[test]
+    fn readonly_is_a_flag_not_a_file() {
+        for flag in ["-r", "--readonly"] {
+            let parsed = launch(&[flag, "a.md"]);
+            assert!(parsed.read_only, "{flag}");
+            assert_eq!(parsed.files.len(), 1, "{flag} をファイルにした");
+        }
+        assert!(!launch(&["a.md"]).read_only);
+        for flag in ["-t", "--always-on-top"] {
+            let parsed = launch(&[flag, "a.md"]);
+            assert!(parsed.on_top, "{flag}");
+            assert_eq!(parsed.files.len(), 1, "{flag} をファイルにした");
+        }
+        // 知らない短い旗もファイルにしない（`-x.md` という名前は `./-x.md` で渡せる）
+        assert!(launch(&["-x"]).files.is_empty());
     }
 }

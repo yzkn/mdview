@@ -1,9 +1,9 @@
 # リリース手順
 
 対象: v2.0.1 以降
-最終更新: 2026-10-09（v2.1.2 のパッチ配布に合わせた）
+最終更新: 2026-10-13（v2.1.3 の配布前に見直した）
 
-**パッチ版（v2.1.2 など）を配るときは、§3-2 の通し手順をそのまま上から貼る。**
+**パッチ版（v2.1.3 など）を配るときは、§3-2 の通し手順をそのまま上から貼る。**
 タグを push しただけでは Release は走らない（§1）。
 
 ---
@@ -33,17 +33,17 @@
 |きっかけ|走るか|
 |---|---|
 |`v<major>.<minor>.0` のタグ（`-alpha.1` などを含む）|**走る**|
-|`v2.1.2` のようなパッチのタグ|走らない。**Actions から手動で起動する**|
+|`v2.1.3` のようなパッチのタグ|走らない。**Actions から手動で起動する**|
 |ふだんの push|走らない（CI だけ走る）|
 
-手動起動: Actions → Release → Run workflow。`tag` に版数（例 `v2.1.2`）を入れる。
-コマンドなら `gh workflow run release.yml --ref main -f tag=v2.1.2`。
+手動起動: Actions → Release → Run workflow。`tag` に版数（例 `v2.1.3`）を入れる。
+コマンドなら `gh workflow run release.yml --ref main -f tag=v2.1.3`。
 
 手動起動のときの決まり:
 
 |決まり|理由|
 |---|---|
-|**`tag` は必須**。タグの形（`v2.1.2`）で、`Cargo.toml` の版と同じであること|最初の段「タグと版数を照合する」で止まる。空を許すと Release の名前が枝の名前（`main`）になっていた|
+|**`tag` は必須**。タグの形（`v2.1.3`）で、`Cargo.toml` の版と同じであること|最初の段「タグと版数を照合する」で止まる。空を許すと Release の名前が枝の名前（`main`）になっていた|
 |**タグを先に push しておく**|ワークフローは `tag` の版を `actions/checkout` で取り出す。無いタグは取り出せずに落ちる|
 |ワークフローの定義は `--ref` の枝（`main`）のものが使われる|組み立てる中身はタグの版、手順は `main` の版。**ワークフローを直したら `main` へ入れてから起動する**|
 |同じタグの Release が既に在ると最後の段で落ちる|`gh release create` は上書きしない。**出来た Release は作り直さない**（§8-6）。欠けた OS を足すなら §3「あとから足したいとき」|
@@ -55,7 +55,7 @@
 ### 2-1. `Cargo.toml`
 
 ```toml
-version = "2.1.2"
+version = "2.1.3"
 ```
 
 **版数の出どころはここだけ。** インストーラも Release の名前も、
@@ -74,7 +74,7 @@ git diff --stat      # Cargo.toml と Cargo.lock が 1 行ずつ変わってい�
 `[未リリース]` を版数の節へ繰り下げ、日付を入れる。
 
 ```markdown
-## [2.1.2] - 2026-10-09
+## [2.1.3] - 2026-10-13
 ```
 
 **「分かっている制限」も書く。** 直っていないものを黙っていると、
@@ -125,7 +125,7 @@ git push origin v2.2.0
 タグを push すると Release ワークフローが走る。
 終わると**下書きではない Release** が出来ている。
 
-### 3-2. パッチ版（`v2.1.2` など）の通し手順
+### 3-2. パッチ版（`v2.1.3` など）の通し手順
 
 **タグの push では走らない**ので、push のあとに手で起動する（§1）。
 
@@ -139,36 +139,35 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all
 cargo build --release
-./target/release/mdview --version                 # mdview 2.1.2
+./target/release/mdview --version                 # mdview 2.1.3
 
 # 3. 記録してタグを打つ
 git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: v2.1.2"
-git tag v2.1.2
+git commit -m "chore: v2.1.3"
+git tag v2.1.3
 git push origin main
 gh run watch "$(gh run list --workflow ci.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')"
                                                   # main の CI が 3 OS とも通るのを待つ
-git push origin v2.1.2                            # 走らない。次で起動する
+git push origin v2.1.3                            # 走らない。次で起動する
 
 # 4. Release を組む
-gh workflow run release.yml --ref main -f tag=v2.1.2
+gh workflow run release.yml --ref main -f tag=v2.1.3
 sleep 5
 gh run list --workflow release.yml --limit 1      # 起動したことを確かめる
 gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 
 # 5. 出来たものを確かめる（§8-7）
-gh release view v2.1.2 --json assets --jq '.assets[].name'   # 8 つ（§3「出来るもの」）
-mkdir -p check && gh release download v2.1.2 --dir check
+gh release view v2.1.3 --json assets --jq '.assets[].name'   # 8 つ（§3「出来るもの」）
+mkdir -p check && gh release download v2.1.3 --dir check
 (cd check && sha256sum -c SHA256SUMS.txt)
 ```
 
-続けて §4 の目で見る確認を行う。**v2.1.2 では Linux の `.deb` を
-X11 の環境（または WSLg）で入れて起動できること**を必ず見る
-（実行時に読み込むライブラリ `libx11-xcb1`・`libxcursor1`・`libxi6`・`libxkbcommon-x11-0`・`libwayland-client0` を依存に足した版のため）。
+続けて §4 の目で見る確認を行う。**Linux の `.deb` は、X11 の環境（または WSLg）で入れて起動できること**を毎回見る
+（v2.1.2 から、実行時に読み込むライブラリ `libx11-xcb1`・`libxcursor1`・`libxi6`・`libxkbcommon-x11-0`・`libwayland-client0` を依存に入れている）。
 
 ```bash
-sudo apt install ./check/mdview-2.1.2-linux-x86_64.deb
-dpkg-deb -f ./check/mdview-2.1.2-linux-x86_64.deb Depends   # libxcursor1 などが在ること
+sudo apt install ./check/mdview-2.1.3-linux-x86_64.deb
+dpkg-deb -f ./check/mdview-2.1.3-linux-x86_64.deb Depends   # libxcursor1 などが在ること
 mdview --version
 mdview samples/check-v201.md                                # 窓が出てメニューが開くこと
 sudo dpkg -r mdview
@@ -202,13 +201,13 @@ sudo dpkg -r mdview
 **同じ Release へ足すことはできる。**
 
 ```bash
-gh release upload v2.1.2 ./dist/mdview-2.1.2-macos-aarch64.dmg
-gh release upload v2.1.2 ./dist/mdview-2.1.2-macos-aarch64
+gh release upload v2.1.3 ./dist/mdview-2.1.3-macos-aarch64.dmg
+gh release upload v2.1.3 ./dist/mdview-2.1.3-macos-aarch64
 
 # 照合値を作り直して差し替える（足したものを含める）
-gh release download v2.1.2 --dir dist
+gh release download v2.1.3 --dir dist
 cd dist && sha256sum * > SHA256SUMS.txt && cd -
-gh release upload v2.1.2 ./dist/SHA256SUMS.txt --clobber
+gh release upload v2.1.3 ./dist/SHA256SUMS.txt --clobber
 ```
 
 **`SHA256SUMS.txt` を作り直すのを忘れない。** 足したものが照合値に
@@ -229,8 +228,18 @@ mdview-<版数>-macos-aarch64              単一実行ファイル
 SHA256SUMS.txt
 ```
 
-ワークフローの中で**入れて・起動して・消せるか**まで確かめている。
-失敗したらそこで止まり、Release は作られない。
+**インストーラには `mdview.exe` と端末用の入口 `mdview.com` が入る**（v2.1.3）。
+端末で `mdview -v` と打つと `mdview.com` が起き、端末は答えが出るまで待つ。
+単一実行ファイルには `mdview.com` が無い（拡張子まで打つと版数がプロンプトの後ろに出ることがある）。
+
+ワークフローの中で確かめていること（失敗したらそこで止まり、Release は作られない）:
+
+|OS|確かめていること|
+|---|---|
+|Windows|入れて・`mdview.exe --version`・**`mdview.com --version` が同じ版数を返す**・消すと両方消える|
+|Linux|`.deb` を `apt-get install ./…` で入れて・`--version` が `Cargo.toml` の版・`.desktop` が妥当・消せる。**まっさらな `debian:stable-slim` に依存だけを入れて、実行時に読み込むライブラリがそろい、窓を出して描ける**（`check-runtime-libs.sh`・`launch_check.py`）。AppImage は展開して `--version`|
+|macOS|`.dmg` を開いて、2 つのバンドル・アイコン・`Info.plist`・`--version`|
+|全部|最初に**タグと `Cargo.toml` の版が一致する**こと|
 
 > **組み立ての試験は「組み立てられること」と「自動試験が通ること」しか
 > 見ていない。** 画面のあるアプリで最も壊れやすいところは、そのどちらでも
@@ -246,10 +255,16 @@ SHA256SUMS.txt
 |---|---|
 |**日本語の字形**|フォントを同梱している理由そのもの。環境のフォント選択に拾われると崩れる|
 |図・数式・画像が出る|別の糸で描いており、自動試験では画面を見ていない|
-|スクロールと**スクロールバー**|掴んで動かす・溝を押す・端で止まる|
+|スクロールと**スクロールバー**|掴んで動かす・溝を押す・**最終行が先頭に来るところで止まる**（最終行の下は空く。v2.1.3）|
 |**タッチパッドの二本指**|まっすぐ縦ではなく、**斜めに**流す。横揺れで縦が死ぬ不具合を踏んだ|
 |ファイルを開く・保存する|OS のダイアログが出ない環境では、アプリ内の選択へ切り替わる|
 |入れて・起動して・消せる|インストーラの経路|
+|**Windows でコンソールの窓が出ない**|エクスプローラー・スタートメニューから起動する（v2.1.3）|
+|**端末で `mdview -v` が待たれる**|インストールしたものを cmd・PowerShell 5.1・7 で（拡張子無し。`mdview.com` が起きる）。`mdview -h \| more` が化けない|
+|起動オプション|`mdview -r -t -g 120 <文書>` で 120 行目が先頭・読み取り専用・最前面|
+|読み取り専用|打つ・貼る・`Ctrl + S`・画像を落とすが断られ、ファイルが変わらない|
+|窓とタスクバーのアイコン|2 つの窓を開いて、どちらも mdview のアイコン|
+|ミニマップ|長い文書で、枠を掴んで下端まで動かすと最終行が見える|
 
 **実機が無い OS は、無いと書く**（§5）。
 
@@ -364,7 +379,7 @@ bash packaging/macos/build-dmg.sh       target/release/mdview dist
 
 ```powershell
 # Windows: 入れて・起動して・消す
-Start-Process -FilePath .\dist\mdview-2.1.2-windows-x86_64-setup.exe `
+Start-Process -FilePath .\dist\mdview-2.1.3-windows-x86_64-setup.exe `
   -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
 & "$env:LOCALAPPDATA\Programs\mdview\mdview.exe" --version
 Get-ChildItem "$env:LOCALAPPDATA\Programs\mdview\unins*.exe" |
@@ -375,24 +390,24 @@ Get-ChildItem "$env:LOCALAPPDATA\Programs\mdview\unins*.exe" |
 
 ```bash
 # Linux: deb
-sudo apt install ./dist/mdview-2.1.2-linux-x86_64.deb   # 足りない依存を解決させる
+sudo apt install ./dist/mdview-2.1.3-linux-x86_64.deb   # 足りない依存を解決させる
 /usr/bin/mdview --version
 desktop-file-validate /usr/share/applications/mdview.desktop
 sudo dpkg -r mdview
 
 # Linux: AppImage（FUSE が無い環境では展開して動かす）
-APPIMAGE_EXTRACT_AND_RUN=1 ./dist/mdview-2.1.2-linux-x86_64.AppImage --version
+APPIMAGE_EXTRACT_AND_RUN=1 ./dist/mdview-2.1.3-linux-x86_64.AppImage --version
 
 # 中身だけ見る（root が要らない）
-dpkg-deb -I ./dist/mdview-2.1.2-linux-x86_64.deb   # control
-dpkg-deb -c  ./dist/mdview-2.1.2-linux-x86_64.deb   # ファイルの配置
-dpkg-deb -x  ./dist/mdview-2.1.2-linux-x86_64.deb /tmp/mdview-check
+dpkg-deb -I ./dist/mdview-2.1.3-linux-x86_64.deb   # control
+dpkg-deb -c  ./dist/mdview-2.1.3-linux-x86_64.deb   # ファイルの配置
+dpkg-deb -x  ./dist/mdview-2.1.3-linux-x86_64.deb /tmp/mdview-check
 ```
 
 ```bash
 # macOS: dmg
 mount=$(mktemp -d)
-hdiutil attach ./dist/mdview-2.1.2-macos-aarch64.dmg -mountpoint "$mount" -nobrowse -quiet
+hdiutil attach ./dist/mdview-2.1.3-macos-aarch64.dmg -mountpoint "$mount" -nobrowse -quiet
 plutil -lint "$mount/mdview.app/Contents/Info.plist"
 "$mount/mdview.app/Contents/MacOS/mdview" --version
 hdiutil detach "$mount" -quiet
@@ -402,27 +417,27 @@ hdiutil detach "$mount" -quiet
 
 ```bash
 git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: v2.1.2"
-git tag v2.1.2
+git commit -m "chore: v2.1.3"
+git tag v2.1.3
 git push origin main
-git push origin v2.1.2
+git push origin v2.1.3
 ```
 
 **打ち直すとき**（Release がまだ作られていない場合）:
 
 ```bash
-git push origin :refs/tags/v2.1.2    # リモートのタグを消す
-git tag -f v2.1.2                    # 手元のタグを今の先頭へ
-git push origin v2.1.2
+git push origin :refs/tags/v2.1.3    # リモートのタグを消す
+git tag -f v2.1.3                    # 手元のタグを今の先頭へ
+git push origin v2.1.3
 ```
 
 > **Release が既に出来ているタグは動かさない。** 受け取った人が
 > 見ているものと中身が変わる。版数を上げる。
 
-**パッチ版を手で起動する**（`v2.1.2` は自動では走らない。§1）:
+**パッチ版を手で起動する**（`v2.1.3` は自動では走らない。§1）:
 
 ```bash
-gh workflow run release.yml --ref main -f tag=v2.1.2
+gh workflow run release.yml --ref main -f tag=v2.1.3
 gh run list --workflow release.yml --limit 3
 gh run watch                          # 走っているものを追う
 ```
@@ -430,10 +445,10 @@ gh run watch                          # 走っているものを追う
 ### 8-7. 出来たものを確かめる
 
 ```bash
-gh release view v2.1.2
-gh release view v2.1.2 --json assets --jq '.assets[].name'
-gh release download v2.1.2 --pattern "*.deb"
-gh release edit v2.1.2 --notes-file notes.md     # 説明文を直す
+gh release view v2.1.3
+gh release view v2.1.3 --json assets --jq '.assets[].name'
+gh release download v2.1.3 --pattern "*.deb"
+gh release edit v2.1.3 --notes-file notes.md     # 説明文を直す
 ```
 
 ### 8-8. 落ちたときに原因を見る
@@ -460,7 +475,7 @@ sha256sum -c SHA256SUMS.txt
 
 ```powershell
 # Windows で確かめる
-Get-FileHash .\mdview-2.1.2-windows-x86_64-setup.exe -Algorithm SHA256
+Get-FileHash .\mdview-2.1.3-windows-x86_64-setup.exe -Algorithm SHA256
 ```
 
 **署名を始めるなら、決めることが 3 つある。**
@@ -506,10 +521,10 @@ cargo run --release --example make-icons
 
 ### タグを push したのに Release が走らない
 
-`v2.1.2` のようなパッチ版は**自動では走らない**（§1）。手で起動する。
+`v2.1.3` のようなパッチ版は**自動では走らない**（§1）。手で起動する。
 
 ```bash
-gh workflow run release.yml --ref main -f tag=v2.1.2
+gh workflow run release.yml --ref main -f tag=v2.1.3
 ```
 
 ### `v2.1.0` を push したら走ったが、途中で落ちた
@@ -545,22 +560,22 @@ CI（`ci.yml`）の GUI 試験で踏んだもの（v2.1.1 で直した）:
 **タグを push していない。** 手元で打っただけでは公開側に無い。
 
 ```bash
-git ls-remote --tags origin v2.1.2     # 何も出なければ push していない
-git push origin v2.1.2
-gh workflow run release.yml --ref main -f tag=v2.1.2
+git ls-remote --tags origin v2.1.3     # 何も出なければ push していない
+git push origin v2.1.3
+gh workflow run release.yml --ref main -f tag=v2.1.3
 ```
 
 ### Release は作られたが、Linux の実行ファイルが動かない
 
 ```bash
-chmod +x ./mdview-2.1.2-linux-x86_64
-./mdview-2.1.2-linux-x86_64 --version
+chmod +x ./mdview-2.1.3-linux-x86_64
+./mdview-2.1.3-linux-x86_64 --version
 ```
 
 AppImage は FUSE が要る。無い環境では展開して動かす。
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 ./mdview-2.1.2-linux-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./mdview-2.1.3-linux-x86_64.AppImage
 ```
 
 起動直後に落ちるときは、実行時に読み込むライブラリが無い

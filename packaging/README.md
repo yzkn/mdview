@@ -6,9 +6,11 @@
 |置き場|役割|
 |---|---|
 |`windows/mdview.iss`|Inno Setup のスクリプト。**利用者ごと**に入れ、`.md` / `.markdown` の関連付けを選択制で登録する|
+|`../src/bin/mdview-console.rs`|端末用の入口。インストーラが **`mdview.com`** として本体の隣に入れる（v2.1.3）。`cargo build --release` で `mdview-console.exe` が出来る|
 |`windows/build-installer.ps1`|版数を `Cargo.toml` から取り、`ISCC` を呼ぶ|
 |`linux/build-deb.sh`|`.deb` を組む（`.desktop` / アイコン / MIME つき）|
 |`linux/build-appimage.sh`|AppImage を組む（単一ファイル）|
+|`linux/check-runtime-libs.sh`|実行時に読み込む（dlopen）ライブラリがそろっているかを見る。**`.deb` だけを入れたまっさらな環境で呼ぶ**（Release が使う。v2.1.2）。漏れていたら `build-deb.sh` の `Depends` に足す|
 |`macos/build-dmg.sh`|`.app` と `.dmg` を組む。**macOS でしか動かない**|
 |`RELEASE-NOTES-TEMPLATE.md`|Release の説明文のひな形|
 
