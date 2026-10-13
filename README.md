@@ -23,6 +23,8 @@ Windows / macOS / Linux で動く。
 |macOS 11+ (Apple Silicon)|`mdview-<版数>-macos-aarch64.dmg`|`mdview-<版数>-macos-aarch64`|
 |Linux (x64)|`mdview-<版数>-linux-x86_64.deb`|`mdview-<版数>-linux-x86_64.AppImage`|
 
+Linux 版は **glibc 2.39 以上**が要る（Ubuntu 24.04・Debian 13 以降。Ubuntu 22.04・Debian 12 では起動しない）。
+
 > **署名していない。** 初回起動時に OS の警告が出る。外し方は Release の
 > 説明文にある。署名の代わりに SHA-256 の照合値を添えている。
 

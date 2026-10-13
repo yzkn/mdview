@@ -70,9 +70,18 @@ tool="$work/appimagetool"
 if command -v appimagetool >/dev/null 2>&1; then
   tool="$(command -v appimagetool)"
 else
-  url="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-  echo "appimagetool を取る: $url"
-  curl -fsSL -o "$tool" "$url"
+  # **版を固定し、照合値で確かめる**（2026-10-13）。以前は continuous（常に最新）から
+  # 毎回落としていたため、取れない日に落ち、道具が変われば黙って中身が変わった。
+  # 照合値は GitHub が添えている値（release の digest）と一致することを確かめてある。
+  # 上げるときは版と照合値を一緒に変える
+  tool_version="1.9.1"
+  tool_sha256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+  url="https://github.com/AppImage/appimagetool/releases/download/${tool_version}/appimagetool-x86_64.AppImage"
+  echo "appimagetool ${tool_version} を取る: $url"
+  # 一時的に取れないことがあるので、3 回まで待って取り直す
+  curl -fsSL --retry 3 --retry-delay 10 -o "$tool" "$url"
+  echo "${tool_sha256}  ${tool}" | sha256sum -c - >/dev/null \
+    || fail "appimagetool の照合値が違う（${tool_version}。落とし直すか、版と照合値を確かめる）"
   chmod 755 "$tool"
 fi
 

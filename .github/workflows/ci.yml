@@ -1,11 +1,23 @@
 name: CI
 
-# 検査（書式・Lint・試験）。
+# 検査（書式・Lint・試験）と、**配布物を組んで包む**ところまで（2026-10-13）。
 #
 # **3 OS で配るので 3 OS で検査する。** 環境の既定値（文字コード・ツールの版）は
 # OS ごとに違い、手元の 1 台では気づけない。
 #
-# 配布物は作らない（release.yml が作る）。
+# **配布物はここで組み、版数が新しければタグを打って Release まで作る**（2026-10-13）。
+#
+#   - `check`（3 OS）: 検査 → 組む → GUI 試験 → 包む・煙試験 → 成果物 `dist-<OS>`
+#   - `release`（main への push のときだけ）: `Cargo.toml` の版の `v<版数>` が
+#     まだ無ければ、同じ実行の `dist-*` を載せてタグと Release を作る。
+#     **版数を上げていない push ではリリースしない**
+#
+#   - 以前は CI と Release がそれぞれ 3 OS で組んでいた（リリースのたびに 2 回ずつ）
+#   - **試験を通った実行ファイルそのものを配る。** 別に組み直すと、試験したものと
+#     配るものが別のビルドになる
+#   - 包むぶん CI は長くなるが、公開側へ push するのはリリースのときだけなので許す
+#   - **承認は挟まない**（配る速さを優先する）。問題があれば Release を下書きに戻す
+#     （docs/release.md「下書きに戻す」）
 
 on:
   push:
@@ -13,23 +25,49 @@ on:
   pull_request:
   workflow_dispatch:
 
-# 同一ブランチで新しい実行が始まったら古い実行を打ち切る
+# **打ち切るのは PR だけ**（2026-10-13）。main への push で打ち切ると、release ジョブが
+# タグを打ったあと・成果物を載せている途中で止まり、「タグはあるのに Release が無い／欠けている」
+# 状態が残る。次の push は「配布済み」と見て何もしないので、**直らないまま**になる。
+# 公開側へ push するのはリリースのときだけなので、順に待っても困らない
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   check:
-    name: 検査（${{ matrix.os }}）
+    name: 検査と組み立て（${{ matrix.label }}）
     runs-on: ${{ matrix.os }}
     strategy:
-      # **1 つ失敗しても他は続ける。** どの OS が駄目なのかを一度に知りたい
+      # **1 つ失敗しても他は続ける。** どの OS が駄目なのかを一度に知りたい。
+      # Linux や macOS が落ちても、Windows の配布物があれば release ジョブは配る
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # **ubuntu-latest にしない**（2026-10-13）。Linux の実行ファイルは組んだ環境の
+          # glibc 以上を要求する（24.04 で組むと glibc 2.39 以上）。latest が新しい Ubuntu に
+          # 切り替わった日に要求が上がり、まっさらな環境の起動試験（Debian 13 = glibc 2.41）と
+          # 利用者の手元（Ubuntu 24.04 など）で起動できなくなる。上げるときは README の
+          # 「動く環境」と一緒に、意図して上げる
+          - os: ubuntu-24.04
+            label: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            binary: mdview
+          - os: windows-latest
+            label: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            binary: mdview.exe
+          # **macOS は Apple Silicon だけ作る。**
+          # Intel Mac 向けは、必要になった時点で足す
+          - os: macos-latest
+            label: macos-aarch64
+            target: aarch64-apple-darwin
+            binary: mdview
 
     steps:
       - uses: actions/checkout@v7
@@ -40,6 +78,7 @@ jobs:
         run: |
           rustup show
           rustup component add rustfmt clippy
+          rustup target add ${{ matrix.target }}
 
       - name: Linux のビルド依存を入れる
         if: runner.os == 'Linux'
@@ -69,6 +108,14 @@ jobs:
         run: python tools/fetch-fonts.py --check
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # **検査より先に作る。** `build.rs` が Windows の実行ファイルへ埋めるため、
+      # この時点で `assets/icons/mdview.ico` が要る。無いと黙って埋めずに通り、
+      # アイコンと版数の無い実行ファイルを試験していた
+      - name: アイコンを作る
+        run: cargo run --release --target ${{ matrix.target }} --example make-icons
 
       - name: 書式
         run: cargo fmt --all --check
@@ -87,14 +134,15 @@ jobs:
         if: runner.os == 'macOS'
         run: swiftc -typecheck packaging/macos/launcher/main.swift
 
+      # **配るものと同じ組み方で組む**（`--target` 付き）。GUI 試験もこれを試す
+      - name: ビルド
+        run: cargo build --release --target ${{ matrix.target }}
+
       # --- GUI 試験（v2.1.0） ---
       #
       # 試験用の操作口（`--automation`）で、要件の項目を 1 つずつ確かめる
       # （docs/GUI自動テストの方針.md）。**窓が要る**ので、Linux は仮想の画面（Xvfb）で動かす。
       # Windows でしか確かめられない項目（最前面・作業領域）は、他の OS では「未確認」と出る
-      - name: GUI 試験のためにリリースビルドを作る
-        run: cargo build --release
-
       - name: Linux の仮想の画面を用意する
         if: runner.os == 'Linux'
         # **xvfb だけでは窓が出ない。** winit は X11 で動くとき libxkbcommon-x11 を
@@ -104,17 +152,340 @@ jobs:
 
       - name: GUI 試験（要件の確認）
         shell: bash
+        env:
+          EXE: target/${{ matrix.target }}/release/${{ matrix.binary }}
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --shots gui-shots
+            xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --exe "$EXE" --shots gui-shots
           else
-            python tools/automation/spec_test.py --shots gui-shots
+            python tools/automation/spec_test.py --exe "$EXE" --shots gui-shots
           fi
 
       - name: GUI 試験の画面写真を残す
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: gui-shots-${{ matrix.os }}
+          name: gui-shots-${{ matrix.label }}
           path: gui-shots
           if-no-files-found: ignore
+
+      # --- 配布物を組む（Release はこれを載せる） ---
+      - name: 名前を付けて集める
+        shell: bash
+        # 受け取った側が「どれを落とせばよいか」で迷わないよう、名前に OS と CPU を入れる
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
+          mkdir -p dist
+          name="mdview-${version}-${{ matrix.label }}"
+          source="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$source" "dist/${name}.exe"
+          else
+            cp "$source" "dist/${name}"
+            chmod +x "dist/${name}"
+          fi
+          ls -la dist
+
+      # --- Linux の包み（B-5） ---
+      #
+      # **`bash` を頭に付けて呼ぶ。** 実行ビットに頼らない。
+      # Windows では実行ビットを持てず、`git add` で 100644 になる。
+      # 実際、2026-10-05 の v2.0.0 で 3 OS すべてが
+      # `Permission denied`（終了コード 126）で落ちた。
+      # 索引の実行ビットも立て直したが、**公開用の複製を作り直すと再び失われる**
+      # ため、呼び方のほうで断つ。
+      - name: deb を組む
+        if: runner.os == 'Linux'
+        run: |
+          bash packaging/linux/build-deb.sh \
+            "target/${{ matrix.target }}/release/mdview" dist
+
+      - name: AppImage を組む
+        if: runner.os == 'Linux'
+        run: |
+          bash packaging/linux/build-appimage.sh \
+            "target/${{ matrix.target }}/release/mdview" dist
+
+      # **入れて・起動して・消せるかを確かめる**（B-8）
+      - name: deb の煙試験
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          package=$(ls dist/*.deb)
+          echo "試す: $package"
+          # **`dpkg -i` ではなく `apt-get install ./…` で入れる。** 受け取った側と同じ経路にする。
+          # `dpkg` は足りない依存を取りに行かず、ランナーに無い依存
+          # （v2.1.1 で足した libxkbcommon-x11-0）で設定に失敗していた
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y "./$package"
+
+          # 依存の漏れはここでは分からない（ランナーには大抵のものが入っている）。
+          # 次の「まっさらな環境で deb を起動する」が見る
+          echo "依存: $(dpkg-deb -f "$package" Depends)"
+
+          test -x /usr/bin/mdview || { echo "入ったはずの実行ファイルが無い"; exit 1; }
+          version=$(/usr/bin/mdview --version)
+          echo "起動できた: $version"
+          expected="mdview $(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)"
+          [ "$version" = "$expected" ] || { echo "版数が違う: $version（期待: $expected）"; exit 1; }
+
+          # **メニューの定義が妥当か確かめる。** 壊れていると一覧に出ない
+          sudo apt-get install -y desktop-file-utils >/dev/null
+          desktop-file-validate /usr/share/applications/mdview.desktop
+
+          sudo dpkg -r mdview
+          test ! -e /usr/bin/mdview || { echo "消したはずの実行ファイルが残っている"; exit 1; }
+          echo "入れて・起動して・消せた"
+
+      # **まっさらな環境に依存だけを入れ、窓を出して描けるかを見る。**
+      #
+      # 上の煙試験は `--version` だけで窓を出さないうえ、ランナーには大抵の
+      # ライブラリが入っている。winit が実行時に読み込む（dlopen）ものが Depends から
+      # 漏れていても通ってしまい、v2.1.1 で 2 度、利用者の手元で落ちる形で踏んだ
+      # （libxkbcommon-x11・libXcursor ほか）。
+      #
+      # **Debian 13 に固定する**（stable は版が変わると glibc と包みの名前が変わる）。
+      #
+      # `--no-install-recommends` で **Depends だけ**を入れる。2 段に分ける:
+      #
+      #   1. `.deb` だけを入れて、実行時に読み込むライブラリがそろっているかを見る。
+      #      **xvfb より先に見る。** xvfb は libX11・libX11-xcb を連れてくるので、
+      #      後から見ると漏れが隠れる。Wayland 用は起動の試験では読み込まれないので、
+      #      ここでしか捕まえられない
+      #   2. xvfb を入れ、窓を出して描けるかを見る
+      #
+      # 2026-10-09 に手元の podman で、v2.1.1 の deb が 1 で 4 つの漏れを指摘して落ち、
+      # 依存を足すと通ること、GPU 系を消しても CPU 描画で 2 が通ることを確かめた
+      #
+      # **`--init` を外さない。** 外すと `bash -c` が最後の `xvfb-run` を exec して
+      # PID 1 にし、Xvfb の準備完了の合図（SIGUSR1）が届かずに永久に待つ
+      # （手元で 19 分止まった。2026-10-09）。止まっても早く切れるよう上限も置く
+      - name: まっさらな環境で deb を起動する
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          set -eu
+          package=$(ls dist/*.deb)
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
+          docker run --rm --init -v "$PWD:/w" -w /w -e PACKAGE="$package" -e VERSION="$version" \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            debian:13-slim bash -euc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends "./$PACKAGE" >/dev/null
+              bash packaging/linux/check-runtime-libs.sh
+              apt-get install -y -qq --no-install-recommends xvfb xauth python3 >/dev/null
+              xvfb-run -a -s "-screen 0 1280x800x24" \
+                python3 tools/automation/launch_check.py /usr/bin/mdview "$VERSION"'
+
+      - name: AppImage の煙試験
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          package=$(ls dist/*.AppImage)
+          echo "試す: $package"
+          # runner に FUSE が無いので展開して動かす
+          APPIMAGE_EXTRACT_AND_RUN=1 "$package" --version
+
+      # --- macOS の包み（B-6） ---
+      - name: dmg を組む
+        if: runner.os == 'macOS'
+        run: |
+          bash packaging/macos/build-dmg.sh \
+            "target/${{ matrix.target }}/release/mdview" dist
+
+      - name: dmg の煙試験
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          package=$(ls dist/*.dmg)
+          echo "試す: $package"
+          mount=$(mktemp -d)
+          hdiutil attach "$package" -mountpoint "$mount" -nobrowse -quiet
+
+          app="$mount/mdview.app"
+          test -d "$app" || { echo "バンドルが無い"; exit 1; }
+          editor="$app/Contents/Helpers/mdview.app"
+          test -x "$app/Contents/MacOS/mdview" || { echo "起動用が無い"; exit 1; }
+          test -x "$editor/Contents/MacOS/mdview" || { echo "本体が無い"; exit 1; }
+          test -f "$app/Contents/Resources/mdview.icns" || { echo "アイコンが無い"; exit 1; }
+          # **plist が壊れていないか確かめる。** 壊れていると起動すらしない
+          plutil -lint "$app/Contents/Info.plist"
+          plutil -lint "$editor/Contents/Info.plist"
+          # **本体は別のバンドル ID**（同じだと Finder の開く要求が本体へ行く。R-08）
+          outer=$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")
+          inner=$(plutil -extract CFBundleIdentifier raw "$editor/Contents/Info.plist")
+          [ "$outer" != "$inner" ] || { echo "バンドル ID が同じ: $outer"; exit 1; }
+          # 本体を直に、そして起動用越しに（引数があれば本体に置き換わる）
+          "$editor/Contents/MacOS/mdview" --version
+          "$app/Contents/MacOS/mdview" --version | grep -q "^mdview " \
+            || { echo "起動用が本体へ引数を渡せない"; exit 1; }
+
+          hdiutil detach "$mount" -quiet
+          echo "開いて・起動できた"
+
+      # --- Windows のインストーラ（B-3） ---
+      #
+      # **署名しない**（§27.4）。受け取った側の警告の外し方は Release の
+      # 説明文に入れる
+      - name: Inno Setup を入れる
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y --no-progress
+
+      - name: インストーラを組む
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          packaging/windows/build-installer.ps1 `
+            -SourceExe "target/${{ matrix.target }}/release/mdview.exe" `
+            -OutputDir dist
+
+      # **入れて・起動して・消せるかを確かめる**（B-8）。
+      # ここを作らないと、壊れたインストーラをそのまま配ることになる。
+      # 画面が無いので、起動の確認は `--version` で行う
+      - name: 入れて消す煙試験
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist/*-setup.exe | Select-Object -First 1
+          Write-Host "試す: $($setup.Name)"
+
+          Start-Process -FilePath $setup.FullName `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $exe = "$env:LOCALAPPDATA\Programs\mdview\mdview.exe"
+          if (-not (Test-Path $exe)) { throw "入ったはずの $exe が無い" }
+
+          # **答えは .NET の Process で、標準出力をつないで受け取る。**
+          #
+          # 本体（mdview.exe）は v2.1.3 から GUI のアプリなので、`$v = & $exe --version` では
+          # PowerShell が標準出力をつながずに起こし、答えが空（null）になる。しかも
+          # `$null -notmatch '...'` は偽に見えるため、版数の確かめをすり抜けていた
+          # （公開側の CI で、mdview.com との比べで初めて落ちた）
+          function Get-Answer([string]$Path, [string]$Argument) {
+            $info = New-Object System.Diagnostics.ProcessStartInfo
+            $info.FileName = $Path
+            $info.Arguments = $Argument
+            $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true
+            $info.CreateNoWindow = $true
+            $process = [System.Diagnostics.Process]::Start($info)
+            $out = $process.StandardOutput.ReadToEnd()
+            $process.WaitForExit()
+            if ($process.ExitCode -ne 0) { throw "$Path $Argument が終了コード $($process.ExitCode) で終わった" }
+            return $out.Trim()
+          }
+
+          # **版数は完全に一致するかで見る**（空や別の版をすり抜けさせない）
+          $expected = "mdview " + ((Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' |
+            Select-Object -First 1).Matches[0].Groups[1].Value)
+          $version = Get-Answer $exe '--version'
+          Write-Host "起動できた: $version"
+          if ($version -ne $expected) { throw "版数が違う: [$version]（期待: $expected）" }
+
+          # **端末用の入口（mdview.com）も入っていて、答えを返すか**（v2.1.3）。
+          # 本体は GUI のアプリなので、端末で打つとこちらが起きる
+          $console = "$env:LOCALAPPDATA\Programs\mdview\mdview.com"
+          if (-not (Test-Path $console)) { throw "入ったはずの $console が無い" }
+          $answer = Get-Answer $console '--version'
+          Write-Host "端末用の入口: $answer"
+          if ($answer -ne $expected) { throw "mdview.com の答えが違う: [$answer]（期待: $expected）" }
+
+          $uninstall = Get-ChildItem "$env:LOCALAPPDATA\Programs\mdview\unins*.exe" |
+            Select-Object -First 1
+          Start-Process -FilePath $uninstall.FullName `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          # **消えるまで待つ**（最大 60 秒）。Inno Setup のアンインストーラは自分を一時フォルダへ
+          # 写してすぐ戻るので、`-Wait` が効かない。決まった秒数だけ待つと、遅いランナーでは
+          # 消える前に見て落ちる
+          $deadline = (Get-Date).AddSeconds(60)
+          while (((Test-Path $exe) -or (Test-Path $console)) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 2
+          }
+          if (Test-Path $exe) { throw "消したはずの $exe が 60 秒たっても残っている" }
+          if (Test-Path $console) { throw "消したはずの $console が 60 秒たっても残っている" }
+          Write-Host "入れて・起動して・消せた"
+
+      # **release ジョブと release.yml はこの名前で探す。** 変えるなら両方とも直す
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dist-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+
+  # **版数が新しければ、タグを打って Release を作る**（2026-10-13）。
+  #
+  # main への push のときだけ走る（PR・手動起動では走らない）。`check` が
+  # 終わってから、**一部の OS が落ちても走る**（Windows がそろっていれば配る。
+  # Linux / macOS が欠けたら説明文の先頭に書く。tools/release/make-release.sh）。
+  # 打ち切られたとき（新しい push が来たとき）は走らない。
+  #
+  # Actions が打つタグでは、ほかのワークフローは起動しない（GitHub の決まり）。
+  # release.yml が重ねて走ることは無い
+  release:
+    name: タグと Release を作る
+    needs: check
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # タグの push と Release の作成
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 配る版かを見る
+        id: version
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # **配った版は配り直さない。** タグが在れば何もしない（普段の push）。
+          # タグは Release を公開したときに出来る（下書きのうちは出来ない）ので、
+          # 途中で止まった下書きは「まだ配っていない」と見て作り直す
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "$tag は配布済み。リリースしない（版数を上げれば配る）"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$tag はまだ無い。配る"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: この実行の配布物を落とす
+        if: steps.version.outputs.release == 'true'
+        # 全部の OS が落ちていると 1 つも無い。そのときは次の段が理由を出して止める
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: 検査・照合値・説明文
+        if: steps.version.outputs.release == 'true'
+        run: bash tools/release/make-release.sh "${{ steps.version.outputs.tag }}" dist
+
+      - name: タグを打って Release を作る
+        if: steps.version.outputs.release == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          # **前に途中で止まった下書きがあれば消す**（タグはまだ無い）
+          if gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null | grep -qx true; then
+            echo "前の下書きを消す: $TAG"
+            gh release delete "$TAG" --yes
+          fi
+          # プレリリース（`-alpha` など）はその印を付ける
+          flags=""
+          case "$TAG" in
+            *-*) flags="--prerelease" ;;
+          esac
+          # **下書きで作って全部載せてから、公開する。** 公開したときに、この実行のコミット
+          # （試験して包んだもの）へタグが出来る。載せている途中で止まっても、
+          # 欠けた Release が公開されたり、タグだけが残ったりしない
+          gh release create "$TAG" dist/* --draft --target "$GITHUB_SHA" \
+            --title "$TAG" --notes-file release-notes.md $flags
+          gh release edit "$TAG" --draft=false
+          echo "作った: $(gh release view "$TAG" --json url --jq .url)"

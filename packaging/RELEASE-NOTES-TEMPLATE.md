@@ -20,6 +20,8 @@
 | macOS 11+ (Apple Silicon) | `mdview-<版数>-macos-aarch64.dmg` | `mdview-<版数>-macos-aarch64` |
 | Linux (x64) | `mdview-<版数>-linux-x86_64.deb` | `mdview-<版数>-linux-x86_64.AppImage` |
 
+**Linux 版は glibc 2.39 以上が要ります**（Ubuntu 24.04・Debian 13 以降）。
+
 **どれも単体で動きます。** フォントを同梱しているので、環境によって字形が
 変わることはありません。
 

@@ -146,10 +146,21 @@ mkdir -p "$out_dir"
 package="$out_dir/mdview-${version}-macos-aarch64.dmg"
 rm -f "$package"
 
-hdiutil create \
-  -volname "mdview $version" \
-  -srcfolder "$stage" \
-  -ov -format UDZO \
-  "$package" >/dev/null
+# **3 回までやり直す**（2026-10-13）。GitHub の macOS のランナーでは、`hdiutil create` が
+# 「Resource busy」で落ちることがよくある（索引付けなどが作業用のボリュームを掴む）
+made=false
+for attempt in 1 2 3; do
+  if hdiutil create \
+    -volname "mdview $version" \
+    -srcfolder "$stage" \
+    -ov -format UDZO \
+    "$package" >/dev/null; then
+    made=true
+    break
+  fi
+  echo "hdiutil create に失敗（$attempt / 3）。10 秒待ってやり直す"
+  sleep 10
+done
+[ "$made" = true ] || fail "hdiutil create が 3 回とも失敗した"
 
 echo "作った: $package ($(du -h "$package" | cut -f1))"

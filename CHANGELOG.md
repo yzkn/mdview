@@ -3,6 +3,33 @@
 書き方は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に、
 版数は [Semantic Versioning](https://semver.org/lang/ja/) に従う。
 
+## [Unreleased]
+
+## [2.1.4] - 2026-10-13
+
+配布の仕組みだけを変えた版。アプリの機能・見た目は v2.1.3 と同じ。
+
+### Changed
+
+- **配布物の組み立てを 1 回にした**（2026-10-13）。CI が 3 OS で検査に続けて組んで包み
+  （インストーラ・`.deb`・AppImage・`.dmg` と煙試験）、Release は組まずにタグのコミットの
+  CI の成果物を載せる。以前は CI と Release がそれぞれ 3 OS で組んでいた。
+  試験を通った実行ファイルそのものを配る
+- **リリースを自動にした**（2026-10-13）。`main` への push で、`Cargo.toml` の版にまだタグが
+  無ければ、CI がタグを打って Release を作る（承認は挟まない。問題があれば下書きに戻す）。
+  **Windows がそろえば配る**（Linux / macOS が欠けたら説明文の先頭に書く）。
+  手動の Release（`release.yml`）は作り直し用にした
+- 公開リポジトリの Dependabot をやめた
+- **CI の壊れ方を 8 つ塞いだ**（2026-10-13。敵対的検証）
+  - `main` への push では CI を打ち切らない。Release は下書きで作って全部載せてから公開する
+    （打ち切りで「タグだけある／成果物が欠けた Release」が残り、二度と作られなかった）
+  - Linux を組むランナーを `ubuntu-24.04`、起動試験のコンテナを `debian:13-slim` に固定した
+    （latest が変わると要求する glibc が上がる）。**Linux 版は glibc 2.39 以上が要る**ことを README に書いた
+  - Windows のアンインストールは消えるまで待つ・appimagetool は版と照合値を固定・`hdiutil create` は
+    3 回までやり直す・Inno Setup は版の数字で決め打ちしない
+  - 本体の CI の「公開用の複製が最新か」は Dependabot の PR では見ない。複製の作り直しで、
+    本体と公開側の Actions の版の食い違いを知らせる
+
 ## [2.1.3] - 2026-10-13
 
 ビューワーとして使うための読み取り専用モードと起動オプションを足し、デバッグ用の表示を外した。

@@ -1,6 +1,6 @@
 # packaging — 配布物を組む
 
-通常は **GitHub Actions が組む**（`.github/workflows/release.yml`）。
+通常は **GitHub Actions が組む**（`.github/workflows/ci.yml` が組んで包み、`release.yml` が載せる）。
 手元で試したいときに、このフォルダのスクリプトを直接動かす。
 
 |置き場|役割|

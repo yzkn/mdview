@@ -88,13 +88,15 @@ $iscc = Get-Command 'iscc.exe' -ErrorAction SilentlyContinue
 if ($iscc) {
     $isccPath = $iscc.Source
 } else {
-    # **利用者ごとの置き場も見る。** winget は既定でそちらへ入れる
-    $candidates = @(
-        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-        "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
-    )
-    $isccPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    # **利用者ごとの置き場も見る。** winget は既定でそちらへ入れる。
+    # **版の数字で決め打ちしない**（2026-10-13）。`Inno Setup 6` だけを見ていたため、
+    # 7 が出て Chocolatey の版が上がると見つからなくなる。いちばん新しい版を使う
+    $roots = @(${env:ProgramFiles(x86)}, $env:ProgramFiles, (Join-Path $env:LOCALAPPDATA 'Programs')) |
+        Where-Object { $_ }
+    $isccPath = $roots |
+        ForEach-Object { Get-ChildItem -Path (Join-Path $_ 'Inno Setup *\ISCC.exe') -ErrorAction SilentlyContinue } |
+        Sort-Object { [int]($_.Directory.Name -replace '\D', '') } -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
 }
 if (-not $isccPath) {
     Fail @"

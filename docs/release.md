@@ -3,8 +3,8 @@
 対象: v2.0.1 以降
 最終更新: 2026-10-13（v2.1.3 の配布前に見直した）
 
-**パッチ版（v2.1.3 など）を配るときは、§3-2 の通し手順をそのまま上から貼る。**
-タグを push しただけでは Release は走らない（§1）。
+**配るときは、版数を上げて `main` へ push するだけ。** CI が組んで包み、版数が新しければ
+タグを打って Release まで作る（§1・§3）。
 
 ---
 
@@ -17,36 +17,35 @@
 |やること|どこで|
 |---|---|
 |版数の更新・`CHANGELOG.md` の確定|手元|
-|タグを打って push|手元|
-|3 OS のビルド・パッケージ・煙試験|**Actions**|
-|Release の作成・成果物の添付|**Actions**|
+|`main` へ push|手元|
+|タグ|**Actions の CI**（版数が新しいときだけ）|
+|3 OS のビルド・パッケージ・煙試験|**Actions の CI**（`main` への push で走る）|
+|Release の作成・成果物の添付|**Actions の CI**（同じ実行の成果物を載せる）|
 |**目で見る確認**|手元（§4。**省けない**）|
 
 **署名はしない。** 代わりに SHA-256 の照合値を添える（§6）。
 
 ---
 
-## 1. 走る条件
+## 1. 走る条件（2026-10-13 から）
 
-`.github/workflows/release.yml` は、**押すたびには走らない。**
+|ワークフロー|いつ走るか|やること|
+|---|---|---|
+|**CI**（`ci.yml`）の `check`|`main` への push・PR・手動|3 OS で検査（書式・Lint・単体試験・GUI 試験）→ **組む → 包む**（インストーラ・`.deb`・AppImage・`.dmg`）→ 煙試験。出来たものを成果物 `dist-<OS>` として残す|
+|**CI** の `release`|**`main` への push のときだけ**（`check` のあと）|`Cargo.toml` の版の `v<版数>` が**まだ無ければ**、同じ実行の `dist-*` を検査し、タグを打って Release を作る。**版数を上げていない push ではリリースしない**|
+|Release（`release.yml`）|**手動だけ**|作り直し用。タグのコミットの CI の成果物を落として載せる（組まない）|
 
-|きっかけ|走るか|
-|---|---|
-|`v<major>.<minor>.0` のタグ（`-alpha.1` などを含む）|**走る**|
-|`v2.1.3` のようなパッチのタグ|走らない。**Actions から手動で起動する**|
-|ふだんの push|走らない（CI だけ走る）|
+- **3 OS のビルドはリリース 1 回につき 1 回**。試験を通った実行ファイルそのものを配る
+- **承認は挟まない**（配る速さを優先する）。問題があれば下書きに戻す（§3-2）
+- Actions が打つタグでは、ほかのワークフローは起動しない（GitHub の決まり）。`release.yml` が重ねて走ることは無い
 
-手動起動: Actions → Release → Run workflow。`tag` に版数（例 `v2.1.3`）を入れる。
-コマンドなら `gh workflow run release.yml --ref main -f tag=v2.1.3`。
-
-手動起動のときの決まり:
+`release.yml` を手で起こすとき（作り直したいとき）の決まり:
 
 |決まり|理由|
 |---|---|
-|**`tag` は必須**。タグの形（`v2.1.3`）で、`Cargo.toml` の版と同じであること|最初の段「タグと版数を照合する」で止まる。空を許すと Release の名前が枝の名前（`main`）になっていた|
-|**タグを先に push しておく**|ワークフローは `tag` の版を `actions/checkout` で取り出す。無いタグは取り出せずに落ちる|
-|ワークフローの定義は `--ref` の枝（`main`）のものが使われる|組み立てる中身はタグの版、手順は `main` の版。**ワークフローを直したら `main` へ入れてから起動する**|
-|同じタグの Release が既に在ると最後の段で落ちる|`gh release create` は上書きしない。**出来た Release は作り直さない**（§8-6）。欠けた OS を足すなら §3「あとから足したいとき」|
+|**`tag` は必須**。タグの形（`v2.1.3`）で、`Cargo.toml` の版と同じであること|最初に照合して止まる。空を許すと Release の名前が枝の名前（`main`）になっていた|
+|**同じタグの Release を先に消す**|`gh release create` は上書きしない|
+|**タグのコミットの CI の成果物が残っていること**|CI の成果物は 90 日で消える。古いタグは先に CI を起こし直す|
 
 ---
 
@@ -102,7 +101,8 @@ sudo apt-get install -y xvfb libxkbcommon-x11-0
 xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py
 ```
 
-**`main` の CI が 3 OS とも通っていることを確かめてからタグを打つ。**
+**`main` の CI が 3 OS とも通っていることを確かめてからタグを打つ。** Release は CI の成果物を載せる
+だけなので、CI が落ちていると配れない（走っている最中なら Release が待つ）。
 
 ```bash
 gh run list --workflow ci.yml --branch main --limit 3
@@ -110,24 +110,9 @@ gh run list --workflow ci.yml --branch main --limit 3
 
 ---
 
-## 3. タグを打つ
+## 3. 配る
 
-### 3-1. マイナー以上（`v2.2.0` など）
-
-```
-git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: v2.2.0"
-git tag v2.2.0
-git push origin main
-git push origin v2.2.0
-```
-
-タグを push すると Release ワークフローが走る。
-終わると**下書きではない Release** が出来ている。
-
-### 3-2. パッチ版（`v2.1.3` など）の通し手順
-
-**タグの push では走らない**ので、push のあとに手で起動する（§1）。
+### 3-1. ふだん（版数を上げて push する）
 
 ```bash
 # 1. 版数と変更履歴（§2）
@@ -138,29 +123,23 @@ git diff --stat                                   # Cargo.toml / Cargo.lock / CH
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all
-cargo build --release
-./target/release/mdview --version                 # mdview 2.1.3
 
-# 3. 記録してタグを打つ
+# 3. 記録して push する（タグは打たない）
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "chore: v2.1.3"
-git tag v2.1.3
 git push origin main
-gh run watch "$(gh run list --workflow ci.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')"
-                                                  # main の CI が 3 OS とも通るのを待つ
-git push origin v2.1.3                            # 走らない。次で起動する
 
-# 4. Release を組む
-gh workflow run release.yml --ref main -f tag=v2.1.3
-sleep 5
-gh run list --workflow release.yml --limit 1      # 起動したことを確かめる
-gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+# 4. CI を追う（組む → 包む → タグ → Release）
+gh run watch "$(gh run list --workflow ci.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')"
 
 # 5. 出来たものを確かめる（§8-7）
-gh release view v2.1.3 --json assets --jq '.assets[].name'   # 8 つ（§3「出来るもの」）
+gh release view v2.1.3 --json assets --jq '.assets[].name'
 mkdir -p check && gh release download v2.1.3 --dir check
 (cd check && sha256sum -c SHA256SUMS.txt)
 ```
+
+**`main` へ続けて push しない。** 新しい push で前の CI は打ち切られ、打ち切られた実行は
+リリースしない（次の push の CI が、まだタグの無い版として配る）。
 
 続けて §4 の目で見る確認を行う。**Linux の `.deb` は、X11 の環境（または WSLg）で入れて起動できること**を毎回見る
 （v2.1.2 から、実行時に読み込むライブラリ `libx11-xcb1`・`libxcursor1`・`libxi6`・`libxkbcommon-x11-0`・`libwayland-client0` を依存に入れている）。
@@ -173,24 +152,37 @@ mdview samples/check-v201.md                                # 窓が出てメニ
 sudo dpkg -r mdview
 ```
 
-### どの OS が必須か（**macOS は任意**）
+### 3-2. 問題があったら下書きに戻す
+
+承認を挟まないので、配ったあとで問題が分かったら下書きに戻す。
+
+```bash
+gh release edit v2.1.3 --draft=true      # 見えなくする（タグは残る）
+```
+
+**直したものは版数を上げて配り直す。** 同じ版数は作り直さない（受け取った人の手元と中身が変わる）。
+下書きのまま要らなくなったら消す。
+
+```bash
+gh release delete v2.1.3 --cleanup-tag   # Release とタグを消す
+```
+
+### どの OS が必須か（**Windows だけ**）
 
 |OS|落ちたときどうなるか|
 |---|---|
-|**Windows**|**Release を作らない。** 不完全なものを配らない|
-|**Linux**|同じく作らない|
-|**macOS**|**作る。** macOS の分だけが入らない|
+|**Windows**|**Release を作らない。** 実機で確かめている OS。不完全なものを配らない|
+|Linux|**作る。** Linux の分だけが入らない|
+|macOS|**作る。** macOS の分だけが入らない|
 
-**実機が無く確認もできない OS が、確認できる OS の配布を止めるのは
-おかしい。** v1 では Windows と Linux を先に配り、macOS をあとから
-足していた。v2 は 3 OS を runner が同時に組むので足す手間は無いが、
-**落ちたときの扱いは v1 と同じにしてある。**
+判断は `tools/release/make-release.sh`（CI の `release` ジョブと `release.yml` が呼ぶ）。
+**実機が無く確認もできない OS が、確認できる OS の配布を止めるのはおかしい。**
 
 入っていない OS があるときは、**説明文の先頭に自動で書かれる。**
 
 ```markdown
 > **この版には次の環境向けが入っていません: macos-aarch64**
-> 組み立てに失敗したためです。追って別の版で配ります。
+> 組み立てか試験に失敗したためです。追って別の版で配ります。
 ```
 
 > **黙って欠けさせない。** 受け取った側は「まだ上がっていないのか、
@@ -295,7 +287,8 @@ SHA256SUMS.txt
 
 ## 7. パッケージを足したとき
 
-`packaging/` にスクリプトを足したら、**ワークフローにも足す。**
+`packaging/` にスクリプトを足したら、**CI（`ci.yml`）の包む段にも足す。** 新しい配布物が
+Windows / Linux の欠かせないものなら、`release.yml` の「配布物がそろっているか」にも足す。
 片方だけ直すと、手元では組めるのに Release には入らない、という形で
 食い違う。
 
@@ -415,32 +408,23 @@ hdiutil detach "$mount" -quiet
 
 ### 8-6. タグとリリース
 
+**タグは CI が打つ**（`main` への push で、版数が新しいとき）。手で打たない。
+
 ```bash
-git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: v2.1.3"
-git tag v2.1.3
-git push origin main
-git push origin v2.1.3
+git push origin main                                       # これだけで配られる（版数が新しければ）
+gh run list --workflow ci.yml --branch main --limit 3
+gh run view <実行 ID> --json jobs --jq '.jobs[] | "\(.conclusion)\t\(.name)"'
 ```
 
-**打ち直すとき**（Release がまだ作られていない場合）:
+**作り直す**（Release を消して、同じタグで載せ直す。§1）:
 
 ```bash
-git push origin :refs/tags/v2.1.3    # リモートのタグを消す
-git tag -f v2.1.3                    # 手元のタグを今の先頭へ
-git push origin v2.1.3
-```
-
-> **Release が既に出来ているタグは動かさない。** 受け取った人が
-> 見ているものと中身が変わる。版数を上げる。
-
-**パッチ版を手で起動する**（`v2.1.3` は自動では走らない。§1）:
-
-```bash
+gh release delete v2.1.3 --yes                             # タグは残す
 gh workflow run release.yml --ref main -f tag=v2.1.3
-gh run list --workflow release.yml --limit 3
-gh run watch                          # 走っているものを追う
+gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
+
+> **Release が出来たタグは動かさない。** 受け取った人が見ているものと中身が変わる。版数を上げる。
 
 ### 8-7. 出来たものを確かめる
 
@@ -519,15 +503,33 @@ python tools/fetch-fonts.py            # 無ければ取る
 cargo run --release --example make-icons
 ```
 
-### タグを push したのに Release が走らない
+### push したのに Release が出来ない
 
-`v2.1.3` のようなパッチ版は**自動では走らない**（§1）。手で起動する。
+CI の `release` ジョブのログを見る。
+
+|ログ|理由|
+|---|---|
+|`v<版数> は配布済み`|**版数を上げていない。** 配った版は配り直さない|
+|`Windows の配布物が欠けている`|Windows の `check` が落ちた。そのジョブのログを見る|
+|`release` ジョブが走っていない|PR・手動起動の実行か、新しい push で打ち切られた|
+
+### 作り直し用の Release が「欠けている」「このコミットの CI が無い」で落ちた
+
+**組むのは CI なので、CI を見る。** Release のログの「CI の結果」に、CI のジョブごとの
+成否が出ている。
 
 ```bash
-gh workflow run release.yml --ref main -f tag=v2.1.3
+gh run list --workflow ci.yml --branch main --limit 3
+gh run view <CI の実行 ID> --log-failed
 ```
 
-### `v2.1.0` を push したら走ったが、途中で落ちた
+|症状|原因|
+|---|---|
+|このコミットの CI が無い|CI の成果物が 90 日で消えた、または別の push で打ち切られた。`gh workflow run ci.yml --ref main` で起こし直す|
+|Windows の配布物が欠けている|そのコミットの CI で、Windows の検査・組み立て・煙試験が落ちた|
+|版数の違うものが混ざっている|CI の成果物が別の版のもの。タグのコミットの `Cargo.toml` を確かめる|
+
+### CI の組み立てや煙試験が途中で落ちた
 
 落ちた段だけを見る。3 OS は互いに止めないので、**どれが落ちたか**を
 先に確かめる。
@@ -544,11 +546,18 @@ gh run view <実行 ID> --log-failed
 |`Permission denied`（終了コード 126）|`.sh` の実行ビットが落ちていた。**`bash` を頭に付けて呼ぶ**|
 |ISCC が「ファイルが無い」|`.iss` の相対パスは**スクリプトの置き場**基準。絶対パスで渡す|
 |`.ps1` が `Unexpected attribute 'CmdletBinding'`|本文に BOM が 2 つ入っていた。**BOM は先頭の 1 つだけ**にする|
+|タグはあるのに Release が無い・成果物が欠けている|`main` への続けての push で、`release` ジョブが途中で打ち切られた（2026-10-13 に直した: main では打ち切らない。下書きで作って全部載せてから公開する）。残っていたら Release を消して `release.yml` で作り直す|
+|AppImage を組む段で `appimagetool の照合値が違う`|固定した版（`build-appimage.sh` の `tool_version`）の中身が変わった、または落とし損ねた。版と照合値を一緒に見直す|
+|dmg を組む段で `hdiutil create が 3 回とも失敗した`|macOS のランナーの「Resource busy」が続いた。CI を起こし直す（macOS は任意なので配布は止まらない）|
+|インストーラを組む段で Inno Setup が見つからない|`Inno Setup <版>\ISCC.exe` を探している。Chocolatey の入れ先が変わっていないか|
+|`消したはずの … が 60 秒たっても残っている`|アンインストーラが動いていない。インストーラの中身を手元で試す（§8-5）|
+|まっさらな環境の起動試験で `GLIBC_2.xx not found`|組んだランナーの glibc が、試験の Debian より新しい。Linux を組むランナー（`ubuntu-24.04`）と試験のコンテナ（`debian:13-slim`）は**固定してある**。上げるときは README の「glibc 2.39 以上」と一緒に上げる|
+|Windows の煙試験で「起動できた: 」が空・`mdview.com` の答えと食い違う|`mdview.exe` は GUI のアプリ（v2.1.3）なので、PowerShell の `$v = & mdview.exe --version` では答えを受け取れない（null になる）。**.NET の `Process` で標準出力をつないで受け取る**。版数は `-notmatch` ではなく完全に一致するかで見る（null が `-notmatch` をすり抜ける）|
 |deb の煙試験で `dependency problems - leaving unconfigured`|`dpkg -i` は依存を取りに行かない。**`apt-get install ./…` で入れる**（v2.1.1 で直した）|
 |「まっさらな環境で deb を起動する」が終わらない|`docker run` に `--init` が無い。`xvfb-run` が PID 1 になり、Xvfb の準備完了の合図が届かずに待ち続ける。段の `timeout-minutes: 10` で切れる|
 |「まっさらな環境で deb を起動する」で `cannot open shared object file`|実行時に読み込むライブラリが `.deb` の `Depends` から漏れている。`packaging/linux/build-deb.sh` の `Depends` に足す|
 
-CI（`ci.yml`）の GUI 試験で踏んだもの（v2.1.1 で直した）:
+GUI 試験で踏んだもの（v2.1.1 で直した）:
 
 |症状|原因|
 |---|---|
