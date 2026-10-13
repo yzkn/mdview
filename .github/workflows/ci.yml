@@ -417,7 +417,7 @@ jobs:
   # main への push のときだけ走る（PR・手動起動では走らない）。`check` が
   # 終わってから、**一部の OS が落ちても走る**（Windows がそろっていれば配る。
   # Linux / macOS が欠けたら説明文の先頭に書く。tools/release/make-release.sh）。
-  # 打ち切られたとき（新しい push が来たとき）は走らない。
+  # 実行が取り消されたとき（手で取り消した・待っている間に次の push が来た）は走らない。
   #
   # Actions が打つタグでは、ほかのワークフローは起動しない（GitHub の決まり）。
   # release.yml が重ねて走ることは無い
