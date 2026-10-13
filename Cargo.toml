@@ -40,7 +40,7 @@ resvg = "0.48"
 # merman のサイト設定（htmlLabels の一括無効化）を JSON で渡すため
 serde_json = "1"
 # LaTeX 数式（DEC-210）。出力はすべて <path> で、描画に外部フォントが要らない
-latex-rust = "1.0"
+latex-rust = "2.1"
 # 画像のデコード（§16.12）。**ネットワーク機能は使わない**
 # 既定の機能を切り、文書で使う形式だけ入れる
 image = { version = "0.25", default-features = false, features = [
