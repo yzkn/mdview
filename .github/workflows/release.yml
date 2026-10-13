@@ -316,12 +316,21 @@ jobs:
           Write-Host "起動できた: $version"
           if ($version -notmatch '^mdview ') { throw "版数を返さない: $version" }
 
+          # **端末用の入口（mdview.com）も入っていて、答えを返すか**（v2.1.3）。
+          # 本体は GUI のアプリなので、端末で打つとこちらが起きる
+          $console = "$env:LOCALAPPDATA\Programs\mdview\mdview.com"
+          if (-not (Test-Path $console)) { throw "入ったはずの $console が無い" }
+          $answer = & $console --version
+          Write-Host "端末用の入口: $answer"
+          if ($answer -ne $version) { throw "mdview.com の答えが違う: $answer（本体: $version）" }
+
           $uninstall = Get-ChildItem "$env:LOCALAPPDATA\Programs\mdview\unins*.exe" |
             Select-Object -First 1
           Start-Process -FilePath $uninstall.FullName `
             -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
           Start-Sleep -Seconds 3
           if (Test-Path $exe) { throw "消したはずの $exe が残っている" }
+          if (Test-Path $console) { throw "消したはずの $console が残っている" }
           Write-Host "入れて・起動して・消せた"
 
       - uses: actions/upload-artifact@v6
@@ -406,6 +415,8 @@ jobs:
 
           - 単一の実行ファイル（ランタイムの導入は要りません）
           - フォントは同梱しています（OFL。全文は実行ファイルに含みます）
+          - Linux の `.deb` は `sudo apt install ./<ファイル>` で入れてください（`dpkg -i` は足りない依存を入れません）
+          - Windows のインストーラで入れると、端末から `mdview`（拡張子無し）で使えます（`mdview -h` で使い方）
           NOTES
           cat release-notes.md
 
