@@ -898,13 +898,16 @@ impl App {
 
     /// ステータスバー（いつも出ている）を足す。
     fn with_status(&self, mut out: Vec<Element>) -> Vec<Element> {
-        out.push(Element::new("status", "text", self.status().line_text()));
-        let (_, encoding, _) = self.status().parts();
-        out.push(Element::button(
-            "status.encoding",
-            encoding,
-            Message::OpenEncodingDialog,
-        ));
+        out.push(Element::new("status", "text", self.status_text()));
+        // **書式に `{encoding}` が無ければ押す所は無い**（v2.2.0）
+        let (_, encoding, _) = self.status().parts(&self.settings.status_format);
+        if let Some(encoding) = encoding {
+            out.push(Element::button(
+                "status.encoding",
+                encoding,
+                Message::OpenEncodingDialog,
+            ));
+        }
         out
     }
 
@@ -974,7 +977,7 @@ impl App {
             "busy": self.picking || self.export.is_some(),
             "can_undo": self.history.can_undo(),
             "can_redo": self.history.can_redo(),
-            "status": self.status().line_text(),
+            "status": self.status_text(),
             // 畳んだ行を除いた行の数（スクロールの量とミニマップはこれで数える。R-20）
             "visible_line_count": self.folds.visible_count(self.document.text().len_lines()),
             "spawned": self.spawned,

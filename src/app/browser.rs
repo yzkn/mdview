@@ -109,15 +109,15 @@ impl Browser {
         self
     }
 
-    /// Markdown を扱う選択か（文字コードの欄を出すか）。
+    /// 文書（Markdown・テキスト）を扱う選択か（文字コードの欄を出すか）。
     ///
-    /// **出力（PDF・HTML）の保存先では出さない。** 文字コードは関係しない
+    /// **出力（PDF・HTML）の保存先では出さない。** 文字コードは関係しない。
+    /// v2.2.0 からテキストのファイルも開けるので、「出力でなければ文書」と決める
     pub fn is_markdown(&self) -> bool {
-        self.extensions.is_empty()
-            || self
-                .extensions
-                .iter()
-                .any(|e| crate::io::MARKDOWN_EXTENSIONS.contains(&e.as_str()))
+        !self
+            .extensions
+            .iter()
+            .any(|e| matches!(e.as_str(), "pdf" | "html" | "htm"))
     }
 
     /// 文字コードの選び直し（R-04）。

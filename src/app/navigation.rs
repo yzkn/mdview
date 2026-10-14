@@ -105,7 +105,8 @@ impl App {
     /// コードの外の行を順に渡す（リンクを集めるため）。
     fn for_each_prose_line(&self, mut visit: impl FnMut(usize, &str)) {
         for block in self.document.blocks() {
-            if matches!(block.kind, BlockKind::Code { .. }) {
+            // テキストとして読む文書（v2.2.0）はリンクを探さない
+            if matches!(block.kind, BlockKind::Code { .. } | BlockKind::Plain) {
                 continue;
             }
             for line in block.start_line..block.start_line + block.line_count {

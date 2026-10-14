@@ -14,7 +14,7 @@ pub use edit::EditOutcome;
 use ropey::Rope;
 
 use crate::layout::{estimate_height, HeightIndex, Metrics};
-use crate::parse::{scan_lines, Block, ScanResult};
+use crate::parse::{scan_text, Block, ScanResult};
 
 /// 編集中の 1 文書。
 ///
@@ -39,6 +39,10 @@ pub struct Document {
     /// 10MB の全行には掛けられない。多バイトの字は幅も広いので、
     /// 近い目安になる（可視範囲は描画層が正しく測る）。
     pub(super) widest_line: usize,
+    /// **Markdown として読まない**か（v2.2.0）。`.txt` やソースファイル。
+    ///
+    /// 見出し・リスト・表などを作らず、行を等幅でそのまま並べる（`BlockKind::Plain`）
+    pub(super) plain: bool,
 }
 
 /// ブロックの番号を配る。
@@ -90,11 +94,20 @@ impl Document {
     }
 
     pub fn with_width(text: String, width: f32, metrics: &Metrics) -> Self {
+        Self::with_kind(text, width, metrics, false)
+    }
+
+    /// テキストとして読む文書を作る（v2.2.0）。`plain` が偽なら Markdown
+    pub fn plain_text(text: String, plain: bool) -> Self {
+        Self::with_kind(text, 800.0, &Metrics::default(), plain)
+    }
+
+    fn with_kind(text: String, width: f32, metrics: &Metrics, plain: bool) -> Self {
         let ScanResult {
             mut blocks,
             line_count,
             unterminated_fence,
-        } = scan_lines(&text);
+        } = scan_text(&text, plain);
 
         // 一意な番号を振る。位置がずれただけのブロックは番号を保つ（§3.8）
         let mut next_revision = fresh_revision(blocks.len() as u64);
@@ -121,7 +134,20 @@ impl Document {
             unterminated_fence,
             next_revision,
             widest_line,
+            plain,
         }
+    }
+
+    /// 文書の版（v2.2.0）。**編集するたびに変わる**（走査し直したブロックへ振る番号の次）。
+    ///
+    /// 折り返しの表を作り直すかの判断に使う
+    pub fn version(&self) -> u64 {
+        self.next_revision
+    }
+
+    /// Markdown として読まない文書か（v2.2.0）
+    pub fn is_plain(&self) -> bool {
+        self.plain
     }
 
     /// いちばん長い行の添字。**範囲の外を返さない。**

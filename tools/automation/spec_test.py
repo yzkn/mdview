@@ -745,9 +745,9 @@ def settings_screen_opens_and_covers(ctx):
 PAGE_ITEMS = {
     "window": ["window_position", "always_on_top"],
     "editor": ["editor_font", "editor_font_size", "editor_line_spacing", "tab_width",
-               "show_gremlins", "minimap", "minimap_width"],
+               "show_gremlins", "soft_wrap", "minimap", "minimap_width"],
     "preview": ["preview_font_size"],
-    "appearance": ["theme"],
+    "appearance": ["theme", "title_format", "status_format"],
     "file": ["recent_limit", "autosave_draft", "autosave", "autosave_seconds",
              "watch_external", "reload_unmodified"],
     "assist": ["continue_lists", "table_format", "paste_url_as_link", "paste_images",
@@ -764,6 +764,8 @@ CHANGED = {
     "watch_external": "false", "reload_unmodified": "true", "continue_lists": "false",
     "table_format": "false", "paste_url_as_link": "false", "paste_images": "false",
     "image_markup": "markdown", "image_folder": "pics",
+    # v2.2.0
+    "soft_wrap": "true", "title_format": "{path}", "status_format": "{name} {lines}",
 }
 
 

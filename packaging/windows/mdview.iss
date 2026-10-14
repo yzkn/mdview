@@ -65,6 +65,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [CustomMessages]
 japanese.AssociateMd=.md / .markdown の「プログラムから開く」に {#MyAppName} を足す
 english.AssociateMd=Add {#MyAppName} to the "Open with" list for .md / .markdown
+japanese.ContextMenu=.md / .markdown の右クリックのメニューに「{#MyAppName} で開く」を足す
+english.ContextMenu=Add "Open with {#MyAppName}" to the right-click menu for .md / .markdown
+japanese.ContextMenuVerb={#MyAppName} で開く
+english.ContextMenuVerb=Open with {#MyAppName}
 japanese.LaunchAfter={#MyAppName} を起動する
 english.LaunchAfter=Launch {#MyAppName}
 
@@ -72,6 +76,8 @@ english.LaunchAfter=Launch {#MyAppName}
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
 ; **関連付けは選択制。** 既定では付けない（他の道具を使っている人の邪魔をしない）
 Name: "associate"; Description: "{cm:AssociateMd}"; Flags: unchecked
+; 右クリックのメニュー（v2.2.0）。**既定で付ける。** 既定のアプリは変えないので、他の道具の邪魔をしない
+Name: "contextmenu"; Description: "{cm:ContextMenu}"
 
 [Files]
 Source: "{#MySourceExe}"; DestDir: "{app}"; DestName: "{#MyAppExe}"; Flags: ignoreversion
@@ -108,6 +114,19 @@ Root: HKCU; Subkey: "Software\Classes\.markdown\OpenWithProgids"; ValueType: str
 Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExe}"" ""%1"""; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".md"; ValueData: ""; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".markdown"; ValueData: ""; Flags: uninsdeletekey
+
+; 右クリックのメニューの「mdview で開く」（v2.2.0）。
+;
+; **`SystemFileAssociations` に書く。** 拡張子の既定のアプリ（`UserChoice`）が何であっても出る。
+; `.md` の ProgID の下に書くと、既定のアプリが別の道具のときに出ない。
+; Windows 11 では「その他のオプションを確認」（Shift + F10）の中に出る
+; （最初のメニューへ出すには、パッケージ化して IExplorerCommand を実装する必要がある）
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.md\shell\{#MyAppName}"; ValueType: string; ValueName: "MUIVerb"; ValueData: "{cm:ContextMenuVerb}"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.md\shell\{#MyAppName}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#MyAppExe}"",0"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.md\shell\{#MyAppName}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExe}"" ""%1"""; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.markdown\shell\{#MyAppName}"; ValueType: string; ValueName: "MUIVerb"; ValueData: "{cm:ContextMenuVerb}"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.markdown\shell\{#MyAppName}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#MyAppExe}"",0"; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\SystemFileAssociations\.markdown\shell\{#MyAppName}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExe}"" ""%1"""; Tasks: contextmenu
 
 [Run]
 Filename: "{app}\{#MyAppExe}"; Description: "{cm:LaunchAfter}"; Flags: nowait postinstall skipifsilent

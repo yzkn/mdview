@@ -186,6 +186,8 @@ pub struct Context<'a> {
     pub busy: bool,
     /// 何かを選んでいるか（切り取り・コピーが押せるか）
     pub has_selection: bool,
+    /// プレビューで文字を選んでいるか（v2.2.0。**コピーだけ**押せる。切り取りは本文を変えるので押せない）
+    pub preview_selection: bool,
     /// いまの文書に BOM が付いているか
     pub has_bom: bool,
     /// いまの文書の文字コード（§19.4）
@@ -339,7 +341,7 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
                     .enabled(context.has_selection)
                     .access('T'),
                 Item::action("コピー", c(Command::Copy), Message::Copy)
-                    .enabled(context.has_selection)
+                    .enabled(context.has_selection || context.preview_selection)
                     .access('C'),
                 // **貼り付けはいつでも押せる。** クリップボードの中身は
                 // 読みに行くまで分からず、毎回覗くと他のアプリの邪魔になる
@@ -821,6 +823,7 @@ mod tests {
             scroll_sync: true,
             busy: false,
             has_selection: true,
+            preview_selection: false,
             has_bom: false,
             encoding: crate::io::Encoding::Utf8,
             line_ending: crate::io::LineEnding::Lf,

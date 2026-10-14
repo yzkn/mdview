@@ -69,6 +69,8 @@ pub enum SettingChange {
     PreviewFontSize(f32),
     TabWidth(usize),
     Gremlins(bool),
+    /// 右端で折り返す（v2.2.0）
+    SoftWrap(bool),
     RecentLimit(usize),
     AutosaveDraft(bool),
     WatchExternal(bool),
@@ -81,6 +83,10 @@ pub enum SettingChange {
     PasteImages(bool),
     ImageFolder(String),
     ImageMarkup(ImageMarkup),
+    /// 窓の題名の書式（v2.2.0）
+    TitleFormat(String),
+    /// ステータスバーの書式（v2.2.0）
+    StatusFormat(String),
     /// 座標を指定の 4 つを既定に戻す
     ResetCustom,
     CaptureKey(Command),
@@ -208,11 +214,12 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "editor_line_spacing",
             "tab_width",
             "show_gremlins",
+            "soft_wrap",
             "minimap",
             "minimap_width",
         ],
         SettingsPage::Preview => vec!["preview_font_size"],
-        SettingsPage::Appearance => vec!["theme"],
+        SettingsPage::Appearance => vec!["theme", "title_format", "status_format"],
         SettingsPage::File => vec![
             "recent_limit",
             "autosave_draft",
@@ -257,6 +264,7 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "tab_width" => SettingChange::TabWidth(value.trim().parse().ok()?),
         "recent_limit" => SettingChange::RecentLimit(value.trim().parse().ok()?),
         "show_gremlins" => SettingChange::Gremlins(flag()?),
+        "soft_wrap" => SettingChange::SoftWrap(flag()?),
         "minimap" => SettingChange::Minimap(flag()?),
         "autosave_draft" => SettingChange::AutosaveDraft(flag()?),
         "autosave" => SettingChange::Autosave(flag()?),
@@ -269,6 +277,8 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "paste_images" => SettingChange::PasteImages(flag()?),
         "image_markup" => SettingChange::ImageMarkup(ImageMarkup::parse(value)),
         "image_folder" => SettingChange::ImageFolder(value.to_owned()),
+        "title_format" => SettingChange::TitleFormat(value.to_owned()),
+        "status_format" => SettingChange::StatusFormat(value.to_owned()),
         _ => return None,
     })
 }
@@ -286,6 +296,11 @@ pub(super) fn reset_change(key: &str, settings: &Settings) -> Option<SettingChan
     }
     let value = default.unwrap_or_default();
     setting_change(key, value.trim_matches('"'))
+}
+
+/// 書式に入れてよい文字か（v2.2.0）。**`"` と改行は設定ファイルに書けない**
+fn quotable_format(format: &str) -> bool {
+    !format.contains(['"', '\n', '\r'])
 }
 
 /// 既定と違えば、既定へ戻す変更を返す。
@@ -403,6 +418,7 @@ impl App {
             }
             SettingChange::TabWidth(width) => self.settings.tab_width = width.clamp(1, 16),
             SettingChange::Gremlins(on) => self.settings.show_gremlins = on,
+            SettingChange::SoftWrap(on) => self.settings.soft_wrap = on,
             SettingChange::RecentLimit(limit) => {
                 self.settings.recent_limit = limit.clamp(1, settings::RECENT_LIMIT_MAX);
                 self.settings.recent.truncate(self.settings.recent_limit);
@@ -439,6 +455,17 @@ impl App {
             SettingChange::PasteUrl(on) => self.settings.paste_url_as_link = on,
             SettingChange::PasteImages(on) => self.settings.paste_images = on,
             SettingChange::ImageMarkup(markup) => self.settings.image_markup = markup,
+            // **`"` と改行は入れさせない**（設定ファイルに書けず、次に起動すると消える）
+            SettingChange::TitleFormat(format) => {
+                if quotable_format(&format) {
+                    self.settings.title_format = format;
+                }
+            }
+            SettingChange::StatusFormat(format) => {
+                if quotable_format(&format) {
+                    self.settings.status_format = format;
+                }
+            }
             SettingChange::ResetCustom => {
                 self.settings.window_custom = Settings::default().window_custom;
                 if let Some(screen) = self.settings_screen.as_mut() {
@@ -744,6 +771,15 @@ impl App {
                     SettingChange::Gremlins(d.show_gremlins)
                 ),
             ),
+            with_reset(
+                toggle(
+                    "右端で折り返す（512 KB 以下のファイルだけ）",
+                    s.soft_wrap,
+                    SettingChange::SoftWrap
+                ),
+                differs(&s.soft_wrap, &d.soft_wrap, SettingChange::SoftWrap(d.soft_wrap)),
+            ),
+            note("大きいファイルでは縦の位置の計算が重いため、設定を入れても折り返しません。"),
             heading("ミニマップ"),
             with_reset(
                 toggle(
@@ -830,6 +866,42 @@ impl App {
                 ),
             ),
             note("本文・選択・検索の色は、配色の文字色から作ります。"),
+            heading("窓の題名とステータスバー"),
+            with_reset(
+                line(
+                    "窓の題名",
+                    text_input(settings::DEFAULT_TITLE_FORMAT, &self.settings.title_format)
+                        .on_input(|v| Message::Setting(SettingChange::TitleFormat(v)))
+                        .size(12)
+                        .width(Length::Fixed(420.0)),
+                ),
+                differs(
+                    &self.settings.title_format,
+                    &d.title_format,
+                    SettingChange::TitleFormat(d.title_format.clone())
+                ),
+            ),
+            with_reset(
+                line(
+                    "ステータスバー",
+                    text_input(
+                        settings::DEFAULT_STATUS_FORMAT,
+                        &self.settings.status_format
+                    )
+                    .on_input(|v| Message::Setting(SettingChange::StatusFormat(v)))
+                    .size(12)
+                    .width(Length::Fixed(420.0)),
+                ),
+                differs(
+                    &self.settings.status_format,
+                    &d.status_format,
+                    SettingChange::StatusFormat(d.status_format.clone())
+                ),
+            ),
+            note(super::template::HELP),
+            note(
+                "{encoding} の所は押すと文字コードを選べます。書式から外すと押す所も無くなります。"
+            ),
         ]
         .spacing(10)
         .into()

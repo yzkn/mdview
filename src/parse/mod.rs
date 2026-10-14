@@ -21,4 +21,4 @@ pub mod dollar;
 
 // Rescan は rescan_from の戻り値。呼び出し側は分配するだけなので直接は名指ししない
 #[allow(unused_imports)]
-pub use scan::{rescan_from, scan_lines, Block, BlockKind, Rescan, ScanResult};
+pub use scan::{rescan_from, scan_lines, scan_text, Block, BlockKind, Rescan, ScanResult};

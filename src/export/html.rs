@@ -40,6 +40,14 @@ fn marker(index: usize) -> String {
 }
 
 /// 文書を 1 ファイルの HTML にする。
+/// 本文をコードの囲みに入れる（v2.2.0）。**囲みは本文の中のどの ` の並びより長くする**
+fn fence_plain(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    let newline = if text.ends_with('\n') { "" } else { "\n" };
+    format!("{fence}\n{text}{newline}{fence}\n")
+}
+
 pub fn export(
     document: &Document,
     title: &str,
@@ -51,7 +59,12 @@ pub fn export(
         return Err(ExportError::Cancelled);
     }
 
-    let source = document.text().to_string();
+    let mut source = document.text().to_string();
+    // **テキストとして読む文書は、まるごとコードの囲みに入れる**（v2.2.0）。
+    // comrak へそのまま渡すと `#` や `*` を Markdown として読んでしまう
+    if document.is_plain() {
+        source = fence_plain(&source);
+    }
     // **`$$` を数式の囲みへ直してから渡す**（§16.6）。
     //
     // 画面と PDF は自前の走査器を通すので `$$` を数式として扱えるが、
@@ -369,6 +382,20 @@ mod tests {
         )
         .expect("出力できる")
         .text
+    }
+
+    /// **テキストとして読む文書は、記法を解釈せずに出す**（v2.2.0）
+    #[test]
+    fn plain_text_is_exported_verbatim() {
+        let document = Document::plain_text("# not\n```\n*x*\n".to_owned(), true);
+        let out = export(&document, "題", None, &Silent)
+            .expect("出力できる")
+            .text;
+        assert!(!out.contains("<h1>"), "見出しにした");
+        assert!(!out.contains("<em>"), "強調にした");
+        assert!(out.contains("# not"));
+        assert_eq!(fence_plain("a"), "```\na\n```\n");
+        assert_eq!(fence_plain("````\n"), "`````\n````\n`````\n");
     }
 
     #[test]

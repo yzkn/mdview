@@ -29,6 +29,11 @@ pub enum BlockKind {
     Rule,
     /// `<!-- pagebreak -->`（PDF の明示的な改ページ。§5.5）
     PageBreak,
+    /// **Markdown として読まない文書**の行の塊（v2.2.0。`.txt` やソースファイル）。
+    ///
+    /// 空行で区切り、**空行もブロックに含める**（プレビューで空行を消さないため）。
+    /// 等幅でそのまま並べ、ブロックの間は空けない
+    Plain,
 }
 
 /// 1 ブロック。
@@ -103,9 +108,10 @@ pub fn rescan_from(
     slice: &str,
     from_byte: usize,
     from_line: usize,
+    plain: bool,
     is_sync_point: &dyn Fn(usize) -> bool,
 ) -> Rescan {
-    let mut scanner = Scanner::new(from_byte, from_line);
+    let mut scanner = Scanner::new(from_byte, from_line, plain);
     // 再開点はブロックの先頭なので、直前は空行だったものとして始める
     scanner.previous_blank = true;
 
@@ -143,10 +149,12 @@ struct Scanner {
     current: Option<(usize, usize, BlockKind, usize)>,
     offset: usize,
     line_index: usize,
+    /// Markdown として読まない（v2.2.0。`BlockKind::Plain` だけを作る）
+    plain: bool,
 }
 
 impl Scanner {
-    fn new(offset: usize, line_index: usize) -> Self {
+    fn new(offset: usize, line_index: usize, plain: bool) -> Self {
         Self {
             blocks: Vec::new(),
             fence: None,
@@ -154,6 +162,22 @@ impl Scanner {
             current: None,
             offset,
             line_index,
+            plain,
+        }
+    }
+
+    /// テキストとして読む（v2.2.0）。**空行までを 1 つのブロックにする**。
+    ///
+    /// 位置で区切らず空行で区切るので、編集のあとの走査し直しが次の空行で再同期できる
+    fn feed_plain(&mut self, line_start: usize, blank: bool) {
+        match self.current.as_mut() {
+            Some(block) => block.3 += 1,
+            None => self.current = Some((line_start, self.line_index, BlockKind::Plain, 1)),
+        }
+        self.line_index += 1;
+        if blank {
+            let end = self.offset;
+            finish(&mut self.current, end, &mut self.blocks);
         }
     }
 
@@ -163,6 +187,11 @@ impl Scanner {
         let body = strip_newline(line);
         let trimmed = body.trim_start();
         let indent = body.len() - trimmed.len();
+
+        if self.plain {
+            self.feed_plain(line_start, trimmed.is_empty());
+            return;
+        }
 
         // --- フェンスの判定 ---
         // 行頭のインデントが 4 未満のときだけフェンスとして扱う（CommonMark）
@@ -244,7 +273,12 @@ impl Scanner {
 
 /// 本文を走査してブロックの列を得る。
 pub fn scan_lines(text: &str) -> ScanResult {
-    let mut scanner = Scanner::new(0, 0);
+    scan_text(text, false)
+}
+
+/// 本文を走査する。`plain` なら Markdown として読まない（v2.2.0）
+pub fn scan_text(text: &str, plain: bool) -> ScanResult {
+    let mut scanner = Scanner::new(0, 0, plain);
     for line in split_lines(text) {
         scanner.feed(line);
     }
@@ -526,6 +560,24 @@ mod dollar_math_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **テキストとして読むと、記法を解釈しない**（v2.2.0）。空行までが 1 つの塊で、
+    /// 空行も塊に入る（本文のどのバイトも、どこかの塊に属する）
+    #[test]
+    fn plain_text_is_not_read_as_markdown() {
+        let text = "# not a heading\n- not a list\n\n```\nfn main() {}\n";
+        let result = scan_text(text, true);
+        assert!(result
+            .blocks
+            .iter()
+            .all(|block| block.kind == BlockKind::Plain));
+        assert!(!result.unterminated_fence, "フェンスを数えている");
+        assert_eq!(result.blocks.len(), 2);
+        assert_eq!(result.blocks[0].bytes, 0..30);
+        assert_eq!(result.blocks[0].line_count, 3);
+        assert_eq!(result.blocks[1].start_line, 3);
+        assert_eq!(result.blocks[1].bytes.end, text.len());
+    }
 
     fn kinds(text: &str) -> Vec<BlockKind> {
         scan_lines(text)

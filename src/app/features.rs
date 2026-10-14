@@ -239,7 +239,10 @@ impl App {
 
     /// `Enter` でリストと引用を続ける（R-14）。**扱ったら `true`**。
     pub(super) fn continue_list(&mut self) -> bool {
-        if !self.settings.continue_lists || self.editor.rect.is_some() || self.selected().is_some()
+        if !self.settings.continue_lists
+            || !self.markdown_assist()
+            || self.editor.rect.is_some()
+            || self.selected().is_some()
         {
             return false;
         }
@@ -390,7 +393,7 @@ impl App {
     /// 表を整える・行や列を足す（R-16）。
     pub(super) fn table_edit(&mut self, op: TableOp) {
         // **設定で切っていたら何もしない**（打鍵も効かせない）
-        if !self.settings.table_format {
+        if !self.settings.table_format || !self.markdown_assist() {
             return;
         }
         let line = self.editor.cursor_line;
@@ -456,7 +459,7 @@ impl App {
         if self.refuse_edit() {
             return Task::none();
         }
-        if !self.settings.paste_images {
+        if !self.settings.paste_images || !self.markdown_assist() {
             return iced::clipboard::read().map(Message::Pasted);
         }
         let target = self.meta.path.as_ref().and_then(|path| {
@@ -534,7 +537,11 @@ impl App {
     /// GitHub と同じく、**文書の置き場の画像フォルダへ写して**から入れる。
     /// 文書のフォルダの中にあるものは写さず、そのパスで入れる
     pub(super) fn drop_image(&mut self, path: &std::path::Path) -> bool {
-        if !self.settings.paste_images || !is_image(path) || self.mode == ViewMode::Preview {
+        if !self.settings.paste_images
+            || !self.markdown_assist()
+            || !is_image(path)
+            || self.mode == ViewMode::Preview
+        {
             return false;
         }
         // 写す前に断る（読み取り専用。v2.1.3）
@@ -604,7 +611,7 @@ impl App {
     /// **URL を、選んだ文字の上へ貼ったらリンクにする。** 選んでいなければ
     /// そのまま入れる（URL を貼りたいだけのことが多い）
     pub(super) fn paste_text(&mut self, text: &str) {
-        if self.settings.paste_url_as_link && self.editor.rect.is_none() {
+        if self.settings.paste_url_as_link && self.markdown_assist() && self.editor.rect.is_none() {
             if let Some(range) = self.selected() {
                 let selected = self.document.text().byte_slice(range.clone()).to_string();
                 if markdown::looks_like_url(text)

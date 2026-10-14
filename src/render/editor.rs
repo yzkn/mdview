@@ -19,6 +19,8 @@ use iced::{mouse, Color, Element, Event, Length, Pixels, Point, Rectangle, Size}
 
 use super::scrollbar;
 use crate::app::fold::{FoldMap, Heading, NO_FOLDS};
+
+use super::wrap::{Wrap, MIN_COLUMNS};
 use crate::document::Document;
 use crate::search::Match;
 
@@ -37,6 +39,11 @@ const CARET_MARGIN: f32 = 24.0;
 pub struct EditorState {
     /// 画面最上部の行番号。行高が一定なので行番号で持てる
     pub top_line: usize,
+    /// 折り返したとき、先頭行の何段目から見せるか（v2.2.0）。`(行, 段)`。
+    ///
+    /// **行も一緒に持つ。** `top_line` は何か所からも書き換わるので、段だけ持つと
+    /// 別の行へ飛んだあとに古い段が残る。行が `top_line` と違えば 0 段目として扱う
+    pub top_segment: (usize, usize),
     /// 横スクロール量。折り返さない（DD-01）ため必要
     pub scroll_x: f32,
     /// カーソル（行・桁）。桁は文字単位
@@ -46,6 +53,8 @@ pub struct EditorState {
     pub preedit: Option<String>,
     /// 上下移動で桁位置を保つための目標桁（§4.1）
     pub goal_column: Option<usize>,
+    /// 折り返しているときの目標の横位置（段の左端からの桁。v2.2.0）
+    pub goal_cells: Option<usize>,
     /// キャレットを描くか。点滅させるために外から切り替える
     pub caret_visible: bool,
     /// ホイールの端数（行）。**丸めずに繰り越すために持つ**
@@ -246,6 +255,13 @@ pub enum Action {
     ScrollTo {
         top_line: usize,
     },
+    /// 先頭を「行の何段目」に合わせる（v2.2.0。折り返しているとき）
+    ScrollToRow {
+        top_line: usize,
+        segment: usize,
+    },
+    /// 折り返しの幅（桁）が変わった（v2.2.0）。**幅を知っているのは描画層だけ**
+    WrapColumns(usize),
     /// 横位置を合わせる（**絶対 px**）。キャレット追従に使う。
     ///
     /// こちらは何度届いても同じ結果になる必要があるため絶対値で渡す
@@ -330,6 +346,15 @@ pub struct EditorView<'a> {
     headings: &'a [Heading],
     /// ミニマップの幅（px）。出さないなら `None`（R-01）
     minimap: Option<f32>,
+    /// 折り返しの表（v2.2.0）。**折り返していないときは `None`**
+    wrap: Option<&'a Wrap>,
+    /// 折り返したいか（設定が入っていて、文書が小さい）。幅を測って知らせる
+    wrap_wanted: bool,
+    /// 直近に測った行の、段の左端の位置（v2.2.0）。`(行, 文字列の長さ, 各段の左端と行末)`。
+    ///
+    /// **1 フレームの中で同じ行を何度も測らない。** 折り返した行は続けて何段も描くので、
+    /// 段ごとに行頭から測り直すと、長い行で 1 フレームに何十回も字形を組むことになる
+    segment_x: std::cell::RefCell<Option<(usize, usize, Vec<f32>)>>,
 }
 
 impl<'a> EditorView<'a> {
@@ -358,7 +383,17 @@ impl<'a> EditorView<'a> {
             folds: &NO_FOLDS,
             headings: &[],
             minimap: None,
+            wrap: None,
+            wrap_wanted: false,
+            segment_x: std::cell::RefCell::new(None),
         }
+    }
+
+    /// 右端で折り返す（v2.2.0）。`wanted` なら幅を測って `Action::WrapColumns` で知らせる
+    pub fn wrapping(mut self, wrap: Option<&'a Wrap>, wanted: bool) -> Self {
+        self.wrap = wrap.filter(|_| wanted);
+        self.wrap_wanted = wanted;
+        self
     }
 
     /// 文字の大きさと行の高さを直接決める（v2.1.0 R-11）。
@@ -392,35 +427,220 @@ impl<'a> EditorView<'a> {
         self.document.text().len_lines()
     }
 
-    /// 見えている行の数（畳んだぶんを除く）。
+    /// 見えている段の数（畳んだぶんを除き、折り返したぶんを足す）。
     fn total_rows(&self) -> usize {
-        self.folds.visible_count(self.total_lines())
+        match self.wrap {
+            Some(wrap) => wrap.total(),
+            None => self.folds.visible_count(self.total_lines()),
+        }
     }
 
-    /// 先頭行が何段目か。
+    /// 行の最初の段（上からの段の番号）。
+    fn row_of_line(&self, line: usize) -> usize {
+        match self.wrap {
+            Some(wrap) => wrap.row_of(line, 0),
+            None => self.folds.row_of(line),
+        }
+    }
+
+    /// 段の番号を `(行, 何段目か)` にする。**末尾を超えたら最終行**
+    fn position_of_row(&self, row: usize) -> (usize, usize) {
+        match self.wrap {
+            Some(wrap) => wrap.position(row),
+            None => {
+                let last = self.total_lines().saturating_sub(1);
+                (self.folds.line_of(row).min(last), 0)
+            }
+        }
+    }
+
+    /// 先頭行の何段目から見せているか（v2.2.0）。折り返していなければ 0
+    fn top_segment(&self) -> usize {
+        match self.wrap {
+            Some(wrap) if self.state.top_segment.0 == self.state.top_line => self
+                .state
+                .top_segment
+                .1
+                .min(wrap.rows_of(self.state.top_line).saturating_sub(1)),
+            _ => 0,
+        }
+    }
+
+    /// 先頭が何段目か。
     fn top_row(&self) -> usize {
-        self.folds.row_of(self.state.top_line)
+        match self.wrap {
+            Some(wrap) => wrap.row_of(self.state.top_line, self.top_segment()),
+            None => self.folds.row_of(self.state.top_line),
+        }
     }
 
-    /// 画面の上から `row` 段目にある行。**末尾を超えたら最終行**
-    fn line_at_row(&self, row: usize) -> usize {
-        let last = self.total_lines().saturating_sub(1);
-        self.folds.line_of(self.top_row() + row).min(last)
+    /// 画面の上から `row` 段目にある `(行, 何段目か)`。**末尾を超えたら最終行**
+    fn position_at_row(&self, row: usize) -> (usize, usize) {
+        self.position_of_row(self.top_row() + row)
     }
 
-    /// 画面に描く行（上から順に）。
-    fn drawn_lines(&self, height: f32) -> Vec<usize> {
-        let total = self.total_lines();
+    /// 画面に描く段（上から順に `(行, 何段目か)`）。
+    fn drawn_rows(&self, height: f32) -> Vec<(usize, usize)> {
         let rows = self.visible_rows(height);
+        if self.wrap.is_some() {
+            let first = self.top_row();
+            let last = first.saturating_add(rows).min(self.total_rows());
+            return (first..last).map(|row| self.position_of_row(row)).collect();
+        }
+        let total = self.total_lines();
         let mut lines = Vec::with_capacity(rows);
         let mut line = self
             .folds
             .visible_at_or_after(self.state.top_line.min(total));
         while lines.len() < rows && line < total {
-            lines.push(line);
+            lines.push((line, 0));
             line = self.folds.visible_at_or_after(line + 1);
         }
         lines
+    }
+
+    /// 画面に描く行（上から順に。折り返した行は 1 つにまとめる）。
+    fn drawn_lines(&self, height: f32) -> Vec<usize> {
+        let mut lines: Vec<usize> = self
+            .drawn_rows(height)
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect();
+        lines.dedup();
+        lines
+    }
+
+    /// キャレットが行の何段目にあるか（v2.2.0）。折り返していなければ 0
+    fn caret_segment(&self) -> usize {
+        let Some(wrap) = self.wrap else {
+            return 0;
+        };
+        let rendered = Rendered::new(self.cursor_line_content(), self.tab_width);
+        wrap.segment_of(
+            self.state.cursor_line,
+            rendered.column_of_char(self.state.cursor_column),
+        )
+    }
+
+    /// キャレットの段（上からの段の番号）。
+    fn caret_row(&self) -> usize {
+        match self.wrap {
+            Some(wrap) => wrap.row_of(self.state.cursor_line, self.caret_segment()),
+            None => self.folds.row_of(self.state.cursor_line),
+        }
+    }
+
+    /// 先頭を `(行, 何段目か)` へ合わせる操作。**0 段目なら従来の `ScrollTo`**
+    fn scroll_action(top: (usize, usize)) -> Action {
+        if top.1 == 0 {
+            Action::ScrollTo { top_line: top.0 }
+        } else {
+            Action::ScrollToRow {
+                top_line: top.0,
+                segment: top.1,
+            }
+        }
+    }
+
+    /// 段の左右の端（その行の先頭からの px）。最後の段の右端は `None`（v2.2.0）。
+    ///
+    /// **行をまるごと描き、段の範囲だけを切り抜いて左へずらす。** 選択・検索の強調・
+    /// キャレットの位置の計算を、折り返さないときと同じものにできる
+    fn segment_span<Renderer>(&self, text: &str, line: usize, segment: usize) -> (f32, Option<f32>)
+    where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let Some(wrap) = self.wrap else {
+            return (0.0, None);
+        };
+        let mut cache = self.segment_x.borrow_mut();
+        let fresh = !matches!(&*cache, Some((at, len, _)) if *at == line && *len == text.len());
+        if fresh {
+            // **段ごとの幅を足していく**（行頭から測り直さない）。等幅なら同じ値になる
+            let starts: Vec<usize> = wrap.segment_starts(line).collect();
+            let bytes: Vec<usize> = starts
+                .iter()
+                .map(|&display| byte_of_display(text, display))
+                .chain(std::iter::once(text.len()))
+                .collect();
+            let mut xs = Vec::with_capacity(bytes.len());
+            let mut x = 0.0_f32;
+            xs.push(x);
+            for pair in bytes.windows(2) {
+                x += measure_width::<Renderer>(
+                    &text[pair[0]..pair[1]],
+                    self.font,
+                    self.text_size,
+                    self.line_height,
+                );
+                xs.push(x);
+            }
+            *cache = Some((line, text.len(), xs));
+        }
+        let xs = cache
+            .as_ref()
+            .map(|(_, _, xs)| xs.as_slice())
+            .unwrap_or(&[]);
+        let last = xs.len().saturating_sub(2);
+        let segment = segment.min(last);
+        let start = xs.get(segment).copied().unwrap_or(0.0);
+        let end = (segment < last).then(|| xs.get(segment + 1).copied().unwrap_or(start));
+        (start, end)
+    }
+
+    /// 段の本文（v2.2.0）。**その段の文字だけを描く**（行をまるごと描くと、長い行で
+    /// 段の数だけ同じ字形を重ねて描くことになる）
+    fn segment_text<'t>(&self, text: &'t str, line: usize, segment: usize) -> &'t str {
+        let Some(wrap) = self.wrap else {
+            return text;
+        };
+        let (start, end) = wrap.segment_range(line, segment);
+        let from = byte_of_display(text, start);
+        let to = end.map_or(text.len(), |end| byte_of_display(text, end));
+        &text[from..to.max(from)]
+    }
+
+    /// 1 段に入る桁（v2.2.0）。**等幅として半角の幅で割る**
+    fn wrap_columns<Renderer>(&self, bounds: Rectangle) -> usize
+    where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let cell =
+            measure_width::<Renderer>("0000000000", self.font, self.text_size, self.line_height)
+                / 10.0;
+        // 縦のバーは本文に重ねてあるので、そのぶんも除く
+        let width = self.text_area_width(bounds) - scrollbar::THICKNESS - TEXT_PADDING / 2.0;
+        if cell <= 0.0 {
+            return MIN_COLUMNS;
+        }
+        ((width / cell).floor().max(0.0) as usize).max(MIN_COLUMNS)
+    }
+
+    /// 段の中の横位置から、もとの桁（文字単位）を求める（v2.2.0）。
+    ///
+    /// **段の右端より右は、段の最後の文字の前に置く**（次の段の先頭へ入らない）
+    fn column_in_segment<Renderer>(&self, line: usize, segment: usize, x: f32) -> usize
+    where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let rendered = self.rendered(line);
+        let (start, end) = self.segment_span::<Renderer>(&rendered.text, line, segment);
+        let display = column_at::<Renderer>(
+            &rendered.text,
+            start + x.max(0.0),
+            self.font,
+            self.text_size,
+            self.line_height,
+        );
+        let display = match (self.wrap, end) {
+            (Some(wrap), Some(_)) => {
+                let (first, next) = wrap.segment_range(line, segment);
+                display.clamp(first, next.unwrap_or(display).saturating_sub(1))
+            }
+            (Some(wrap), None) => display.max(wrap.segment_range(line, segment).0),
+            _ => display,
+        };
+        rendered.char_of_column(display)
     }
 
     /// 縦のバー（またはミニマップ）の幅。
@@ -489,7 +709,10 @@ impl<'a> EditorView<'a> {
         let content_height = (rows as f32 * scale).min(track.height);
         while y < content_height {
             let row = (y / scale) as usize;
-            let line = self.folds.line_of(row);
+            if row >= rows {
+                break;
+            }
+            let line = self.position_of_row(row).0;
             if line >= total_lines {
                 break;
             }
@@ -545,7 +768,7 @@ impl<'a> EditorView<'a> {
             if self.folds.is_hidden(heading.line) {
                 continue;
             }
-            let at = self.folds.row_of(heading.line) as f32 * scale;
+            let at = self.row_of_line(heading.line) as f32 * scale;
             if at - last_y < gap {
                 continue;
             }
@@ -573,7 +796,7 @@ impl<'a> EditorView<'a> {
             let mut last_y = f32::NEG_INFINITY;
             for found in self.matches.iter().step_by(step) {
                 let line = rope.byte_to_line(found.start.min(rope.len_bytes()));
-                let at = self.folds.row_of(line) as f32 * scale;
+                let at = self.row_of_line(line) as f32 * scale;
                 if at - last_y < 1.0 {
                     continue;
                 }
@@ -592,7 +815,7 @@ impl<'a> EditorView<'a> {
         }
 
         // キャレットの行
-        let caret = self.folds.row_of(self.state.cursor_line) as f32 * scale;
+        let caret = self.caret_row() as f32 * scale;
         if caret <= track.height {
             renderer.fill_quad(
                 renderer::Quad {
@@ -651,9 +874,16 @@ impl<'a> EditorView<'a> {
     /// **本文の幅を削らない。** 削ると、押した場所から桁を求める計算と
     /// 折り返しの判定が全部ずれる。重ねるだけにする
     fn vertical_track(&self, bounds: Rectangle) -> Rectangle {
+        // **ミニマップは下端まで使う**（v2.2.0）。横のバーはミニマップの手前で終わるので、
+        // 角を空けなくても重ならない。空けると、枠が領域の下端に届かない
+        let gap = if self.minimap.is_some() {
+            0.0
+        } else {
+            self.bar_gap()
+        };
         Rectangle::new(
             Point::new(bounds.x + bounds.width - self.bar_width(), bounds.y),
-            Size::new(self.bar_width(), (bounds.height - self.bar_gap()).max(0.0)),
+            Size::new(self.bar_width(), (bounds.height - gap).max(0.0)),
         )
     }
 
@@ -709,9 +939,14 @@ impl<'a> EditorView<'a> {
     fn minimap_scales(&self, bounds: Rectangle) -> (f32, f32, f32) {
         let track = self.vertical_track(bounds).height;
         let rows = self.total_rows().max(1) as f32;
-        let scale = (track / rows).min(scrollbar::MINIMAP_LINE);
         let visible = (bounds.height / self.line_height).max(1.0);
-        let length = (visible * scale).max(scrollbar::MIN_VIEWPORT).min(track);
+        // **帯と枠を合わせて溝に収める**（v2.2.0。VS Code と同じ見え方）。最後まで送ると
+        // 先頭は最終行なので、枠は文書の外（帯の下）に来る。帯を溝いっぱいに描くと、
+        // 枠が帯の終わりに重なって潰れて見えた。帯は「溝 − 枠」に縮め、
+        // 最後まで送ったときに帯の終わりへ枠の上端が、溝の下端へ枠の下端が着くようにする
+        let first = (track / (rows + visible)).min(scrollbar::MINIMAP_LINE);
+        let length = (visible * first).max(scrollbar::MIN_VIEWPORT).min(track);
+        let scale = ((track - length).max(0.0) / rows).min(scrollbar::MINIMAP_LINE);
         let scrollable = self.scrollable_rows() as f32;
         let step = if scrollable > 0.0 {
             ((track - length).max(0.0) / scrollable).min(scale)
@@ -737,7 +972,7 @@ impl<'a> EditorView<'a> {
     /// 揃えないと、つまみが下端に着いたあともホイールで送れてしまい、
     /// 文書が画面から出ていく（§10.58）
     fn max_top_line(&self, _bounds: Rectangle) -> usize {
-        self.folds.line_of(self.scrollable_rows())
+        self.position_of_row(self.scrollable_rows()).0
     }
 
     /// スクロールできる段の数（= 先頭に置ける最後の段）。**最終行の段**（v2.1.3）。
@@ -748,10 +983,10 @@ impl<'a> EditorView<'a> {
         self.total_rows().saturating_sub(1)
     }
 
-    /// 段を先頭行へ直す（バーを掴んだときの行き先）。
-    fn top_line_of_row(&self, row: f32) -> usize {
+    /// 段を先頭の `(行, 何段目か)` へ直す（バーを掴んだときの行き先）。
+    fn top_line_of_row(&self, row: f32) -> (usize, usize) {
         let last = self.total_rows().saturating_sub(1);
-        self.folds.line_of((row.max(0.0) as usize).min(last))
+        self.position_of_row((row.max(0.0) as usize).min(last))
     }
 
     /// スクロールバーの上に居るか。
@@ -835,9 +1070,7 @@ impl<'a> EditorView<'a> {
                     from: along,
                     start_offset: moved,
                 });
-                return Some(Action::ScrollTo {
-                    top_line: self.top_line_of_row(moved),
-                });
+                return Some(Self::scroll_action(self.top_line_of_row(moved)));
             }
         }
 
@@ -901,9 +1134,7 @@ impl<'a> EditorView<'a> {
                     along - held.from,
                 )
             };
-            return Some(Action::ScrollTo {
-                top_line: self.top_line_of_row(moved),
-            });
+            return Some(Self::scroll_action(self.top_line_of_row(moved)));
         }
 
         let track = self.horizontal_track(bounds);
@@ -1314,6 +1545,10 @@ impl<'a> EditorView<'a> {
     where
         Renderer: text::Renderer<Font = iced::Font>,
     {
+        // 折り返していれば、はみ出さない（v2.2.0）
+        if self.wrap.is_some() {
+            return false;
+        }
         let edge = self.text_area_width(bounds) + self.state.scroll_x;
         let most = content.chars().count() as f32 * self.text_size;
         if most <= edge {
@@ -1330,6 +1565,10 @@ impl<'a> EditorView<'a> {
     where
         Renderer: text::Renderer<Font = iced::Font>,
     {
+        // 折り返していれば横には送らない（v2.2.0）
+        if self.wrap.is_some() {
+            return 0.0;
+        }
         let available = self.text_area_width(bounds);
         let drawn = self.drawn_lines(bounds.height);
 
@@ -1374,7 +1613,7 @@ impl<'a> EditorView<'a> {
     /// **行数を知っているのはここだけ。** アプリ側は画面の高さを持たないため、
     /// 概算で寄せるしかなかった。`PageUp` のように一度に大きく動く移動では
     /// 概算が外れ、桁表示だけが動いて画面が止まって見えた（§10.48）
-    fn follow_caret_y(&self, bounds: Rectangle) -> Option<usize> {
+    fn follow_caret_y(&self, bounds: Rectangle) -> Option<(usize, usize)> {
         // **全部見えている段の数で比べる**（v2.1.3）。描く段の数（`visible_rows`）は
         // 下端からはみ出す段と横のバーに隠れる段まで含むので、それで比べると
         // キャレットが下端の外にあっても「見えている」と判断していた
@@ -1384,7 +1623,7 @@ impl<'a> EditorView<'a> {
             .max(1.0) as usize;
         // **段で比べる**（R-20）。畳んだ行は画面の行数に入らない
         let first = self.top_row();
-        let line = self.folds.row_of(self.state.cursor_line);
+        let line = self.caret_row();
 
         let to = if line < first {
             line
@@ -1394,8 +1633,8 @@ impl<'a> EditorView<'a> {
         } else {
             return None;
         };
-        let to = self.folds.line_of(to);
-        (to != self.state.top_line).then_some(to)
+        let to = self.position_of_row(to);
+        (to != (self.state.top_line, self.top_segment())).then_some(to)
     }
 
     /// **キャレットが動いたときだけ**、縦に寄せる位置を返す。
@@ -1410,7 +1649,11 @@ impl<'a> EditorView<'a> {
     ///
     /// キャレットが画面の外に在ること自体は構わない。**利用者が自分で
     /// 巻き上げた結果を覆してはいけない。**
-    fn caret_follow_y(&self, previous: Option<(usize, usize)>, bounds: Rectangle) -> Option<usize> {
+    fn caret_follow_y(
+        &self,
+        previous: Option<(usize, usize)>,
+        bounds: Rectangle,
+    ) -> Option<(usize, usize)> {
         if previous == Some((self.state.cursor_line, self.state.cursor_column)) {
             return None;
         }
@@ -1422,6 +1665,10 @@ impl<'a> EditorView<'a> {
     where
         Renderer: text::Renderer<Font = iced::Font>,
     {
+        // 折り返していれば横には寄せない（v2.2.0）
+        if self.wrap.is_some() {
+            return None;
+        }
         let (x, _) = self.caret_position::<Renderer>(bounds);
         let left = bounds.x + self.gutter_width() + TEXT_PADDING;
         let right = bounds.x + bounds.width - CARET_MARGIN - self.right_reserve();
@@ -1440,15 +1687,33 @@ impl<'a> EditorView<'a> {
         ((to - current).abs() > 0.5).then_some(to)
     }
 
+    /// 押した横位置（ウィジェットの左端からの px）から、もとの桁を求める。
+    ///
+    /// **表示の桁で当ててから、もとの桁へ戻す**（§4.10）。折り返していれば段の中で当てる
+    fn column_at_point<Renderer>(&self, line: usize, segment: usize, x: f32) -> usize
+    where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let text_x = x - self.gutter_width() - TEXT_PADDING;
+        if self.wrap.is_some() {
+            return self.column_in_segment::<Renderer>(line, segment, text_x);
+        }
+        let rendered = self.rendered(line);
+        rendered.char_of_column(column_at::<Renderer>(
+            &rendered.text,
+            text_x + self.state.scroll_x,
+            self.font,
+            self.text_size,
+            self.line_height,
+        ))
+    }
+
     /// キャレットの左上座標（画面座標）。
     fn caret_position<Renderer>(&self, bounds: Rectangle) -> (f32, f32)
     where
         Renderer: text::Renderer<Font = iced::Font>,
     {
-        let row = self
-            .folds
-            .row_of(self.state.cursor_line)
-            .saturating_sub(self.top_row());
+        let row = self.caret_row().saturating_sub(self.top_row());
         let y = bounds.y + row as f32 * self.line_height;
 
         let rendered = Rendered::new(self.cursor_line_content(), self.tab_width);
@@ -1465,7 +1730,18 @@ impl<'a> EditorView<'a> {
             self.line_height,
         );
 
-        let x = bounds.x + self.gutter_width() + TEXT_PADDING + offset - self.state.scroll_x;
+        // **折り返していれば段の左端から測る**（v2.2.0）。横には送らない
+        let shift = if self.wrap.is_some() {
+            let (start, _) = self.segment_span::<Renderer>(
+                &rendered.text,
+                self.state.cursor_line,
+                self.caret_segment(),
+            );
+            start
+        } else {
+            self.state.scroll_x
+        };
+        let x = bounds.x + self.gutter_width() + TEXT_PADDING + offset - shift;
         (x, y)
     }
 }
@@ -1476,6 +1752,8 @@ impl<'a> EditorView<'a> {
 /// 入っていないため、別に受けて覚えておく必要がある
 #[derive(Debug, Clone, Copy, Default)]
 struct State {
+    /// 最後に知らせた折り返しの幅（v2.2.0）。**同じ幅を何度も送らない**
+    sent_columns: Option<usize>,
     modifiers: keyboard::Modifiers,
     /// 押したまま動かしているか（範囲選択）
     dragging: bool,
@@ -1751,7 +2029,7 @@ where
                     return;
                 }
                 let row = (point.y / self.line_height).floor().max(0.0) as usize;
-                let line = self.line_at_row(row);
+                let (line, segment) = self.position_at_row(row);
 
                 // **行番号の欄の左端は開閉の印**（R-20）。見出しの行だけで効く
                 if self.show_gutter && point.x < GUTTER_PADDING && self.is_heading_line(line) {
@@ -1760,16 +2038,7 @@ where
                     return;
                 }
 
-                let text_x = point.x - self.gutter_width() - TEXT_PADDING + self.state.scroll_x;
-                // **表示の桁で当ててから、もとの桁へ戻す**（§4.10）
-                let rendered = self.rendered(line);
-                let column = rendered.char_of_column(column_at::<Renderer>(
-                    &rendered.text,
-                    text_x,
-                    self.font,
-                    self.text_size,
-                    self.line_height,
-                ));
+                let column = self.column_at_point::<Renderer>(line, segment, point.x);
 
                 // **`Ctrl` を押しながらならリンクを開く**（R-19）。
                 // キャレットも動かす（開けなかったときに、どこを見たか分かる）
@@ -1830,17 +2099,8 @@ where
                     return;
                 };
                 let row = (point.y / self.line_height).floor().max(0.0) as usize;
-                let line = self.line_at_row(row);
-                let text_x = point.x - self.gutter_width() - TEXT_PADDING + self.state.scroll_x;
-                // **表示の桁で当ててから、もとの桁へ戻す**（§4.10）
-                let rendered = self.rendered(line);
-                let column = rendered.char_of_column(column_at::<Renderer>(
-                    &rendered.text,
-                    text_x,
-                    self.font,
-                    self.text_size,
-                    self.line_height,
-                ));
+                let (line, segment) = self.position_at_row(row);
+                let column = self.column_at_point::<Renderer>(line, segment, point.x);
 
                 // **矩形のまま広げる**（§4.13）。途中で `Alt` を離しても続ける
                 if self.state.rect.is_some() {
@@ -1904,8 +2164,24 @@ where
             previous
         };
 
-        if let Some(top_line) = self.caret_follow_y(previous, bounds) {
-            shell.publish((self.on_action)(Action::ScrollTo { top_line }));
+        if let Some(top) = self.caret_follow_y(previous, bounds) {
+            shell.publish((self.on_action)(Self::scroll_action(top)));
+        }
+
+        // **折り返しの幅が変わったら知らせる**（v2.2.0）。同じ幅を何度も送らない
+        if self.wrap_wanted {
+            let columns = self.wrap_columns::<Renderer>(bounds);
+            let state = tree.state.downcast_mut::<State>();
+            if self.wrap.map(|wrap| wrap.columns) != Some(columns)
+                && state.sent_columns != Some(columns)
+            {
+                state.sent_columns = Some(columns);
+                shell.publish((self.on_action)(Action::WrapColumns(columns)));
+            } else if self.wrap.is_some_and(|wrap| wrap.columns == columns) {
+                state.sent_columns = Some(columns);
+            }
+        } else {
+            tree.state.downcast_mut::<State>().sent_columns = None;
         }
         // 横も同じ条件で寄せる（長い行を打つと右へ出ていくため）
         if previous != Some(caret) {
@@ -1941,8 +2217,9 @@ where
     ) {
         let bounds = layout.bounds();
         let gutter = self.gutter_width();
-        // **畳んだ行は飛ばして並べる**（R-20）。段と行は一致しない
-        let drawn = self.drawn_lines(bounds.height);
+        // **畳んだ行は飛ばして並べる**（R-20）。段と行は一致しない。
+        // 折り返していれば 1 行が何段にもなる（v2.2.0）
+        let drawn = self.drawn_rows(bounds.height);
 
         let text_color = style.text_color;
         let gutter_color = Color {
@@ -1957,7 +2234,11 @@ where
         // 行番号は本文と別の層に描く。**本文が横へ動いても行番号は動かない**
         if self.show_gutter {
             renderer.with_layer(own_clip, |renderer| {
-                for (row, &line_index) in drawn.iter().enumerate() {
+                for (row, &(line_index, segment)) in drawn.iter().enumerate() {
+                    // **行番号は行の最初の段にだけ出す**（折り返した続きには出さない）
+                    if segment > 0 {
+                        continue;
+                    }
                     let y = bounds.y + row as f32 * self.line_height;
                     draw_text(
                         renderer,
@@ -1998,9 +2279,14 @@ where
         let mut overflowing = Vec::new();
 
         renderer.with_layer(text_clip, |renderer| {
-            let left = bounds.x + gutter + TEXT_PADDING - self.state.scroll_x;
+            let base = bounds.x + gutter + TEXT_PADDING;
+            let scroll_x = if self.wrap.is_some() {
+                0.0
+            } else {
+                self.state.scroll_x
+            };
 
-            for (row, &line_index) in drawn.iter().enumerate() {
+            for (row, &(line_index, segment)) in drawn.iter().enumerate() {
                 let y = bounds.y + row as f32 * self.line_height;
 
                 // 本文。**可視行だけをロープから取り出す**
@@ -2008,65 +2294,101 @@ where
                 // 未確定文字列はカーソル行に**描画だけ**する（ロープには入っていない）
                 let rendered = self.rendered(line_index);
 
-                // **空行でも選択は描く。** 行末の改行が選ばれていることが分かる
-                self.draw_selection::<Renderer>(
-                    renderer, &rendered, line_index, left, y, text_color,
-                );
-                self.draw_rect::<Renderer>(renderer, &rendered, line_index, left, y, text_color);
-
-                if rendered.text.is_empty() && !self.show_invisibles {
-                    continue;
+                // **折り返した段は、行をまるごと描いて段の範囲だけを切り抜く**（v2.2.0）。
+                // 選択・検索の強調・印の位置を、折り返さないときと同じ計算にできる
+                let (start, end) =
+                    self.segment_span::<Renderer>(&rendered.text, line_index, segment);
+                let left = base - scroll_x - start;
+                // **左端は本文の始まり**。行番号の欄との余白まで開けると、前の段の
+                // 終わりの字が欠けて見える。キャレット（幅 2px）のぶんだけ左へ広げる
+                let clip_left = if self.wrap.is_some() {
+                    base - 1.0
+                } else {
+                    text_clip.x
+                };
+                let row_clip = Rectangle {
+                    x: clip_left,
+                    y,
+                    width: match end {
+                        Some(end) => (base + (end - start) + 1.0 - clip_left).max(0.0),
+                        None => text_clip.x + text_clip.width - clip_left,
+                    },
+                    height: self.line_height,
                 }
+                .intersection(&text_clip)
+                .unwrap_or(Rectangle {
+                    width: 0.0,
+                    height: 0.0,
+                    ..text_clip
+                });
+                renderer.with_layer(row_clip, |renderer| {
+                    // **空行でも選択は描く。** 行末の改行が選ばれていることが分かる
+                    self.draw_selection::<Renderer>(
+                        renderer, &rendered, line_index, left, y, text_color,
+                    );
+                    self.draw_rect::<Renderer>(
+                        renderer, &rendered, line_index, left, y, text_color,
+                    );
 
-                if self.overflows::<Renderer>(&rendered.text, bounds) {
-                    overflowing.push(y);
-                }
-
-                // 検索の一致（§15.5）。**本文の下へ敷く**
-                self.draw_matches::<Renderer>(renderer, &rendered, line_index, left, y, text_color);
-
-                if self.show_gremlins {
-                    self.draw_gremlins::<Renderer>(renderer, &rendered, left, y);
-                }
-
-                draw_text(
-                    renderer,
-                    &rendered.text,
-                    Point::new(left, y),
-                    self.font,
-                    self.text_size,
-                    self.line_height,
-                    text_color,
-                    text::Alignment::Left,
-                    &text_clip,
-                );
-
-                // **本文の上に薄く重ねる**（§4.11）。下に敷くと文字で隠れる
-                if self.show_invisibles {
-                    let marks = invisible_marks(&rendered, self.line_end_mark(line_index));
-                    if !marks.trim().is_empty() {
-                        draw_text(
-                            renderer,
-                            &marks,
-                            Point::new(left, y),
-                            self.font,
-                            self.text_size,
-                            self.line_height,
-                            Color {
-                                a: 0.45,
-                                ..text_color
-                            },
-                            text::Alignment::Left,
-                            &text_clip,
-                        );
+                    if rendered.text.is_empty() && !self.show_invisibles {
+                        return;
                     }
-                }
+
+                    if self.overflows::<Renderer>(&rendered.text, bounds) {
+                        overflowing.push(y);
+                    }
+
+                    // 検索の一致（§15.5）。**本文の下へ敷く**
+                    self.draw_matches::<Renderer>(
+                        renderer, &rendered, line_index, left, y, text_color,
+                    );
+
+                    if self.show_gremlins {
+                        self.draw_gremlins::<Renderer>(renderer, &rendered, left, y);
+                    }
+
+                    // 折り返していれば、その段の文字だけを段の左端から描く
+                    draw_text(
+                        renderer,
+                        self.segment_text(&rendered.text, line_index, segment),
+                        Point::new(left + start, y),
+                        self.font,
+                        self.text_size,
+                        self.line_height,
+                        text_color,
+                        text::Alignment::Left,
+                        &text_clip,
+                    );
+
+                    // **本文の上に薄く重ねる**（§4.11）。下に敷くと文字で隠れる
+                    if self.show_invisibles {
+                        let marks = invisible_marks(&rendered, self.line_end_mark(line_index));
+                        if !marks.trim().is_empty() {
+                            draw_text(
+                                renderer,
+                                &marks,
+                                Point::new(left, y),
+                                self.font,
+                                self.text_size,
+                                self.line_height,
+                                Color {
+                                    a: 0.45,
+                                    ..text_color
+                                },
+                                text::Alignment::Left,
+                                &text_clip,
+                            );
+                        }
+                    }
+                });
             }
 
             // --- キャレット ---
             //
             // カーソル行が画面外なら描かない。
-            if self.state.caret_visible && drawn.contains(&self.state.cursor_line) {
+            if self.state.caret_visible
+                && drawn.contains(&(self.state.cursor_line, self.caret_segment()))
+            {
                 let (x, y) = self.caret_position::<Renderer>(bounds);
                 renderer.fill_quad(
                     renderer::Quad {
@@ -2402,6 +2724,13 @@ where
     measure_width::<Renderer>(&line[..byte], font, size, line_height)
 }
 
+/// 表示の文字番号を、描く文字列のバイト位置へ直す（v2.2.0）。**末尾を超えたら末尾**
+fn byte_of_display(text: &str, display: usize) -> usize {
+    text.char_indices()
+        .nth(display)
+        .map_or(text.len(), |(byte, _)| byte)
+}
+
 /// 桁（文字単位）を、その行の先頭からのバイト数へ直す。
 /// 表示のために作った 1 行（§4.10）。
 ///
@@ -2484,11 +2813,11 @@ impl Rendered {
     }
 }
 
-/// 東アジアの全角文字か（印を桁に合わせるために要る）。
+/// 東アジアの全角文字か（印を桁に合わせる・折り返しの幅を数えるために要る）。
 ///
 /// **表を持たない。** 主要な範囲だけを見る。外れても印が半桁ずれるだけで、
 /// 本文の描画には影響しない
-fn is_wide(ch: char) -> bool {
+pub(super) fn is_wide(ch: char) -> bool {
     matches!(ch as u32,
         0x1100..=0x115F
         | 0x2E80..=0x303E
@@ -2710,7 +3039,7 @@ mod caret_follow_tests {
         let to = view
             .caret_follow_y(Some((0, 0)), bounds())
             .expect("寄せていない");
-        assert!(to > 0, "{to}");
+        assert!(to.0 > 0, "{to:?}");
     }
 
     /// 初めて見たとき（直前が無い）は寄せる。
@@ -3363,7 +3692,7 @@ mod minimap_press_tests {
             .minimap(Some(80.0));
         let to = view.follow_caret_y(bounds());
         assert!(
-            to.is_some_and(|top| top >= 1),
+            to.is_some_and(|top| top.0 >= 1),
             "下端の外のキャレットへ寄せていない: {to:?}"
         );
     }

@@ -90,6 +90,8 @@ pub fn estimate_height(block: &Block, source: &str, width: f32, metrics: &Metric
             // コードは折り返さない（§3.5）ので行数がそのまま効く
             block.line_count as f32 * metrics.code_line_height
         }
+        // テキストの塊（v2.2.0）。**塊の間は空けない**
+        BlockKind::Plain => return block.line_count as f32 * metrics.code_line_height,
         BlockKind::Table => block.line_count as f32 * metrics.table_row_height,
         BlockKind::Rule => metrics.line_height,
         BlockKind::PageBreak => metrics.line_height,

@@ -37,6 +37,8 @@ mod notice;
 pub(crate) mod selection;
 // ステータスバーの中身（§7.4）
 mod status;
+// 窓の題名とステータスバーの書式（v2.2.0）
+mod template;
 // ファイル選択ダイアログの組み立て（§14.1）
 mod browser;
 mod picker;
@@ -250,6 +252,14 @@ pub struct App {
     folds: fold::FoldMap,
     /// 見出しの一覧（折りたたみと開閉の印に使う）
     fold_headings: Vec<fold::Heading>,
+    /// 右端での折り返し（v2.2.0）。**折り返していないときは `None`**
+    wrap: Option<crate::render::wrap::Wrap>,
+    /// 作ったときの鍵（どれかが変われば作り直す）
+    wrap_key: Option<crate::render::wrap::WrapKey>,
+    /// 1 段に入る桁。**エディタが測って知らせてくる**（幅を知るのは描画層だけ）
+    wrap_columns: Option<usize>,
+    /// プレビューで選んだ文字（v2.2.0）。**最後に触ったのがプレビューのときだけ**写す
+    preview_selection: Option<String>,
     /// 設定画面（R-03）
     settings_screen: Option<settings_view::SettingsScreen>,
     /// 文字コード・改行コードのダイアログ（R-04）
@@ -458,8 +468,25 @@ fn save_picker(meta: &DocumentMeta) -> picker::Picker {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "無題.md".to_owned());
 
-    picker::Picker::save("Markdown", "md", name)
-        .in_directory(meta.base_dir().map(Path::to_path_buf))
+    // **テキストとして読む文書は、その拡張子で絞る**（v2.2.0）。Markdown で絞ると
+    // `a.txt` に `.md` が付きかねない。拡張子が無ければ絞らない
+    let path = meta.path.as_deref();
+    let picker = if reads_as_plain(path) {
+        let extension = path
+            .and_then(Path::extension)
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "*".to_owned());
+        let mut picker = picker::Picker::save(template::file_kind(path), &extension, name);
+        if extension != "*" {
+            picker
+                .filters
+                .push(("すべてのファイル".to_owned(), vec!["*".to_owned()]));
+        }
+        picker
+    } else {
+        picker::Picker::save("Markdown", "md", name)
+    };
+    picker.in_directory(meta.base_dir().map(Path::to_path_buf))
 }
 
 /// 出力先のダイアログ。**既定の名前は「題名 + 拡張子」**（§17A.4）。
@@ -570,7 +597,9 @@ fn closes_menu(message: &Message) -> bool {
             | Message::Editor(
                 Action::Ime(ImeAction::Opened | ImeAction::Closed)
                     | Action::ScrollTo { .. }
+                    | Action::ScrollToRow { .. }
                     | Action::ScrollXTo { .. }
+                    | Action::WrapColumns(_)
             )
             // 打鍵は割り当てを引いてから決める（何も無ければ閉じない）
             | Message::KeyChord { .. }
@@ -644,8 +673,16 @@ fn item_row(item: menu::Item) -> Element<'static, Message> {
     }
 }
 
-/// 新規文書の中身。
-const NEW_DOCUMENT: &str = "# 新しい文書\n\n";
+/// **Markdown として読まない**ファイルか（v2.2.0）。
+///
+/// 拡張子が Markdown（`.md` / `.markdown`）でなければテキストとして読む。
+/// **無題は Markdown**（新規作成は Markdown を書く前提）
+fn reads_as_plain(path: Option<&Path>) -> bool {
+    path.is_some_and(|path| !crate::io::is_markdown(path))
+}
+
+/// 新規文書の中身。**空にする**（v2.2.0。以前は `# 新しい文書` の見出しを入れていた）
+const NEW_DOCUMENT: &str = "";
 
 /// 計測する秒数。PoC と揃える。
 const BENCH_SECS: f64 = 15.0;
@@ -729,7 +766,7 @@ impl App {
             None => (NEW_DOCUMENT.to_owned(), DocumentMeta::untitled(), None),
         };
 
-        let document = Document::from_text(text);
+        let document = Document::plain_text(text, reads_as_plain(meta.path.as_deref()));
         // **起動時に作る。** 閉じているなら作らない（rebuild_toc と同じ判断）
         let toc = if settings.toc_visible {
             toc::build(&document)
@@ -811,6 +848,10 @@ impl App {
                 folded: std::collections::BTreeSet::new(),
                 folds: fold::FoldMap::default(),
                 fold_headings: Vec::new(),
+                wrap: None,
+                wrap_key: None,
+                wrap_columns: None,
+                preview_selection: None,
                 settings_screen: None,
                 encoding_dialog: None,
                 browser_choice: None,
@@ -1322,6 +1363,7 @@ impl App {
             // 出力中とダイアログ中はファイル操作を止める
             busy: self.export.is_some() || self.picking || self.export_dialog.is_some(),
             has_selection: self.selected().is_some() || self.editor.rect.is_some(),
+            preview_selection: self.preview_selection.is_some(),
             has_bom: self.meta.format.has_bom,
             encoding: self.meta.format.encoding,
             line_ending: self.meta.format.line_ending,
@@ -1329,7 +1371,7 @@ impl App {
             can_undo: self.history.can_undo(),
             can_redo: self.history.can_redo(),
             keymap: &self.keymap,
-            table_format: self.settings.table_format,
+            table_format: self.settings.table_format && self.markdown_assist(),
             on_top: self.on_top,
             read_only: self.read_only,
             has_folds: !self.folded.is_empty(),
@@ -1378,16 +1420,11 @@ impl App {
     /// ステータスバーに出す一式（§7.4）。
     fn status(&self) -> status::Status {
         status::Status {
-            name: self
-                .meta
-                .path
-                .as_deref()
-                .and_then(std::path::Path::file_name)
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "無題".to_owned()),
+            path: self.meta.path.clone(),
             saved: !self.meta.dirty,
             line: self.editor.cursor_line + 1,
             column: self.editor.cursor_column + 1,
+            lines: self.document.text().len_lines(),
             encoding: status::encoding_of(&self.meta.format),
             mode: match self.mode {
                 ViewMode::Edit => "Edit",
@@ -1576,14 +1613,16 @@ impl App {
         .into()
     }
 
+    /// 窓の題名。**書式は設定で変えられる**（v2.2.0。`template`）。
+    ///
+    /// 既定の書式は、読み取り専用（タスクバーでも見える）と未保存の印を出す
     pub fn title(&self) -> String {
-        // **読み取り専用は題名でも分かるようにする**（タスクバーでも見える）
-        let mark = if self.read_only {
-            "［読み取り専用］ "
-        } else {
-            ""
-        };
-        format!("{mark}{} — {APP_NAME}", self.meta.display_name())
+        self.status().text(&self.settings.title_format)
+    }
+
+    /// ステータスバーの 1 行（設定の書式で）
+    pub(crate) fn status_text(&self) -> String {
+        self.status().text(&self.settings.status_format)
     }
 
     /// 読み取り専用なら知らせて `true`（v2.1.3）。**書き換える操作の入口で呼ぶ**
@@ -1603,6 +1642,9 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+
+        // 折り返しの表を合わせる（v2.2.0）
+        self.sync_wrap();
 
         // **畳んだ中へキャレットが入ったら開く**（R-20）。入口は検索・行へ
         // ジャンプ・取り消しなどいくつもあるので、出口の 1 か所で見る
@@ -1787,8 +1829,15 @@ impl App {
                 // 巻き上げだけでは戻さない——読みながら検索語を直すことがある
                 let touched = !matches!(
                     action,
-                    Action::Scrolled { .. } | Action::ScrolledX { .. } | Action::ScrollXTo { .. }
+                    Action::Scrolled { .. }
+                        | Action::ScrolledX { .. }
+                        | Action::ScrollXTo { .. }
+                        | Action::WrapColumns(_)
                 );
+                // **本文を触ったら、写す先はエディタへ戻す**（v2.2.0）
+                if touched {
+                    self.preview_selection = None;
+                }
                 let task = self.apply(action);
                 if touched {
                     return Task::batch([task, self.focus_editor()]);
@@ -2231,7 +2280,9 @@ impl App {
                 return Task::none();
             }
             // 表の整形を切っていたら、打鍵も効かせない（R-16）
-            if command == keymap::Command::FormatTable && !self.settings.table_format {
+            if command == keymap::Command::FormatTable
+                && (!self.settings.table_format || !self.markdown_assist())
+            {
                 return Task::none();
             }
             self.open_menu = None;
@@ -2268,7 +2319,34 @@ impl App {
                     self.editor.anchor = Some(self.caret_byte());
                 }
                 let from = self.editor.cursor_line;
-                cursor::move_cursor(&self.document, &mut self.editor, movement);
+                // **折り返していれば、上下とページ送りは見た目の段で動く**（v2.2.0）
+                let rows = match movement {
+                    crate::render::CursorMove::Up => Some(-1),
+                    crate::render::CursorMove::Down => Some(1),
+                    crate::render::CursorMove::Page { down, rows } => {
+                        Some(if down { rows as i64 } else { -(rows as i64) })
+                    }
+                    _ => None,
+                };
+                match (rows, self.wrap.as_ref()) {
+                    (Some(rows), Some(wrap)) => {
+                        let (line, column, goal) = wrap.step(
+                            &self.document,
+                            self.editor.cursor_line,
+                            self.editor.cursor_column,
+                            self.editor.goal_cells,
+                            rows,
+                        );
+                        self.editor.cursor_line = line;
+                        self.editor.cursor_column = column;
+                        self.editor.goal_column = None;
+                        self.editor.goal_cells = Some(goal);
+                    }
+                    _ => {
+                        cursor::move_cursor(&self.document, &mut self.editor, movement);
+                        self.editor.goal_cells = None;
+                    }
+                }
                 // **畳んだ行は飛ばす**（R-20）。下へなら次の見える行、
                 // 上へなら畳んだ見出しの行へ
                 if self.folds.is_hidden(self.editor.cursor_line) {
@@ -2327,7 +2405,19 @@ impl App {
                 // **端数を繰り越す。** 1 回ぶんを丸めると、高解像度ホイールで
                 // ゆっくり回したときに 1 行も動かない（§10.10）
                 let step = crate::render::take_whole_lines(&mut self.editor.scroll_carry, lines);
-                if step != 0 {
+                if let (true, Some(wrap)) = (step != 0, self.wrap.as_ref()) {
+                    // **折り返していれば見た目の段で動かす**（v2.2.0）。上限は最後の段
+                    let segment = if self.editor.top_segment.0 == self.editor.top_line {
+                        self.editor.top_segment.1
+                    } else {
+                        0
+                    };
+                    let top = wrap.row_of(self.editor.top_line, segment) as i64;
+                    let ceiling = wrap.total().saturating_sub(1) as i64;
+                    let (line, segment) =
+                        wrap.position((top + step).clamp(0, ceiling.max(0)) as usize);
+                    self.set_top(line, segment);
+                } else if step != 0 {
                     // **上限は描画層から来る**（§10.58）。行数ではなく
                     // 「つまみが下端に着く位置」で止めないと、つまみが
                     // 下端に着いたあともホイールで送れて文書が出ていく。
@@ -2349,6 +2439,9 @@ impl App {
             // **ここを通るのは、キャレット追従とスクロールバーである。**
             // どちらも同期の対象（§10.59）
             Action::ScrollTo { top_line } => self.set_top_line(top_line),
+            Action::ScrollToRow { top_line, segment } => self.set_top(top_line, segment),
+            // **幅が変わったら表を作り直す**（v2.2.0）。作り直しは `update` の出口で
+            Action::WrapColumns(columns) => self.wrap_columns = Some(columns),
             Action::ScrollXTo { to } => self.editor.scroll_x = to.max(0.0),
             // **改行はリストを続けるかを先に見る**（R-14）
             Action::Insert(text) => {
@@ -2372,6 +2465,8 @@ impl App {
         match action {
             // `handle` が先に受ける（開くには仕事を返す必要がある）
             PreviewAction::LinkClicked { .. } => {}
+            // 写すのは `Ctrl + C`・編集 → コピーのとき（v2.2.0）
+            PreviewAction::Selected(text) => self.preview_selection = text,
             PreviewAction::Scrolled(delta) => {
                 // ここでだけアンカーを作り直す
                 let viewport = 600.0;
@@ -2631,8 +2726,44 @@ impl App {
     /// **同期の設定によらず寄せたい経路はここを通さない**
     /// （検索で飛ぶ・目次で飛ぶ）。あちらは設定に関わらず合わせる。
     fn set_top_line(&mut self, line: usize) {
+        self.set_top(line, 0);
+    }
+
+    /// 先頭を「行の何段目」にする（v2.2.0。折り返しているとき）。**同期も済ませる**
+    fn set_top(&mut self, line: usize, segment: usize) {
         self.editor.top_line = line;
+        self.editor.top_segment = (line, segment);
         self.sync_from_editor();
+    }
+
+    /// 折り返したいか（v2.2.0）。**設定が入っていて、文書が小さい**ときだけ
+    fn wrap_wanted(&self) -> bool {
+        self.settings.soft_wrap
+            && self.document.text().len_bytes() <= crate::render::wrap::WRAP_LIMIT_BYTES
+    }
+
+    /// 折り返しの表を、いまの文書・幅・タブ幅・畳み込みに合わせる（v2.2.0）。
+    ///
+    /// **`update` の出口で毎回呼ぶ。** 鍵が同じなら何もしないので軽い。編集・開く・畳む・
+    /// 設定を変えるなど入口がいくつもあるので、出口の 1 か所で見る（`ensure_caret_unfolded` と同じ）
+    fn sync_wrap(&mut self) {
+        let Some(columns) = self.wrap_columns.filter(|_| self.wrap_wanted()) else {
+            self.wrap = None;
+            self.wrap_key = None;
+            return;
+        };
+        let tab_width = self.tab_width();
+        let key = crate::render::wrap::WrapKey::of(&self.document, &self.folds, columns, tab_width);
+        if self.wrap_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.wrap = Some(crate::render::wrap::Wrap::build(
+            &self.document,
+            &self.folds,
+            columns,
+            tab_width,
+        ));
+        self.wrap_key = Some(key);
     }
 
     /// エディタの位置をプレビューへ移す。
@@ -3301,6 +3432,11 @@ impl App {
     /// **選んでいなければ何もしない。** 行をまるごと写す作りにはしない
     /// （TeraPad と違い、意図しない貼り付けのほうが直しにくい）
     fn copy(&mut self) -> Task<Message> {
+        // **最後にプレビューで選んだなら、その文字を写す**（v2.2.0）。表示されている文字
+        // （記法を除いたもの）が写る
+        if let Some(text) = self.preview_selection.clone() {
+            return iced::clipboard::write(text);
+        }
         // **矩形が掛かっていればそちらを写す**（§4.13）
         if self.editor.rect.is_some() {
             let text = self.rect_text();
@@ -3566,12 +3702,35 @@ impl App {
         }
     }
 
+    /// Markdown の記法を書き込む補助を効かせるか（v2.2.0）。
+    ///
+    /// **テキストとして読む文書では効かせない。** リストの続きや表の整形、
+    /// URL をリンクにする・画像を `![]()` で入れる、はソースファイルを壊す
+    pub(super) fn markdown_assist(&self) -> bool {
+        !self.document.is_plain()
+    }
+
+    /// 保存先の拡張子に合わせて読み方を変える（v2.2.0）。**変わらなければ何もしない**
+    ///
+    /// 本文は同じなので、カーソルとスクロールはそのまま使える
+    fn refresh_kind(&mut self) {
+        let plain = reads_as_plain(self.meta.path.as_deref());
+        if plain == self.document.is_plain() {
+            return;
+        }
+        self.document = Document::plain_text(self.document.text().to_string(), plain);
+        self.preview = PreviewState::default();
+        self.rebuild_toc();
+        self.folded.clear();
+        self.rebuild_folds();
+    }
+
     /// 文書を差し替える。**状態を残さない。**
     ///
     /// カーソル・スクロール・キャッシュを持ち越すと、前の文書の位置に
     /// 飛んだり古い図が出たりする。
     fn replace_document(&mut self, text: String, meta: DocumentMeta) {
-        self.document = Document::from_text(text);
+        self.document = Document::plain_text(text, reads_as_plain(meta.path.as_deref()));
         self.editor = EditorState {
             caret_visible: true,
             ..EditorState::default()
@@ -3651,6 +3810,8 @@ impl App {
             Ok(()) => {
                 self.meta.path = Some(path.clone());
                 self.meta.dirty = false;
+                // 拡張子が変われば読み方も変える（v2.2.0。`.txt` → `.md` など）
+                self.refresh_kind();
                 // 書けてから覚える。取り消しや失敗で表示だけが変わらないように
                 self.meta.format = format;
                 self.settings.remember(&path);
@@ -3672,6 +3833,7 @@ impl App {
             Ok(path) => {
                 self.meta.path = Some(path);
                 self.meta.dirty = false;
+                self.refresh_kind();
             }
             Err(reason) => self.notice = Some(notice::Notice::plain(reason)),
         }
@@ -4329,6 +4491,8 @@ impl App {
             .font(self.editor_font())
             .sizes(editor_size, editor_line)
             .folding(&self.folds, &self.fold_headings)
+            // 右端で折り返す（v2.2.0）
+            .wrapping(self.wrap.as_ref(), self.wrap_wanted())
             .minimap(self.settings.minimap.then_some(self.settings.minimap_width))
             .highlight(&self.search.matches, self.search.current_match())
             // **検索バーへ入力している間だけ本文へ入れない**（§10.40）。
@@ -4417,16 +4581,20 @@ impl App {
         };
 
         // **文字コードの表示は押せる**（R-04）。押すとダイアログが開く
-        let (head, encoding, tail) = self.status().parts();
-        let status = row![
-            text(head).size(12),
-            button(text(encoding).size(12))
-                .padding([0, 2])
-                .style(button::text)
-                .on_press(Message::OpenEncodingDialog),
-            text(tail).size(12),
-        ]
-        .align_y(iced::Alignment::Center);
+        // 書式に `{encoding}` が無ければ押す所は無い（v2.2.0）
+        let (head, encoding, tail) = self.status().parts(&self.settings.status_format);
+        let mut status = row![text(head).size(12)];
+        if let Some(encoding) = encoding {
+            status = status.push(
+                button(text(encoding).size(12))
+                    .padding([0, 2])
+                    .style(button::text)
+                    .on_press(Message::OpenEncodingDialog),
+            );
+        }
+        let status = status
+            .push(text(tail).size(12))
+            .align_y(iced::Alignment::Center);
 
         let mut body = column![container(self.chrome()).padding(6)];
 
@@ -5030,6 +5198,8 @@ mod read_only_tests {
     #[test]
     fn typing_does_not_change_the_text() {
         let mut app = app();
+        // **利用者の設定に左右されない**（題名の書式は変えられる。v2.2.0）
+        app.settings.title_format = crate::io::settings::DEFAULT_TITLE_FORMAT.to_owned();
         let before = app.document.text().to_string();
         let _ = app.update(Message::ToggleReadOnly);
         assert!(app.read_only);

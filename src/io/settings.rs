@@ -263,6 +263,9 @@ pub struct Settings {
     pub show_invisibles: bool,
     /// 見えないのに悪さをする文字を強調するか（§4.12）
     pub show_gremlins: bool,
+    /// 右端で折り返すか（v2.2.0）。**512 KB 以下の文書でだけ効く**（大きい文書では縦の位置の
+    /// 計算が重い。`render::wrap::WRAP_LIMIT_BYTES`）
+    pub soft_wrap: bool,
     /// 編集中の内容を定期的に退避するか（§18.3）。
     ///
     /// **切れるようにしてある。** 10MB の文書では書き出しに数十 ms かかる
@@ -310,10 +313,22 @@ pub struct Settings {
     pub autosave: bool,
     pub autosave_seconds: u32,
 
+    // --- 題名とステータスバー（v2.2.0） ---
+    /// 窓の題名の書式（`{name}` などの口を置き換える。`app::template`）
+    pub title_format: String,
+    /// ステータスバーの書式
+    pub status_format: String,
+
     /// キー割り当て（R-10）。**既定から変えたものだけ**持つ。
     /// 鍵は操作の名前、値は打鍵（`Ctrl+Shift+S`）
     pub keys: BTreeMap<String, String>,
 }
+
+/// 窓の題名の既定の書式（v2.2.0）。v2.1 までの題名と同じものになる
+pub const DEFAULT_TITLE_FORMAT: &str = "{readonly}{name}{dirty} — {app}";
+/// ステータスバーの既定の書式（v2.2.0）。v2.1 までの表示と同じものになる
+pub const DEFAULT_STATUS_FORMAT: &str =
+    "{name} ・ {state} ・ Ln {line}, Col {col} ・ {encoding} ・ {mode} ・ {size}";
 
 /// 覚えておく数の既定。
 ///
@@ -352,6 +367,8 @@ impl Default for Settings {
             show_invisibles: false,
             // **既定で出す。** 貼り付けで紛れ込むものを、気づく前に保存させない
             show_gremlins: true,
+            // **既定は折り返さない**（v2.1 までと同じ）
+            soft_wrap: false,
             // **既定で退避する。** 失うほうが痛い
             autosave_draft: true,
             recent: Vec::new(),
@@ -382,6 +399,9 @@ impl Default for Settings {
             // **既定は切る。** 勝手に書き換わるのを嫌う人がいる
             autosave: false,
             autosave_seconds: 30,
+            // **v2.1 までの表示を再現する書式**（`app::template` の DEFAULT_TITLE / DEFAULT_STATUS と同じ）
+            title_format: DEFAULT_TITLE_FORMAT.to_owned(),
+            status_format: DEFAULT_STATUS_FORMAT.to_owned(),
             keys: BTreeMap::new(),
         }
     }
@@ -465,6 +485,7 @@ impl Settings {
              tab_width = {}\n\
              show_invisibles = {}\n\
              show_gremlins = {}\n\
+             soft_wrap = {}\n\
              autosave_draft = {}\n\
              recent_limit = {}\n\
              window_position = \"{}\"\n\
@@ -499,6 +520,7 @@ impl Settings {
             self.tab_width,
             self.show_invisibles,
             self.show_gremlins,
+            self.soft_wrap,
             self.autosave_draft,
             self.recent_limit,
             self.window_placement.as_str(),
@@ -536,6 +558,13 @@ impl Settings {
         if quotable(&self.image_folder) {
             out.push_str(&format!("image_folder = \"{}\"\n", self.image_folder));
         }
+        // **`"` と改行を含む書式は書けない**（読み戻せない）。そのときは既定のまま
+        if quotable(&self.title_format) {
+            out.push_str(&format!("title_format = \"{}\"\n", self.title_format));
+        }
+        if quotable(&self.status_format) {
+            out.push_str(&format!("status_format = \"{}\"\n", self.status_format));
+        }
         // **既定から変えたものだけ書く**（R-10）。既定を書くと、
         // 次の版で既定を変えたときに古い値が残り続ける
         for (command, keys) in &self.keys {
@@ -572,11 +601,12 @@ impl Settings {
     /// 外部クレートを使わない。読むのは平らな数項目だけで、
     /// TOML の全機能は要らない。
     pub fn from_toml(text: &str) -> Self {
-        const BOOL_KEYS: [&str; 15] = [
+        const BOOL_KEYS: [&str; 16] = [
             "toc_visible",
             "scroll_sync",
             "show_invisibles",
             "show_gremlins",
+            "soft_wrap",
             "autosave_draft",
             "last_on_top",
             "last_maximized",
@@ -619,6 +649,7 @@ impl Settings {
                 "scroll_sync" => settings.scroll_sync = flag,
                 "show_invisibles" => settings.show_invisibles = flag,
                 "show_gremlins" => settings.show_gremlins = flag,
+                "soft_wrap" => settings.soft_wrap = flag,
                 "autosave_draft" => settings.autosave_draft = flag,
                 "window_position" => settings.window_placement = WindowPlacement::parse(value),
                 "always_on_top" => settings.always_on_top = OnTop::parse(value),
@@ -634,6 +665,8 @@ impl Settings {
                 "reload_unmodified" => settings.reload_unmodified = flag,
                 "autosave" => settings.autosave = flag,
                 "editor_font" => settings.editor_font = value.to_owned(),
+                "title_format" => settings.title_format = value.to_owned(),
+                "status_format" => settings.status_format = value.to_owned(),
                 // **空や上へ出る名前は採らない。** 文書の外へ書き出さない
                 "image_folder" => {
                     if !value.is_empty() && !value.contains("..") {
@@ -937,6 +970,7 @@ mod tests {
             tab_width: 8,
             show_invisibles: true,
             show_gremlins: false,
+            soft_wrap: true,
             autosave_draft: false,
             recent: vec![
                 std::path::PathBuf::from("C:/docs/a.md"),
@@ -975,6 +1009,8 @@ mod tests {
             reload_unmodified: true,
             autosave: true,
             autosave_seconds: 10,
+            title_format: "{path} {date:yyyy-mm-dd}".to_owned(),
+            status_format: "{name} ・ {time}".to_owned(),
             keys,
         };
         assert_eq!(Settings::from_toml(&settings.to_toml()), settings);

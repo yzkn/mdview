@@ -1,7 +1,7 @@
 # リリース手順
 
 対象: v2.0.1 以降
-最終更新: 2026-10-13（v2.1.5: `tools/publish.ps1` を足した）
+最終更新: 2026-10-14（v2.2.0: `tools/publish.ps1` を外した）
 
 **配るときは、版数を上げて `main` へ push するだけ。** CI が組んで包み、版数が新しければ
 タグを打って Release まで作る（§1・§3）。
@@ -153,29 +153,6 @@ mdview --version
 mdview samples/check-v201.md                                # 窓が出てメニューが開くこと
 sudo dpkg -r mdview
 ```
-
-### Windows から push する（`tools/publish.ps1`）
-
-上の「3. 記録して push する」を、**検査つきで行う**スクリプト（v2.1.5）。PowerShell 7 でも 5.1 でも動く。
-clone に置いた中身を検査し、変わっていればコミットして `main` へ push する（タグは打たない。CI が打つ）。
-**外から何も取ってこない。** 中身は先に clone へ置いておく。
-
-```powershell
-cd <この clone>
-pwsh -File .\tools\publish.ps1 -DryRun     # 検査まで（何も書き換えない）
-pwsh -File .\tools\publish.ps1 -Watch      # 検査 → コミット → push → CI を追う
-```
-
-|段|止まる条件|
-|---|---|
-|場所|スクリプトの 1 つ上が clone の根でない・枝が `main` でない・`origin/main` より遅れている|
-|公開先|`origin` が非公開のリポジトリ・`gh repo view` の答えと違う|
-|名義|git の `user.name` / `user.email` が空（`gh` のログイン名と並べて見せる）|
-|版|`v<版数>` が既にある（続けるか聞く。続けても CI はリリースしない）|
-|検査|公開しないフォルダが在る・`.sh` に BOM か CR・本文に BOM・**その PC のユーザー名とユーザーのフォルダ**・トークンや鍵の形|
-|コミット・push|それぞれ確かめてから。やめても置いた中身は消さない|
-
-**ファイルは消さない。** 消したいものは置くときに消し、変更の一覧（`D` の行）で確かめる。
 
 ### 3-2. 問題があったら下書きに戻す
 

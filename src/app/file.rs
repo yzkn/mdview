@@ -48,22 +48,7 @@ impl DocumentMeta {
             .unwrap_or_else(|| "無題".to_owned())
     }
 
-    /// 画面に出す名前。
-    pub fn display_name(&self) -> String {
-        let name = self
-            .path
-            .as_deref()
-            .and_then(Path::file_name)
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "無題".to_owned());
-
-        // **未保存であることを題名に出す。** 保存し忘れて閉じる事故を減らす
-        if self.dirty {
-            format!("{name} *")
-        } else {
-            name
-        }
-    }
+    // 窓の題名は `template` で組む（v2.2.0。書式を設定で変えられる）
 
     /// 相対パスの基準（画像の解決に使う）。
     pub fn base_dir(&self) -> Option<&Path> {
@@ -180,18 +165,6 @@ mod tests {
     fn export_title_has_no_marker() {
         assert_eq!(dirty().display_title(), "a");
         assert_eq!(super::DocumentMeta::untitled().display_title(), "無題");
-    }
-
-    /// **未保存であることを題名に出す。**
-    #[test]
-    fn title_marks_unsaved_changes() {
-        assert_eq!(clean().display_name(), "a.md");
-        assert_eq!(dirty().display_name(), "a.md *");
-    }
-
-    #[test]
-    fn untitled_has_a_name() {
-        assert_eq!(DocumentMeta::untitled().display_name(), "無題");
     }
 
     #[test]

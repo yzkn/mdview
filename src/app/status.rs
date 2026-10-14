@@ -7,18 +7,25 @@
 //! 出していた。**実装を確かめるための表示であり、使う人には要らない。**
 //! 正式版では §7.4 の項目だけにする。計測は `--bench-*` で外から起こす。
 
+use std::path::PathBuf;
+
+use super::template::{self, Fields};
 use crate::io::{FileFormat, LineEnding};
 
 /// ステータスバーに出す一式。
+///
+/// **並べ方は書式で決める**（v2.2.0。[`template`]）。既定の書式は v2.1 までと同じ
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
-    /// ファイル名（無題なら「無題」）
-    pub name: String,
+    /// 開いているファイル（無題なら無い）
+    pub path: Option<PathBuf>,
     /// 保存状態
     pub saved: bool,
     /// 1 始まりの行・桁
     pub line: usize,
     pub column: usize,
+    /// 全体の行数
+    pub lines: usize,
     /// 文字コードと改行（開いたときの形をそのまま保つ。§19.4）
     pub encoding: String,
     /// 表示モード
@@ -30,48 +37,40 @@ pub struct Status {
 }
 
 impl Status {
-    /// 保存状態の欄。**読み取り専用はここに出す**（いちばん目に入る場所）
-    fn state(&self) -> &'static str {
-        match (self.read_only, self.saved) {
-            (true, true) => "読み取り専用",
-            (true, false) => "未保存・読み取り専用",
-            (false, true) => "保存済み",
-            (false, false) => "未保存",
+    /// 書式へ差し込む値
+    pub fn fields(&self) -> Fields<'_> {
+        Fields {
+            path: self.path.as_deref(),
+            dirty: !self.saved,
+            read_only: self.read_only,
+            line: self.line,
+            column: self.column,
+            lines: self.lines,
+            encoding: self.encoding.clone(),
+            mode: self.mode,
+            size: human_bytes(self.bytes),
         }
     }
 
+    /// 文字コードの前・文字コード・後ろの 3 つに分けた形（v2.1.0 R-04）。
+    ///
+    /// **文字コードだけを押せるようにする。** 書式に `{encoding}` が無ければ真ん中は `None`
+    pub fn parts(&self, format: &str) -> (String, Option<String>, String) {
+        template::expand_parts(format, &self.fields())
+    }
+
     /// 1 行の文字にする。
+    pub fn text(&self, format: &str) -> String {
+        template::expand(format, &self.fields())
+    }
+
+    /// 既定の書式で 1 行にする。
     ///
     /// **区切りは全角の中黒。** 半角の記号だと、日本語のファイル名と
     /// 並んだときに切れ目が見えない
-    /// 文字コードの前・文字コード・後ろの 3 つに分けた形（v2.1.0 R-04）。
-    ///
-    /// **文字コードだけを押せるようにする。** 区切りは `line_text` と同じ
-    pub fn parts(&self) -> (String, String, String) {
-        (
-            format!(
-                "{} ・ {} ・ Ln {}, Col {} ・ ",
-                self.name,
-                self.state(),
-                self.line,
-                self.column,
-            ),
-            self.encoding.clone(),
-            format!(" ・ {} ・ {}", self.mode, human_bytes(self.bytes)),
-        )
-    }
-
+    #[cfg(test)]
     pub fn line_text(&self) -> String {
-        format!(
-            "{} ・ {} ・ Ln {}, Col {} ・ {} ・ {} ・ {}",
-            self.name,
-            self.state(),
-            self.line,
-            self.column,
-            self.encoding,
-            self.mode,
-            human_bytes(self.bytes),
-        )
+        self.text(template::DEFAULT_STATUS)
     }
 }
 
@@ -121,10 +120,11 @@ mod tests {
 
     fn status() -> Status {
         Status {
-            name: "報告書.md".to_owned(),
+            path: Some(PathBuf::from("C:/docs/報告書.md")),
             saved: true,
             line: 12,
             column: 3,
+            lines: 40,
             encoding: "UTF-8 / BOM なし / LF".to_owned(),
             mode: "Split",
             bytes: 2_048,

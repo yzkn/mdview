@@ -11,6 +11,8 @@ pub mod fonts;
 mod measure;
 mod preview;
 pub mod scrollbar;
+// 右端での折り返し（v2.2.0）
+pub mod wrap;
 
 pub use divider::{Divider, WIDTH as DIVIDER_WIDTH};
 

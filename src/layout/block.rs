@@ -142,7 +142,7 @@ impl LayoutContext<'_> {
     fn style_for(kind: &BlockKind) -> TextStyle {
         match kind {
             BlockKind::Heading(level) => TextStyle::Heading(*level),
-            BlockKind::Code { .. } => TextStyle::Mono,
+            BlockKind::Code { .. } | BlockKind::Plain => TextStyle::Mono,
             _ => TextStyle::Body,
         }
     }
@@ -181,6 +181,8 @@ pub fn layout_block(block: &Block, source: &str, cx: &LayoutContext) -> LaidOutB
         match block.kind {
             // **コードは折り返さずに出す**（§3.5）。横スクロールで見せる
             BlockKind::Code { ref language } => layout_code(source, language.as_deref(), base, cx),
+            // テキストとして読む文書（v2.2.0）。**原文をそのまま 1 行ずつ**並べる
+            BlockKind::Plain => layout_plain(source, base, cx),
             BlockKind::Table => layout_table(&parse_table(source), base, cx, &mut rules),
             _ => layout_content(&parse_block(source, &block.kind), base, cx),
         }
@@ -204,8 +206,14 @@ pub fn layout_block(block: &Block, source: &str, cx: &LayoutContext) -> LaidOutB
             0.0
         });
 
+    // **テキストの塊の間は空けない**（v2.2.0）。空行は塊の中に入っている
+    let spacing = if matches!(block.kind, BlockKind::Plain) {
+        0.0
+    } else {
+        cx.block_spacing
+    };
     LaidOutBlock {
-        height: height + cx.block_spacing,
+        height: height + spacing,
         lines,
         quote_bar: matches!(block.kind, BlockKind::Quote),
         // 埋め込みは地を敷かない。図の背景と重なって見づらい
@@ -619,6 +627,38 @@ fn layout_code(
         top += line_height;
     }
     lines
+}
+
+/// テキストとして読む文書の塊（v2.2.0）。**着色せず、フェンスも探さない**
+fn layout_plain(source: &str, style: TextStyle, cx: &LayoutContext) -> Vec<LineBox> {
+    let line_height = cx.measurer.line_height(style);
+    let mut top = 0.0_f32;
+    source_lines(source)
+        .map(|(start, raw)| {
+            let text = raw.trim_end_matches(['\n', '\r']);
+            let runs = if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![TextRun {
+                    text: text.to_owned(),
+                    style,
+                    decoration: RunDecoration::None,
+                    role: TokenRole::Plain,
+                    x: 0.0,
+                    width: cx.measurer.width(text, style),
+                }]
+            };
+            let line = LineBox {
+                top,
+                height: line_height,
+                left: 0.0,
+                runs,
+                source: Some(start..start + raw.len()),
+            };
+            top += line_height;
+            line
+        })
+        .collect()
 }
 
 /// フェンスを除いた中身と、その開始位置を返す。

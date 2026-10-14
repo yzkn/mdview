@@ -244,7 +244,11 @@ const MAX_DEPTH: u8 = 8;
 ///
 /// コードブロックと表は対象外（原文の行をそのまま使う。§3.5）。
 pub fn parse_block(source: &str, kind: &BlockKind) -> BlockContent {
-    if matches!(kind, BlockKind::Code { .. } | BlockKind::Table) {
+    // テキストとして読む塊（v2.2.0）も分解しない
+    if matches!(
+        kind,
+        BlockKind::Code { .. } | BlockKind::Table | BlockKind::Plain
+    ) {
         return BlockContent::default();
     }
 

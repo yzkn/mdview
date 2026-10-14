@@ -97,7 +97,7 @@ impl Document {
             let slice = self.text.byte_slice(from_byte..end).to_string();
             let reached_eof = end >= total;
 
-            let result = rescan_from(&slice, from_byte, from_line, &|byte| {
+            let result = rescan_from(&slice, from_byte, from_line, self.plain, &|byte| {
                 sync_points.contains(&byte)
             });
 
@@ -284,6 +284,30 @@ mod tests {
 
     fn doc(text: &str) -> Document {
         Document::from_text(text.to_owned())
+    }
+
+    /// **テキストとして読む文書も、差分の走査し直しが一から走査したものと一致する**（v2.2.0）
+    #[test]
+    fn plain_text_rescans_like_a_full_scan() {
+        let mut document = Document::plain_text("a\nb\n\n# c\nd\n\ne\n".to_owned(), true);
+        for (range, insert) in [
+            (2..2, "x\n\n"),
+            (0..0, "- y\n"),
+            (5..9, ""),
+            (0..0, "```\n"),
+        ] {
+            edit(&mut document, range, insert);
+            let fresh = Document::plain_text(document.text().to_string(), true);
+            let shape = |d: &Document| {
+                d.blocks()
+                    .iter()
+                    .map(|b| (b.bytes.clone(), b.start_line, b.line_count, b.kind.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(shape(&document), shape(&fresh), "{insert:?}");
+            assert!(document.is_plain());
+            assert!(document.headings().next().is_none(), "見出しを作った");
+        }
     }
 
     fn edit(document: &mut Document, range: Range<usize>, insert: &str) -> EditOutcome {
