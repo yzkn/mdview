@@ -113,9 +113,11 @@ jobs:
 
       # **検査より先に作る。** `build.rs` が Windows の実行ファイルへ埋めるため、
       # この時点で `assets/icons/mdview.ico` が要る。無いと黙って埋めずに通り、
-      # アイコンと版数の無い実行ファイルを試験していた
+      # アイコンと版数の無い実行ファイルを試験していた。
+      # **ビルドと同じ `dist` で作る。** example も本体の依存を全部組むので、組み方が違うと依存を
+      # 2 回組む（release で作っていたとき、Windows で約 13 分余計にかかった。2026-10-16）
       - name: アイコンを作る
-        run: cargo run --release --target ${{ matrix.target }} --example make-icons
+        run: cargo run --profile dist --target ${{ matrix.target }} --example make-icons
 
       - name: 書式
         run: cargo fmt --all --check
@@ -134,9 +136,11 @@ jobs:
         if: runner.os == 'macOS'
         run: swiftc -typecheck packaging/macos/launcher/main.swift
 
-      # **配るものと同じ組み方で組む**（`--target` 付き）。GUI 試験もこれを試す
+      # **配るものと同じ組み方で組む**（`--target` 付き）。GUI 試験もこれを試す。
+      # **`dist` で組む**（2026-10-16。Cargo.toml。release に fat LTO を足したもの。実行ファイルが
+      # 小さくなる代わりに組み立てが延びる。ここは毎回包んで配りうるので、いつも dist）
       - name: ビルド
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --profile dist --target ${{ matrix.target }}
 
       # --- GUI 試験（v2.1.0） ---
       #
@@ -153,7 +157,7 @@ jobs:
       - name: GUI 試験（要件の確認）
         shell: bash
         env:
-          EXE: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          EXE: target/${{ matrix.target }}/dist/${{ matrix.binary }}
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --exe "$EXE" --shots gui-shots
@@ -163,7 +167,7 @@ jobs:
 
       - name: GUI 試験の画面写真を残す
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: gui-shots-${{ matrix.label }}
           path: gui-shots
@@ -177,7 +181,7 @@ jobs:
           version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
           mkdir -p dist
           name="mdview-${version}-${{ matrix.label }}"
-          source="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          source="target/${{ matrix.target }}/dist/${{ matrix.binary }}"
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "$source" "dist/${name}.exe"
           else
@@ -198,13 +202,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           bash packaging/linux/build-deb.sh \
-            "target/${{ matrix.target }}/release/mdview" dist
+            "target/${{ matrix.target }}/dist/mdview" dist
 
       - name: AppImage を組む
         if: runner.os == 'Linux'
         run: |
           bash packaging/linux/build-appimage.sh \
-            "target/${{ matrix.target }}/release/mdview" dist
+            "target/${{ matrix.target }}/dist/mdview" dist
 
       # **入れて・起動して・消せるかを確かめる**（B-8）
       - name: deb の煙試験
@@ -292,7 +296,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           bash packaging/macos/build-dmg.sh \
-            "target/${{ matrix.target }}/release/mdview" dist
+            "target/${{ matrix.target }}/dist/mdview" dist
 
       - name: dmg の煙試験
         if: runner.os == 'macOS'
@@ -337,7 +341,7 @@ jobs:
         shell: pwsh
         run: |
           packaging/windows/build-installer.ps1 `
-            -SourceExe "target/${{ matrix.target }}/release/mdview.exe" `
+            -SourceExe "target/${{ matrix.target }}/dist/mdview.exe" `
             -OutputDir dist
 
       # **入れて・起動して・消せるかを確かめる**（B-8）。
@@ -406,7 +410,7 @@ jobs:
           Write-Host "入れて・起動して・消せた"
 
       # **release ジョブと release.yml はこの名前で探す。** 変えるなら両方とも直す
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.label }}
           path: dist/*
@@ -456,7 +460,7 @@ jobs:
         if: steps.version.outputs.release == 'true'
         # 全部の OS が落ちていると 1 つも無い。そのときは次の段が理由を出して止める
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist

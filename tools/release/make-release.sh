@@ -20,11 +20,14 @@ set -eu
 tag="${1:?タグを渡す（例: v2.1.3）}"
 dist="${2:?配布物の置き場を渡す（例: dist）}"
 version="${tag#v}"
+# **本体の Release は版数に英字を付ける**（`v2.2.1a`。公開側の `v2.2.1` と区別する。2026-10-15）。
+# 配布物の名前と Cargo.toml の版には英字が無いので、外して比べる
+version="${version%[a-z]}"
 
 # --- 1. タグと版数 ---
 case "$tag" in
   v[0-9]*.[0-9]*.[0-9]*) ;;
-  *) echo "タグの形でない: $tag（例: v2.1.3）"; exit 1 ;;
+  *) echo "タグの形でない: $tag（例: v2.1.3・本体は v2.1.3a）"; exit 1 ;;
 esac
 cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
 if [ "$cargo_version" != "$version" ]; then
@@ -77,7 +80,8 @@ done
 if [ -n "$absent" ]; then
   {
     echo "> **この版には次の環境向けが入っていません: ${absent}**"
-    echo "> 組み立てか試験に失敗したためです。追って別の版で配ります。"
+    # 理由は呼ぶ側が差し替えられる（本体の手動のリリースでは、選ばなかった OS は組まない）
+    echo "> ${ABSENT_REASON:-組み立てか試験に失敗したためです。追って別の版で配ります。}"
     echo
   } > release-notes.md
 else

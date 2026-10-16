@@ -5,7 +5,7 @@
 
 |置き場|役割|
 |---|---|
-|`windows/mdview.iss`|Inno Setup のスクリプト。**利用者ごと**に入れ、`.md` / `.markdown` の関連付けを選択制で登録する|
+|`windows/mdview.iss`|Inno Setup のスクリプト。**右クリックの「mdview で開く」**（v2.2.0。`SystemFileAssociations` に書くので、既定のアプリが何でも出る。選択肢で既定は付ける）。**利用者ごと**に入れ、`.md` / `.markdown` の関連付けを選択制で登録する|
 |`../src/bin/mdview-console.rs`|端末用の入口。インストーラが **`mdview.com`** として本体の隣に入れる（v2.1.3）。`cargo build --release` で `mdview-console.exe` が出来る|
 |`windows/build-installer.ps1`|版数を `Cargo.toml` から取り、`ISCC` を呼ぶ|
 |`linux/build-deb.sh`|`.deb` を組む（`.desktop` / アイコン / MIME つき）|

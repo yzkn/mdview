@@ -1,6 +1,6 @@
 [package]
 name = "mdview"
-version = "2.2.0"
+version = "2.2.2"
 description = "Markdown viewer and editor"
 authors = []
 edition = "2021"
@@ -15,8 +15,11 @@ ropey = "1.6"
 # UI（DEC-202）。描画・入力・IME を担う
 # advanced: 自前ウィジェット（EditorView）を書くために要る。
 # 既製のウィジェットは 10MB に耐えないため自前実装が前提（§6）。
-# image: 図・数式・画像を画素で描くために要る（§16.12）
-iced = { version = "0.14", features = ["advanced", "tokio", "image"] }
+# image-without-codecs: 図・数式・画像を画素で描くために要る（§16.12）。
+# **`image` にしない**（2026-10-16）。`image` は画像ライブラリの既定の形式を全部取り込み
+# （AV1・EXR・TIFF ほか）、実行ファイルが約 1 MB 大きくなる。アプリは画像を自分で読み
+# （下の `image` の形式だけ）、画素を渡して描くので、iced に画像を読ませない
+iced = { version = "0.14", features = ["advanced", "tokio", "image-without-codecs"] }
 # UAX #14 の行分割規則。日本語の基本的な禁則はここに含まれる（§3.2）
 unicode-linebreak = "0.1"
 # レイアウトキャッシュ（§3.8）
@@ -34,13 +37,17 @@ syntect = { version = "5.3", default-features = false, features = [
     "regex-fancy",
 ] }
 # Mermaid の図（DEC-207）。v1 と同じ mermaid 11.17.2 に追従する純 Rust 実装
-merman = "0.8.0-alpha.6"
-# SVG のラスタライズ。画面表示と PDF 出力の双方で要る
-resvg = "0.48"
+merman = "0.9.0"
+# SVG のラスタライズ。画面表示と PDF 出力の双方で要る。
+# **0.45 に留める**（2026-10-16）。0.45 は iced（cosmic-text）と同じ版の `tiny-skia` 0.11・
+# `fontdb` 0.23・`rustybuzz` 0.20 を使うので、同じライブラリが 2 版入らない。0.48 にすると
+# `tiny-skia`・`fontdb`・`harfrust`・`usvg` が 2 版ずつになる。上げるのは iced が追い付いてから
+# （.github/dependabot.yml で 0.46 以上を除外している）
+resvg = "0.45"
 # merman のサイト設定（htmlLabels の一括無効化）を JSON で渡すため
 serde_json = "1"
 # LaTeX 数式（DEC-210）。出力はすべて <path> で、描画に外部フォントが要らない
-latex-rust = "1.0"
+latex-rust = "2.1"
 # 画像のデコード（§16.12）。**ネットワーク機能は使わない**
 # 既定の機能を切り、文書で使う形式だけ入れる
 image = { version = "0.25", default-features = false, features = [
@@ -101,6 +108,55 @@ debug = "line-tables-only"
 
 [profile.release]
 opt-level = 3
+# **普段は thin**（組み立ての速さを優先する）。配る物は下の `dist` で fat にする
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# **配る物の組み方**（2026-10-16）。`cargo build --profile dist` で `target/<対象>/dist/` に出来る。
+#
+# release との違いは `lto = "fat"` だけ（下の大きさ優先の指定も引き継ぐ）。fat にすると
+# 実行ファイルが小さくなるが、組み立てが約 7.5 分から約 19.8 分に延びた（手元・-j 2）。
+# 普段の試験まで fat で組むと CI の実行分が延びるので、**配る物を組むときだけ**使う
+# （本体の CI は手で起動して Release を作るとき、公開側の CI はいつも）
+[profile.dist]
+inherits = "release"
+lto = "fat"
+
+# **画面の速さに関わらないものは、大きさを優先して最適化する**（2026-10-16）。
+#
+# Mermaid の図（merman 一式。実行ファイルの機械語の約半分）・数式・PDF の出力は、
+# 裏の糸か出力のときにしか動かない。編集・スクロール・プレビューの経路（iced・cosmic-text・
+# ropey・comrak・アプリ本体）は速さを優先したまま（opt-level = 3）にする
+[profile.release.package.merman]
+opt-level = "s"
+[profile.release.package.merman-core]
+opt-level = "s"
+[profile.release.package.merman-render]
+opt-level = "s"
+[profile.release.package.merman-elk-layered]
+opt-level = "s"
+[profile.release.package.merman-layout-elk]
+opt-level = "s"
+[profile.release.package.dugong]
+opt-level = "s"
+[profile.release.package.dugong-graphlib]
+opt-level = "s"
+[profile.release.package.manatee]
+opt-level = "s"
+[profile.release.package.lol_html]
+opt-level = "s"
+[profile.release.package.latex-rust]
+opt-level = "s"
+[profile.release.package.ratex-parser]
+opt-level = "s"
+[profile.release.package.ratex-layout]
+opt-level = "s"
+[profile.release.package.ratex-svg]
+opt-level = "s"
+[profile.release.package.ratex-lexer]
+opt-level = "s"
+[profile.release.package.krilla]
+opt-level = "s"
+[profile.release.package.subsetter]
+opt-level = "s"

@@ -247,6 +247,13 @@ fn main() -> iced::Result {
         return Ok(());
     }
 
+    // **描画の下回りを OS ごとに 1 つに絞る**（v2.2.2）。**ほかの糸を作る前に**（環境変数を書くため）
+    choose_graphics_backend();
+
+    // **起動時に開くファイルを、窓と GPU の準備と並べて読み始める**（v2.2.2）。
+    // iced は `App::new` を窓と GPU の準備より前に呼ぶので、そこで読むと待ち時間に足される
+    app::start_preload();
+
     // **同梱フォントを読み込んでから窓を出す**（§16.11）。
     // システムフォントに頼ると、日本語に中国語の字形が拾われる（§6.5.5）
     // **窓の置き方は設定から決める**（v2.1.0 R-02 / R-05）。
@@ -292,6 +299,48 @@ fn main() -> iced::Result {
     }
 
     application.run()
+}
+
+/// 描画の下回り（wgpu）を OS ごとに 1 つに絞る（v2.2.2）。
+///
+/// iced の既定は「使えるものを全部」（`wgpu::Backends::all()`）で、DX12・Vulkan・OpenGL を
+/// すべて初期化してから選ぶ。Windows では OpenGL の初期化に約 0.5 秒かかり、しかも DX12 より
+/// 最初の描画が約 0.4 秒遅い Vulkan が選ばれていた。DX12 に絞ると、小さい文書で
+/// 起動から中身が描けるまでが約 1.6 秒から約 0.6 秒になった（2026-10-16 の実測）。
+///
+/// - **利用者が `WGPU_BACKEND` を決めていれば、それに従う**（切り分けにも使う）
+/// - Windows は DX12、macOS は Metal
+/// - Linux は **Vulkan のライブラリがあるときだけ** Vulkan。無ければ絞らない（OpenGL も使う）
+///
+/// 選んだもので描けなければ、iced はソフトウェア描画（tiny-skia）に切り替わる
+fn choose_graphics_backend() {
+    if std::env::var_os("WGPU_BACKEND").is_some() {
+        return;
+    }
+    let backend = if cfg!(windows) {
+        Some("dx12")
+    } else if cfg!(target_os = "macos") {
+        Some("metal")
+    } else if vulkan_available() {
+        Some("vulkan")
+    } else {
+        None
+    };
+    if let Some(backend) = backend {
+        std::env::set_var("WGPU_BACKEND", backend);
+    }
+}
+
+/// Vulkan のライブラリ（`libvulkan.so.1`）が置かれているか（Linux）。**読み込みはしない**
+fn vulkan_available() -> bool {
+    [
+        "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+        "/usr/lib/aarch64-linux-gnu/libvulkan.so.1",
+        "/usr/lib64/libvulkan.so.1",
+        "/usr/lib/libvulkan.so.1",
+    ]
+    .iter()
+    .any(|path| std::path::Path::new(path).exists())
 }
 
 /// 端末へ答えるときに、起動した端末へつなぐ（Windows のリリース版。v2.1.3）。

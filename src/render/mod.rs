@@ -40,6 +40,8 @@ pub enum Message {
     Answer(crate::app::Answer),
     /// 読み込みが終わった
     Loaded(Result<Box<crate::io::LoadedFile>, String>),
+    /// 起動時に裏で読んだ文書が届いた（v2.2.2）
+    Preloaded(crate::app::preload::Preloaded),
     /// 保存が終わった
     Saved(Result<std::path::PathBuf, String>),
     /// PDF の出力が終わった

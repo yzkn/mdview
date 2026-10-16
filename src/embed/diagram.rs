@@ -14,7 +14,10 @@
 
 use std::sync::OnceLock;
 
-use merman::{Engine, MermaidConfig, OperationControl, RenderOutput, RenderRequest, Renderer};
+use merman::svg::SvgOutputPolicy;
+use merman::{
+    Engine, MermaidConfig, OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest,
+};
 use resvg::usvg;
 
 use super::{EmbedError, EmbedSource, RenderEmbed, RenderedEmbed};
@@ -103,6 +106,22 @@ pub fn is_supported(text: &str) -> bool {
     !text.trim_start().starts_with("erDiagram")
 }
 
+/// SVG の出し方。**背景を白で塗る**（merman 0.9 から）。
+///
+/// merman 0.8 までは図の全面を白で塗っていたが、0.9 から既定で透明になった。
+/// 透明のまま画素へ落とすと、暗い配色のプレビューで黒い線と文字が背景に溶ける。
+/// 画面・PDF・HTML とも、0.8 までと同じ白い地で出す
+fn svg_request() -> SvgRequest {
+    let policy = SvgOutputPolicy {
+        root_background_color: Some("white".to_owned()),
+        ..SvgOutputPolicy::default()
+    };
+    SvgRequest {
+        pipeline: Some(policy.pipeline()),
+        ..SvgRequest::default()
+    }
+}
+
 impl DiagramRenderer {
     /// 図の SVG。**HTML 出力はこれをそのまま埋める**（§17A.2）。
     ///
@@ -114,7 +133,7 @@ impl DiagramRenderer {
             .render(RenderRequest::svg(
                 text,
                 OperationControl::new(),
-                Default::default(),
+                svg_request(),
             ))
             .map_err(|error| EmbedError::Failed(format!("{error}")))?;
 
@@ -174,7 +193,7 @@ mod tests {
     /// **暗い画素**を数える（§7.3 と同じ指標）。
     ///
     /// **透明でない画素を数えてはいけない。** merman の SVG は
-    /// `background-color: white` で全面を塗るため、字形が 1 つも無くても
+    /// `background-color: white` で全面を塗る（`svg_request()` で頼んでいる）ため、字形が 1 つも無くても
     /// 画素数は常に「幅 × 高さ」になる。最初そう書いて、**何も検出できない
     /// 指標で測った**（実際に踏んだ）。
     fn dark_pixels(embed: &RenderedEmbed) -> usize {
@@ -191,6 +210,27 @@ mod tests {
         DiagramRenderer::new()
             .render(&EmbedSource::new(EmbedKind::Diagram, source, 800.0))
             .expect("描画できる")
+    }
+
+    /// **背景が白で塗られている**（merman 0.9 から既定が透明になった）。
+    ///
+    /// 透明だと、暗い配色のプレビューで線と文字が読めなくなる。四隅は図の外なので背景の色。
+    /// **隅から 1 画素内側を見る**（図の寸法が整数でないと、最後の行と列は半分だけ塗られる）
+    #[test]
+    fn the_background_is_white() {
+        let embed = render("graph TD\n    A[開始] --> B[終了]\n");
+        let width = embed.width as usize;
+        let height = embed.height as usize;
+        for (x, y) in [
+            (1, 1),
+            (width - 2, 1),
+            (1, height - 2),
+            (width - 2, height - 2),
+        ] {
+            let at = (y * width + x) * 4;
+            let px = &embed.pixels[at..at + 4];
+            assert_eq!(px, [255, 255, 255, 255], "({x}, {y}) が白で塗られていない");
+        }
     }
 
     #[test]

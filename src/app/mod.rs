@@ -39,6 +39,8 @@ pub(crate) mod selection;
 mod status;
 // 窓の題名とステータスバーの書式（v2.2.0）
 mod template;
+// 起動時に開くファイルを、窓と GPU の準備と並べて読む（v2.2.2）
+pub mod preload;
 // ファイル選択ダイアログの組み立て（§14.1）
 mod browser;
 mod picker;
@@ -260,6 +262,12 @@ pub struct App {
     wrap_columns: Option<usize>,
     /// プレビューで選んだ文字（v2.2.0）。**最後に触ったのがプレビューのときだけ**写す
     preview_selection: Option<String>,
+    /// 起動時のファイルを裏で読んでいる最中か（v2.2.2。`preload`）。
+    ///
+    /// **この間は本文を書き換えず、上書き保存もしない**（空の本文で元のファイルを上書きしない）
+    preloading: bool,
+    /// 読み終わってから行く行（`-g`。v2.2.2）
+    pending_goto: Option<usize>,
     /// 設定画面（R-03）
     settings_screen: Option<settings_view::SettingsScreen>,
     /// 文字コード・改行コードのダイアログ（R-04）
@@ -572,6 +580,8 @@ fn closes_menu(message: &Message) -> bool {
     !matches!(
         message,
         Message::OpenMenu(_)
+            // 起動時の文書の差し替え（v2.2.2）。利用者の操作ではない
+            | Message::Preloaded(_)
             | Message::BlinkCaret
             | Message::BenchTick
             | Message::WindowResized(_)
@@ -673,6 +683,11 @@ fn item_row(item: menu::Item) -> Element<'static, Message> {
     }
 }
 
+/// 起動時に開くファイルを裏で読み始める（v2.2.2）。**`main()` で窓を作る前に呼ぶ**
+pub fn start_preload() {
+    preload::start();
+}
+
 /// **Markdown として読まない**ファイルか（v2.2.0）。
 ///
 /// 拡張子が Markdown（`.md` / `.markdown`）でなければテキストとして読む。
@@ -743,11 +758,32 @@ impl App {
             }
         }
 
-        // **起動時の読み込みは同期で行う。** 窓が出る前なので UI は止まらない。
+        // **`main()` で読み始めていれば、ここでは待たない**（v2.2.2。`preload`）。
+        // 窓と GPU の準備と並べて読み、出来上がったら `Message::Preloaded` で差し替える
+        let preload = if cfg!(test) {
+            None
+        } else {
+            path.as_deref().and_then(preload::take)
+        };
+
+        // **読み始めていなければ、これまでどおり同期で読む。** 窓が出る前なので UI は止まらない。
         // 開けなければ新規文書として起動する（起動しないよりよい）
-        let loaded = path.as_deref().map(crate::io::load);
+        let loaded = if preload.is_some() {
+            None
+        } else {
+            path.as_deref().map(crate::io::load)
+        };
 
         let (text, meta, notice) = match loaded {
+            // 読んでいる最中。**題名にはファイル名を出す**（本文は空のまま待つ）
+            None if preload.is_some() => (
+                String::new(),
+                DocumentMeta {
+                    path: path.clone(),
+                    ..DocumentMeta::untitled()
+                },
+                None,
+            ),
             Some(Ok(file)) => {
                 let notice = file.oversized.then(|| {
                     notice::Notice::plain(format!(
@@ -852,6 +888,8 @@ impl App {
                 wrap_key: None,
                 wrap_columns: None,
                 preview_selection: None,
+                preloading: false,
+                pending_goto: None,
                 settings_screen: None,
                 encoding_dialog: None,
                 browser_choice: None,
@@ -890,8 +928,9 @@ impl App {
         app.0.reset_watch();
         app.0.settings_baseline = app.0.settings.clone();
         app.0.settings_stamp = settings_stamp();
-        // **試験の道具に「話せる」と知らせる**（1 度だけ）
-        if app.0.automation && !cfg!(test) {
+        app.0.preloading = preload.is_some();
+        // **試験の道具に「話せる」と知らせる**（1 度だけ）。裏で読んでいるなら、差し替えてから
+        if app.0.automation && !cfg!(test) && !app.0.preloading {
             automation::emit(&serde_json::json!({
                 "event": "ready",
                 "version": env!("CARGO_PKG_VERSION"),
@@ -900,7 +939,11 @@ impl App {
         // **`-g` の行へキャレットを置き、その行を先頭に出す**（v2.1.3）。
         // 行が足りなければ最終行。最終行も先頭まで送れるので、どの行でも先頭に来る
         if let Some(number) = launch.goto {
-            app.0.open_at_line(number);
+            if app.0.preloading {
+                app.0.pending_goto = Some(number);
+            } else {
+                app.0.open_at_line(number);
+            }
         }
         // **窓が出てから左半分・右半分へ寄せる**（R-05）。アイコンも窓が出てから当てる
         app.1 = Task::batch([app.0.begin_placement(), app.0.apply_window_icon()]);
@@ -910,7 +953,57 @@ impl App {
             let placement = std::mem::replace(&mut app.1, Task::none());
             app.1 = Task::batch([placement, app.0.apply_on_top()]);
         }
+        // **裏で読んだ文書を受け取る**（v2.2.2）
+        if let Some(receiver) = preload {
+            let placement = std::mem::replace(&mut app.1, Task::none());
+            let arrival = Task::perform(
+                async move {
+                    receiver.await.unwrap_or_else(|_| {
+                        Err("ファイルの読み込みが途中で終わりました".to_owned())
+                    })
+                },
+                |outcome| Message::Preloaded(preload::Preloaded::new(outcome)),
+            );
+            app.1 = Task::batch([placement, arrival]);
+        }
         app
+    }
+
+    /// 裏で読んだ文書へ差し替える（v2.2.2。`preload`）。
+    ///
+    /// **その間に別の文書を開いていたら捨てる**（`install_document` が `preloading` を下ろす）
+    fn finish_preload(&mut self, outcome: preload::Outcome) {
+        if !self.preloading {
+            return;
+        }
+        match outcome {
+            Ok((file, document)) => {
+                if file.oversized {
+                    self.notice = Some(notice::Notice::plain(format!(
+                        "{} は 10MB を超えています。動作が重くなることがあります",
+                        file.path.display()
+                    )));
+                }
+                self.install_document(document, DocumentMeta::opened(file.path, file.format));
+            }
+            Err(reason) => {
+                self.notice = Some(notice::Notice::plain(reason));
+                self.install_document(
+                    Document::plain_text(String::new(), false),
+                    DocumentMeta::untitled(),
+                );
+            }
+        }
+        if let Some(number) = self.pending_goto.take() {
+            self.open_at_line(number);
+        }
+        // **試験の道具に「話せる」と知らせる**（差し替えてから。空の本文を見せない）
+        if self.automation {
+            automation::emit(&serde_json::json!({
+                "event": "ready",
+                "version": env!("CARGO_PKG_VERSION"),
+            }));
+        }
     }
 
     /// 目次を作り直す。
@@ -2058,6 +2151,11 @@ impl App {
             Message::File(command) => return self.start_file_command(command),
             Message::Answer(answer) => return self.answer_confirm(answer),
             Message::Loaded(result) => self.finish_load(result),
+            Message::Preloaded(preloaded) => {
+                if let Some(outcome) = preloaded.take() {
+                    self.finish_preload(outcome);
+                }
+            }
             Message::Saved(result) => self.finish_save(result),
             Message::Exported(result) => self.finish_export(result),
             Message::StartExport => return self.export_pdf(),
@@ -3047,6 +3145,10 @@ impl App {
     /// **当てなかったら `false`**（読み取り専用。v2.1.3）。呼ぶ側は履歴へ積まない。
     /// 積むと、取り消したときに当てていない編集を戻して本文が壊れる
     fn apply_edits(&mut self, edits: &[history::Edit]) -> bool {
+        // **裏で読んでいる間は書き換えない**（v2.2.2。差し替えで消える）
+        if self.preloading {
+            return false;
+        }
         if self.refuse_edit() {
             return false;
         }
@@ -3730,7 +3832,15 @@ impl App {
     /// カーソル・スクロール・キャッシュを持ち越すと、前の文書の位置に
     /// 飛んだり古い図が出たりする。
     fn replace_document(&mut self, text: String, meta: DocumentMeta) {
-        self.document = Document::plain_text(text, reads_as_plain(meta.path.as_deref()));
+        let document = Document::plain_text(text, reads_as_plain(meta.path.as_deref()));
+        self.install_document(document, meta);
+    }
+
+    /// 出来上がった文書を据え付ける。**状態を残さない**（`replace_document` と同じ後始末）
+    fn install_document(&mut self, document: Document, meta: DocumentMeta) {
+        // 起動時の裏の読み込みより後に開いたものが勝つ（v2.2.2）
+        self.preloading = false;
+        self.document = document;
         self.editor = EditorState {
             caret_visible: true,
             ..EditorState::default()
@@ -3753,6 +3863,10 @@ impl App {
     /// **聞く場合は待たない。** ダイアログは親を渡すために `Task` 越しに出すので、
     /// 結果は `Message::PickedSave` で戻ってくる
     fn save_now(&mut self, ask: bool, how: SaveAs) -> Task<Message> {
+        // **裏で読んでいる間は保存しない**（v2.2.2。空の本文で元のファイルを上書きしない）
+        if self.preloading {
+            return Task::none();
+        }
         // **元のファイルは書き換えない**（読み取り専用。v2.1.3）。
         // 名前を付けて保存（新しいファイルへ書く）は許す
         if !ask && self.read_only {
