@@ -75,7 +75,7 @@ impl App {
     }
 
     /// 見出しのアンカー名（行, 名前）。**同じ名前には番号を足す**（GitHub と同じ）
-    fn heading_slugs(&self) -> Vec<(usize, String)> {
+    pub(super) fn heading_slugs(&self) -> Vec<(usize, String)> {
         let entries = self.heading_entries();
         let titles: Vec<String> = entries.iter().map(|entry| entry.title.clone()).collect();
         entries
@@ -672,7 +672,7 @@ impl App {
             .spacing(4),
         )
         .padding(6)
-        .style(container::bordered_box)
+        .style(super::fluent::bar)
         .into()
     }
 

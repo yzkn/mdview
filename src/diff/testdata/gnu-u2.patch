@@ -1,0 +1,9 @@
+--- old2.md	2026-10-19 12:00:00.000000000 +0900
++++ new2.md	2026-10-19 12:00:00.000000000 +0900
+@@ -1,2 +1,3 @@
+ x
+-y
+\ No newline at end of file
++y
++z
+\ No newline at end of file

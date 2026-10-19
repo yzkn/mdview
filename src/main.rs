@@ -17,6 +17,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+// 2 つの文書の差分（v2.3.0 R-02）
+mod diff;
 mod document;
 // 編集の道具（TeraPad から取り込んだもの）
 mod edit;

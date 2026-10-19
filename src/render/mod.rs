@@ -7,10 +7,16 @@
 mod divider;
 mod editor;
 // 同梱フォント（§16.11）。描画・測定の双方がここを見る
+// 差分の地図（v2.3.0 R-02 e）
+pub mod diffmap;
 pub mod fonts;
 mod measure;
 mod preview;
+// 桁の目盛り（v2.3.0 R-07）
+pub mod ruler;
 pub mod scrollbar;
+// 編集画面の記法の色（v2.3.0 R-05）
+pub mod syntax;
 // 右端での折り返し（v2.2.0）
 pub mod wrap;
 
@@ -23,10 +29,12 @@ pub use divider::{Divider, WIDTH as DIVIDER_WIDTH};
 /// 描画器そのものは要らないためである
 pub type PdfMeasurer = measure::IcedMeasurer<iced::Renderer>;
 pub use editor::{
-    advance_scroll_x, take_whole_lines, Action, CursorMove, EditorState, EditorView, ImeAction,
-    RectSelection,
+    advance_scroll_x, cells_before, take_whole_lines, text_left, Action, CursorMove, DiffMarks,
+    EditorState, EditorView, ImeAction, LineMark, RectSelection,
 };
-pub use preview::{PreviewAction, PreviewState, PreviewView, BASE_SIZE as PREVIEW_BASE_SIZE};
+pub use preview::{
+    PreviewAction, PreviewColors, PreviewState, PreviewView, BASE_SIZE as PREVIEW_BASE_SIZE,
+};
 
 /// アプリ全体のメッセージ（§6.4）。
 ///
@@ -229,6 +237,20 @@ pub enum Message {
     /// 出力先を選び直した（「参照」）
     PickedExportAgain(Option<std::path::PathBuf>),
     Editor(Action),
+    /// diff の画面（v2.3.0 R-02）
+    Diff(crate::app::diff::DiffMessage),
+    /// 選んでいる文字に目 grep の印を付ける（v2.3.0 R-05 C-3）
+    EyeMarkSelection,
+    /// 目次と見出しの番号（v2.3.0 R-10）
+    Toc(crate::app::TocCommand),
+    /// Markdown の検査（v2.3.0 R-11）
+    Lint(crate::app::LintMessage),
+    /// スニペットの一覧の欄（v2.3.0 R-08）
+    OpenSnippetPicker,
+    SnippetPickerInput(String),
+    SnippetPickerSubmit,
+    SnippetPickerPick(usize),
+    CloseSnippetPicker,
     Preview(PreviewAction),
     /// 表示モードを切り替える
     SetMode(ViewMode),
@@ -305,6 +327,10 @@ pub enum Message {
     UnfoldAll,
     /// 常に最前面（R-02）
     ToggleAlwaysOnTop,
+    /// 集中モードに入る・出る（v2.3.0 R-13）
+    ToggleFocusMode,
+    /// 集中モードに入る前に最大化していたか（v2.3.0 R-13。終わるときの窓の様子に使う）
+    FocusWasMaximized(bool),
     /// 読み取り専用を切り替える（v2.1.3）
     ToggleReadOnly,
     /// 窓の位置が変わった（R-05 の「前回終了時」に使う）

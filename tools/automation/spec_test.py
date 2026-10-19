@@ -57,7 +57,7 @@ SPEC = [
     ("R-03.b", "本文を覆う画面として出る", "auto"),
     ("R-03.c", "変えたものはその場で効き、すぐに保存する", "auto"),
     ("R-03.d", "各項目に「既定」ボタンがあり、既定と同じなら押せず、押すと既定へ戻る", "auto"),
-    ("R-03.e", "分類は 7 つ（ウィンドウ・エディタ・プレビュー・外観・ファイル・編集補助・キー割り当て）", "auto"),
+    ("R-03.e", "分類は 9 つ（ウィンドウ・エディタ・プレビュー・外観・ファイル・編集補助・スニペット・比べる・キー割り当て。スニペットと比べるは v2.3.0）", "auto"),
     ("R-03.f", "各分類に決めた項目が並ぶ", "auto"),
     ("R-03.g", "外観・タブ幅・怪しい文字・退避はメニューから消え、表示モード・目次・空白・倍率は残る", "auto"),
     # --- R-04 文字コード ---
@@ -71,7 +71,7 @@ SPEC = [
     ("R-04.h", "自前のファイル選択: 保存するときに文字コード・BOM・改行（既定はいまの形式）", "auto"),
     ("R-04.i", "OS のダイアログには足さない", "manual:OS のダイアログは試験の口から出せない（自前に切り替わる）"),
     # --- R-05 初期位置 ---
-    ("R-05.a", "既定は OS に任せる", "auto"),
+    ("R-05.a", "既定は画面の中央（v2.3.0 R-01。v2.2 までは OS に任せる）", "auto"),
     ("R-05.b", "画面の中央", "auto"),
     ("R-05.c", "前回終了時の位置と大きさ・最大化を戻す", "auto"),
     ("R-05.d", "座標を指定（X・Y・幅・高さ）", "auto"),
@@ -735,7 +735,7 @@ def settings_screen_opens_and_covers(ctx):
     assert pages == [
         "settings.page.window", "settings.page.editor", "settings.page.preview",
         "settings.page.appearance", "settings.page.file", "settings.page.assist",
-        "settings.page.keys",
+        "settings.page.snippets", "settings.page.compare", "settings.page.keys",
     ], pages
     app.key("Escape")
     app.key("Ctrl+,")
@@ -745,18 +745,23 @@ def settings_screen_opens_and_covers(ctx):
 PAGE_ITEMS = {
     "window": ["window_position", "always_on_top"],
     "editor": ["editor_font", "editor_font_size", "editor_line_spacing", "tab_width",
-               "show_gremlins", "soft_wrap", "minimap", "minimap_width"],
+               "show_gremlins", "soft_wrap", "editor_syntax", "editor_ruler", "editor_guides",
+               "editor_guide_columns", "minimap", "minimap_width"],
     "preview": ["preview_font_size"],
     "appearance": ["theme", "title_format", "status_format"],
     "file": ["recent_limit", "autosave_draft", "autosave", "autosave_seconds",
              "watch_external", "reload_unmodified"],
     "assist": ["continue_lists", "table_format", "paste_url_as_link", "paste_images",
-               "image_markup", "image_folder"],
+               "image_markup", "image_folder", "toc_depth", "lint_enabled"],
+    # v2.3.0 R-02
+    "compare": ["diff_layout", "diff_whitespace", "diff_ignore_case", "diff_ignore_eol",
+                "patch_format"],
 }
 
 # 既定から変えるための値（項目ごと）
 CHANGED = {
-    "window_position": "center", "always_on_top": "on", "editor_font": "Consolas",
+    # 窓の置き方の既定は v2.3.0 から center（R-01）。既定と違う値にする
+    "window_position": "last", "always_on_top": "on", "editor_font": "Consolas",
     "editor_font_size": "18", "editor_line_spacing": "2", "tab_width": "8",
     "show_gremlins": "false", "minimap": "false", "minimap_width": "120",
     "preview_font_size": "20", "theme": "dark", "recent_limit": "5",
@@ -766,6 +771,11 @@ CHANGED = {
     "image_markup": "markdown", "image_folder": "pics",
     # v2.2.0
     "soft_wrap": "true", "title_format": "{path}", "status_format": "{name} {lines}",
+    # v2.3.0
+    "diff_layout": "unified", "diff_whitespace": "ignore_all", "diff_ignore_case": "true",
+    "diff_ignore_eol": "true", "patch_format": "context", "editor_syntax": "false",
+    "editor_ruler": "true", "editor_guides": "true", "editor_guide_columns": "72, 100",
+    "toc_depth": "2", "lint_enabled": "false",
 }
 
 
@@ -984,7 +994,7 @@ def geometry(app):
 def window_at_given_coordinates(ctx):
     require_windows()
     app = ctx.app()
-    assert app.state()["settings"]["window_position"] == "default"
+    assert app.state()["settings"]["window_position"] == "center"
     app.close()
     app = ctx.app(settings={"window_position": "custom", "window_x": 160, "window_y": 120,
                             "window_width": 900, "window_height": 600})
@@ -2249,7 +2259,7 @@ def default_key_table(ctx):
 
 
 DEFAULT_SETTINGS = {
-    "theme": "system", "window_position": "default", "always_on_top": "off", "last_on_top": "false",
+    "theme": "system", "window_position": "center", "always_on_top": "off", "last_on_top": "false",
     "minimap": "true", "minimap_width": "80", "editor_font": "", "editor_font_size": "14",
     "preview_font_size": "15", "recent_limit": "10", "continue_lists": "true", "table_format": "true",
     "paste_url_as_link": "true", "paste_images": "true", "image_folder": "images", "image_markup": "img",

@@ -15,6 +15,12 @@ pub mod recover;
 // OS の既定のアプリで開く
 pub mod launch;
 pub mod settings;
+// 自分の配色（v2.3.0 R-05）
+pub mod palette;
+// 目 grep（v2.3.0 R-05）
+pub mod marks;
+// 日の出・日の入り（v2.3.0 R-06）
+pub mod sun;
 
 pub use encoding::Encoding;
 

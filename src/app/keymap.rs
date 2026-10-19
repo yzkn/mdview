@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::app::diff::DiffMessage;
 use crate::edit::datetime::Stamp;
 use crate::edit::transform::Transform;
 use crate::render::{FileCommand, Message};
@@ -348,6 +349,32 @@ pub enum Command {
     SaveWithBom,
     ExportPdf,
     ExportHtml,
+    // 2 つの文書を比べる（v2.3.0 R-02）。既定の打鍵は無い
+    CompareFiles,
+    CompareFilesInApp,
+    CompareSaved,
+    // diff の画面の操作（v2.3.0 R-02）
+    DiffNext,
+    DiffPrevious,
+    DiffCopyRight,
+    DiffCopyLeft,
+    DiffSwap,
+    // パッチ（v2.3.0 R-03 / R-04）。既定の打鍵は無い
+    MakePatch,
+    ApplyPatch,
+    // 選んだ文字に目 grep の印を付ける（v2.3.0 R-05 C-3）
+    EyeMarkSelection,
+    // スニペットを一覧から入れる（v2.3.0 R-08）
+    InsertSnippet,
+    // 目次と見出しの番号（v2.3.0 R-10）。既定の打鍵は無い
+    InsertToc,
+    UpdateToc,
+    NumberHeadings,
+    UnnumberHeadings,
+    // Markdown の検査の一覧（v2.3.0 R-11）。既定の打鍵は無い
+    LintPanel,
+    // 集中モード（v2.3.0 R-13）
+    FocusMode,
     TableAddRow,
     TableAddColumn,
     Transform(Transform),
@@ -362,7 +389,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 71] = [
+    pub const ALL: [Command; 89] = [
         Self::New,
         Self::NewWindow,
         Self::Open,
@@ -414,6 +441,24 @@ impl Command {
         Self::SaveWithBom,
         Self::ExportPdf,
         Self::ExportHtml,
+        Self::CompareFiles,
+        Self::CompareFilesInApp,
+        Self::CompareSaved,
+        Self::DiffNext,
+        Self::DiffPrevious,
+        Self::DiffCopyRight,
+        Self::DiffCopyLeft,
+        Self::DiffSwap,
+        Self::MakePatch,
+        Self::ApplyPatch,
+        Self::EyeMarkSelection,
+        Self::InsertSnippet,
+        Self::InsertToc,
+        Self::UpdateToc,
+        Self::NumberHeadings,
+        Self::UnnumberHeadings,
+        Self::LintPanel,
+        Self::FocusMode,
         Self::TableAddRow,
         Self::TableAddColumn,
         Self::Transform(Transform::Upper),
@@ -490,6 +535,24 @@ impl Command {
             Self::SaveWithBom => "save_with_bom",
             Self::ExportPdf => "export_pdf",
             Self::ExportHtml => "export_html",
+            Self::CompareFiles => "compare_files",
+            Self::CompareFilesInApp => "compare_files_in_app",
+            Self::CompareSaved => "compare_saved",
+            Self::DiffNext => "diff_next",
+            Self::DiffPrevious => "diff_previous",
+            Self::DiffCopyRight => "diff_copy_right",
+            Self::DiffCopyLeft => "diff_copy_left",
+            Self::DiffSwap => "diff_swap",
+            Self::MakePatch => "make_patch",
+            Self::ApplyPatch => "apply_patch",
+            Self::EyeMarkSelection => "eye_mark_selection",
+            Self::InsertSnippet => "insert_snippet",
+            Self::InsertToc => "insert_toc",
+            Self::UpdateToc => "update_toc",
+            Self::NumberHeadings => "number_headings",
+            Self::UnnumberHeadings => "unnumber_headings",
+            Self::LintPanel => "lint_panel",
+            Self::FocusMode => "focus_mode",
             Self::TableAddRow => "table_add_row",
             Self::TableAddColumn => "table_add_column",
             Self::Transform(which) => match which {
@@ -572,6 +635,24 @@ impl Command {
             Self::SaveWithBom => "BOM を付けて保存",
             Self::ExportPdf => "PDF に出力",
             Self::ExportHtml => "HTML に出力",
+            Self::CompareFiles => "ファイルを比べる",
+            Self::CompareFilesInApp => "アプリ内で選んで比べる",
+            Self::CompareSaved => "保存してある元と比べる",
+            Self::DiffNext => "次の違い（比べる画面）",
+            Self::DiffPrevious => "前の違い（比べる画面）",
+            Self::DiffCopyRight => "右の面へ写す（比べる画面）",
+            Self::DiffCopyLeft => "左の面へ写す（比べる画面）",
+            Self::DiffSwap => "左右を入れ替える（比べる画面）",
+            Self::MakePatch => "パッチを作る（比べる画面）",
+            Self::ApplyPatch => "パッチを当てる",
+            Self::EyeMarkSelection => "選んだ文字に印を付ける（目 grep）",
+            Self::InsertSnippet => "スニペットを入れる",
+            Self::InsertToc => "目次を入れる",
+            Self::UpdateToc => "目次を作り直す",
+            Self::NumberHeadings => "見出しに番号を振る",
+            Self::UnnumberHeadings => "見出しの番号を外す",
+            Self::LintPanel => "Markdown の検査の一覧",
+            Self::FocusMode => "集中モード",
             Self::TableAddRow => "表に行を足す",
             Self::TableAddColumn => "表に列を足す",
             Self::Transform(which) => which.label(),
@@ -619,6 +700,11 @@ impl Command {
             Self::MatchBracket => &["Ctrl+]"],
             Self::ClosingBracket => &["Ctrl+Shift+\\"],
             Self::Definition => &["F12"],
+            // Ctrl+J は「行をつなぐ」で使っている（v2.3.0 R-08）
+            Self::InsertSnippet => &["Ctrl+Shift+J"],
+            // **WinMerge と同じ**（v2.3.0 R-02 a）。比べる画面を出していなければ何もしない
+            Self::DiffNext => &["F7"],
+            Self::DiffPrevious => &["Shift+F7"],
             Self::TypeDefinition => &["Ctrl+Shift+F12"],
             Self::Declaration => &["Ctrl+F12"],
             Self::Implementation => &["Alt+F12"],
@@ -637,11 +723,27 @@ impl Command {
             Self::ZoomOut => &["Ctrl+-"],
             Self::ZoomReset => &["Ctrl+0"],
             Self::AlwaysOnTop => &[],
+            // **よくある全画面の打鍵**（ブラウザー・エディタと同じ）
+            Self::FocusMode => &["F11"],
             Self::ReadOnly => &[],
             Self::OpenInApp
             | Self::SaveWithBom
             | Self::ExportPdf
             | Self::ExportHtml
+            | Self::CompareFiles
+            | Self::CompareFilesInApp
+            | Self::CompareSaved
+            | Self::DiffCopyRight
+            | Self::DiffCopyLeft
+            | Self::DiffSwap
+            | Self::MakePatch
+            | Self::ApplyPatch
+            | Self::EyeMarkSelection
+            | Self::InsertToc
+            | Self::UpdateToc
+            | Self::NumberHeadings
+            | Self::UnnumberHeadings
+            | Self::LintPanel
             | Self::TableAddRow
             | Self::TableAddColumn
             | Self::Transform(_)
@@ -677,11 +779,15 @@ impl Command {
                 | Self::ZoomOut
                 | Self::ZoomReset
                 | Self::AlwaysOnTop
+                | Self::FocusMode
                 | Self::ReadOnly
                 | Self::OpenInApp
                 | Self::SaveWithBom
                 | Self::ExportPdf
                 | Self::ExportHtml
+                | Self::CompareFiles
+                | Self::CompareFilesInApp
+                | Self::CompareSaved
                 | Self::ViewEdit
                 | Self::ViewPreview
                 | Self::ViewSplit
@@ -747,6 +853,24 @@ impl Command {
             Self::SaveWithBom => Message::File(FileCommand::SaveWithBom),
             Self::ExportPdf => Message::File(FileCommand::ExportPdf),
             Self::ExportHtml => Message::File(FileCommand::ExportHtml),
+            Self::CompareFiles => Message::Diff(DiffMessage::OpenFiles { in_app: false }),
+            Self::CompareFilesInApp => Message::Diff(DiffMessage::OpenFiles { in_app: true }),
+            Self::CompareSaved => Message::Diff(DiffMessage::OpenSaved),
+            Self::DiffNext => Message::Diff(DiffMessage::Next),
+            Self::DiffPrevious => Message::Diff(DiffMessage::Previous),
+            Self::DiffCopyRight => Message::Diff(DiffMessage::CopyTo(crate::diff::Side::Right)),
+            Self::DiffCopyLeft => Message::Diff(DiffMessage::CopyTo(crate::diff::Side::Left)),
+            Self::DiffSwap => Message::Diff(DiffMessage::Swap),
+            Self::MakePatch => Message::Diff(DiffMessage::MakePatch),
+            Self::ApplyPatch => Message::Diff(DiffMessage::OpenPatch),
+            Self::EyeMarkSelection => Message::EyeMarkSelection,
+            Self::InsertSnippet => Message::OpenSnippetPicker,
+            Self::InsertToc => Message::Toc(crate::app::TocCommand::Insert),
+            Self::UpdateToc => Message::Toc(crate::app::TocCommand::Update),
+            Self::NumberHeadings => Message::Toc(crate::app::TocCommand::Number),
+            Self::UnnumberHeadings => Message::Toc(crate::app::TocCommand::Unnumber),
+            Self::LintPanel => Message::Lint(crate::app::LintMessage::TogglePanel),
+            Self::FocusMode => Message::ToggleFocusMode,
             Self::TableAddRow => Message::TableAddRow,
             Self::TableAddColumn => Message::TableAddColumn,
             Self::Transform(which) => Message::Transform(which),

@@ -26,6 +26,8 @@ use crate::search::Match;
 
 /// 行番号の桁に使う余白（px）。
 const GUTTER_PADDING: f32 = 12.0;
+/// Markdown の検査の波線の色（v2.3.0 R-11。明るい配色でも暗い配色でも見える橙）
+const LINT_COLOR: Color = Color::from_rgba(0.93, 0.55, 0.0, 0.9);
 /// 本文の左余白（行番号との間）。
 const TEXT_PADDING: f32 = 16.0;
 /// 長い行があることを示す印（右向きの三角）の大きさ（px）。**DD-01 の緩和策**
@@ -316,6 +318,42 @@ pub enum ImeAction {
     Commit(String),
 }
 
+/// diff の面に塗る印（v2.3.0 R-02）。**行ごとの色と、行の中で違う部分**を持つ。
+///
+/// 色はアプリが決める（左の面と右の面で、片側にだけある行の色が違う）
+#[derive(Debug, Clone, Default)]
+pub struct DiffMarks {
+    /// 行ごとの印（文書の行の番号で引く）。足りない行は印なし
+    pub lines: Vec<LineMark>,
+    /// 変わった行の中で違う部分（その行の先頭からのバイト範囲。行末の改行は含まない）
+    pub inline: std::collections::HashMap<usize, Vec<std::ops::Range<usize>>>,
+    /// 違う行の地の色
+    pub changed: Color,
+    /// この面にだけある行の地の色
+    pub only: Color,
+    /// もう片方にだけある行の地の色（1 列に混ぜて出すとき。足された行）
+    pub other: Color,
+    /// 行の中で違う部分の色（地の上に重ねる）
+    pub inline_color: Color,
+    /// 空きの段の色
+    pub spacer: Color,
+    /// 選んでいる違い（行の範囲）。枠を引いて示す
+    pub current: Option<std::ops::Range<usize>>,
+}
+
+/// diff の面の、1 行の印。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineMark {
+    #[default]
+    Same,
+    /// 両方にあるが違う
+    Changed,
+    /// この面にだけある（足された・消えた）
+    Only,
+    /// もう片方にだけある（1 列に混ぜて出すときの、足された行）
+    Other,
+}
+
 /// 等幅・固定行高のエディタ。
 pub struct EditorView<'a> {
     document: &'a Document,
@@ -355,6 +393,16 @@ pub struct EditorView<'a> {
     /// **1 フレームの中で同じ行を何度も測らない。** 折り返した行は続けて何段も描くので、
     /// 段ごとに行頭から測り直すと、長い行で 1 フレームに何十回も字形を組むことになる
     segment_x: std::cell::RefCell<Option<(usize, usize, Vec<f32>)>>,
+    /// diff の面の印（v2.3.0 R-02）。**diff の面でないときは `None`**
+    diff: Option<&'a DiffMarks>,
+    /// 記法の色（v2.3.0 R-05 C-1）。**付けないときは `None`**（1 色で描く）
+    syntax: Option<super::syntax::SyntaxColors>,
+    /// 目 grep（v2.3.0 R-05 C-3）。探すものと塗る色
+    eye: &'a [(regex::Regex, Color)],
+    /// 縦線を引く桁（v2.3.0 R-07。表示の幅で数える）
+    guides: &'a [usize],
+    /// Markdown の検査の指摘（v2.3.0 R-11。行の順）。波線を引く
+    lint: &'a [crate::edit::lint::Diagnostic],
 }
 
 impl<'a> EditorView<'a> {
@@ -386,6 +434,188 @@ impl<'a> EditorView<'a> {
             wrap: None,
             wrap_wanted: false,
             segment_x: std::cell::RefCell::new(None),
+            diff: None,
+            syntax: None,
+            eye: &[],
+            guides: &[],
+            lint: &[],
+        }
+    }
+
+    /// Markdown の検査の指摘に波線を引く（v2.3.0 R-11）
+    pub fn lint_marks(mut self, diagnostics: &'a [crate::edit::lint::Diagnostic]) -> Self {
+        self.lint = diagnostics;
+        self
+    }
+
+    /// 1 行ぶんの波線（v2.3.0 R-11）。**本文の上、字の下に重ねる**。範囲が空なら 2 文字ぶん
+    fn draw_lint<Renderer>(
+        &self,
+        renderer: &mut Renderer,
+        rendered: &Rendered,
+        line: usize,
+        left: f32,
+        y: f32,
+    ) where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        if self.lint.is_empty() {
+            return;
+        }
+        let first = self.lint.partition_point(|d| d.line < line);
+        let content = &rendered.raw;
+        for found in self.lint[first..].iter().take_while(|d| d.line == line) {
+            let from = found.columns.start.min(content.len());
+            let to = found.columns.end.min(content.len());
+            if !content.is_char_boundary(from) || !content.is_char_boundary(to) {
+                continue;
+            }
+            let x0 = column_offset::<Renderer>(
+                &rendered.text,
+                rendered.column_of_byte(from),
+                self.font,
+                self.text_size,
+                self.line_height,
+            );
+            let x1 = if to > from {
+                column_offset::<Renderer>(
+                    &rendered.text,
+                    rendered.column_of_byte(to),
+                    self.font,
+                    self.text_size,
+                    self.line_height,
+                )
+            } else {
+                x0 + self.text_size
+            };
+            // 波線（2px 四方の点を上下に振って並べる）
+            let base = y + self.line_height - 3.0;
+            let mut x = left + x0;
+            let mut up = false;
+            while x < left + x1.max(x0 + 4.0) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle::new(
+                            Point::new(x, if up { base - 1.5 } else { base }),
+                            Size::new(2.0, 1.5),
+                        ),
+                        ..Default::default()
+                    },
+                    LINT_COLOR,
+                );
+                x += 2.0;
+                up = !up;
+            }
+        }
+    }
+
+    /// 指定した桁に縦線を引く（v2.3.0 R-07）
+    pub fn guides(mut self, columns: &'a [usize]) -> Self {
+        self.guides = columns;
+        self
+    }
+
+    /// 目 grep の印を塗る（v2.3.0 R-05 C-3）
+    pub fn eye_marks(mut self, marks: &'a [(regex::Regex, Color)]) -> Self {
+        self.eye = marks;
+        self
+    }
+
+    /// 目 grep の印を 1 行ぶん塗る。**検索の一致と同じく本文の下へ敷く**
+    fn draw_eye_marks<Renderer>(
+        &self,
+        renderer: &mut Renderer,
+        rendered: &Rendered,
+        left: f32,
+        y: f32,
+    ) where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        if self.eye.is_empty() {
+            return;
+        }
+        let content = &rendered.raw;
+        for (range, color) in crate::io::marks::find_in(content, self.eye) {
+            if !content.is_char_boundary(range.start) || !content.is_char_boundary(range.end) {
+                continue;
+            }
+            let x0 = column_offset::<Renderer>(
+                &rendered.text,
+                rendered.column_of_byte(range.start),
+                self.font,
+                self.text_size,
+                self.line_height,
+            );
+            let x1 = column_offset::<Renderer>(
+                &rendered.text,
+                rendered.column_of_byte(range.end),
+                self.font,
+                self.text_size,
+                self.line_height,
+            );
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(left + x0, y),
+                        Size::new((x1 - x0).max(1.0), self.line_height),
+                    ),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                color,
+            );
+        }
+    }
+
+    /// 記法の色を付ける（v2.3.0 R-05 C-1）
+    pub fn syntax(mut self, colors: Option<super::syntax::SyntaxColors>) -> Self {
+        self.syntax = colors;
+        self
+    }
+
+    /// その行のブロックの種類（記法の色を決める）。**ブロックの外（空行）は `None`**
+    fn block_kind(&self, line: usize) -> Option<&crate::parse::BlockKind> {
+        let blocks = self.document.blocks();
+        let index = blocks.partition_point(|block| block.start_line <= line);
+        let block = blocks.get(index.checked_sub(1)?)?;
+        (line < block.start_line + block.line_count.max(1)).then_some(&block.kind)
+    }
+
+    /// 空きの段を挟む（v2.3.0 R-02。diff の面）。**折り返しとは同時に使わない**。
+    ///
+    /// 表は `Wrap::spacers` で作る。段と行の読み替えは折り返しと同じ道を通り、
+    /// 横には折り返さないときと同じく送れる
+    pub fn spacers(mut self, table: Option<&'a Wrap>) -> Self {
+        self.wrap = table;
+        self.wrap_wanted = false;
+        self
+    }
+
+    /// diff の印を塗る（v2.3.0 R-02）
+    pub fn diff_marks(mut self, marks: Option<&'a DiffMarks>) -> Self {
+        self.diff = marks;
+        self
+    }
+
+    /// 右端で折り返しているか（v2.2.0）。**空きの段だけの表なら折り返していない**（横へ送れる）
+    fn wraps(&self) -> bool {
+        self.wrap.is_some_and(Wrap::wraps)
+    }
+
+    /// その段が空きの段か（v2.3.0 R-02）
+    fn is_spacer(&self, line: usize, segment: usize) -> bool {
+        self.wrap
+            .is_some_and(|wrap| !wrap.wraps() && segment < wrap.text_segment(line))
+    }
+
+    /// 行番号を出す段か。**行の文字を描く最初の段**（空きの段と、折り返した続きには出さない）
+    fn is_first_text_segment(&self, line: usize, segment: usize) -> bool {
+        match self.wrap {
+            Some(wrap) => segment == wrap.text_segment(line),
+            None => segment == 0,
         }
     }
 
@@ -1199,9 +1429,7 @@ impl<'a> EditorView<'a> {
         if !self.show_gutter {
             return 0.0;
         }
-        let digits = digit_count(self.document.text().len_lines());
-        // 等幅フォントの目安。厳密な字幅は描画時に決まるが、欄の幅は概算で足りる
-        digits as f32 * self.text_size * 0.62 + GUTTER_PADDING * 2.0
+        gutter_width_for(self.document.text().len_lines(), self.text_size)
     }
 
     /// 画面に収まる行数。
@@ -1452,6 +1680,173 @@ impl<'a> EditorView<'a> {
         );
     }
 
+    /// 記法の色で 1 段を描く（v2.3.0 R-05 C-1）。
+    ///
+    /// **色の違う区間ごとに切り分け**、区間の頭の位置を行の頭から測って置く。折り返している
+    /// ときは、その段に掛かる部分だけを描く
+    #[allow(clippy::too_many_arguments)]
+    fn draw_colored<Renderer>(
+        &self,
+        renderer: &mut Renderer,
+        text: &str,
+        line: usize,
+        segment: usize,
+        left: f32,
+        y: f32,
+        text_color: Color,
+        colors: super::syntax::SyntaxColors,
+        clip: &Rectangle,
+    ) where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        // 段の範囲（バイト位置）
+        let (from, to) = match self.wrap {
+            Some(wrap) => {
+                let (start, end) = wrap.segment_range(line, segment);
+                (
+                    byte_of_display(text, start),
+                    end.map_or(text.len(), |end| byte_of_display(text, end)),
+                )
+            }
+            None => (0, text.len()),
+        };
+        if from >= to {
+            return;
+        }
+        // 色の区間で切り、隙間は本文の色
+        let mut pieces: Vec<(std::ops::Range<usize>, Color)> = Vec::new();
+        let mut at = 0;
+        for (range, role) in super::syntax::spans(text, self.block_kind(line)) {
+            if range.start > at {
+                pieces.push((at..range.start, text_color));
+            }
+            at = range.end;
+            pieces.push((range, colors.of(role)));
+        }
+        if at < text.len() {
+            pieces.push((at..text.len(), text_color));
+        }
+        for (range, color) in pieces {
+            let (start, end) = (range.start.max(from), range.end.min(to));
+            if start >= end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                continue;
+            }
+            let x = measure_width::<Renderer>(
+                &text[..start],
+                self.font,
+                self.text_size,
+                self.line_height,
+            );
+            draw_text(
+                renderer,
+                &text[start..end],
+                Point::new(left + x, y),
+                self.font,
+                self.text_size,
+                self.line_height,
+                color,
+                text::Alignment::Left,
+                clip,
+            );
+        }
+    }
+
+    /// 行の中で違う部分を塗る（v2.3.0 R-02 b）。
+    fn draw_inline_diff<Renderer>(
+        &self,
+        renderer: &mut Renderer,
+        rendered: &Rendered,
+        line: usize,
+        left: f32,
+        y: f32,
+    ) where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let Some(diff) = self.diff else {
+            return;
+        };
+        let Some(ranges) = diff.inline.get(&line) else {
+            return;
+        };
+        let content = &rendered.raw;
+        for range in ranges {
+            let (from, to) = (range.start.min(content.len()), range.end.min(content.len()));
+            // **文字の途中で切らない**（編集で古くなった印を受け取ったとき）
+            if from >= to || !content.is_char_boundary(from) || !content.is_char_boundary(to) {
+                continue;
+            }
+            let x0 = column_offset::<Renderer>(
+                &rendered.text,
+                rendered.column_of_byte(from),
+                self.font,
+                self.text_size,
+                self.line_height,
+            );
+            let x1 = column_offset::<Renderer>(
+                &rendered.text,
+                rendered.column_of_byte(to),
+                self.font,
+                self.text_size,
+                self.line_height,
+            );
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(left + x0, y),
+                        Size::new((x1 - x0).max(1.0), self.line_height),
+                    ),
+                    ..Default::default()
+                },
+                diff.inline_color,
+            );
+        }
+    }
+
+    /// 選んでいる違いの上下に線を引く（v2.3.0 R-02 a）。
+    ///
+    /// **空のかたまり**（この面に行が無い違い）は、挟んだ空きの段の上に線を 1 本引く
+    fn draw_current_diff<Renderer>(
+        &self,
+        renderer: &mut Renderer,
+        drawn: &[(usize, usize)],
+        range: std::ops::Range<usize>,
+        bounds: Rectangle,
+        clip: Rectangle,
+        text_color: Color,
+    ) where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let rows: Vec<usize> = drawn
+            .iter()
+            .enumerate()
+            .filter(|(_, &(line, segment))| {
+                if range.is_empty() {
+                    line == range.start && self.is_spacer(line, segment)
+                } else {
+                    range.contains(&line) && !self.is_spacer(line, segment)
+                }
+            })
+            .map(|(row, _)| row)
+            .collect();
+        let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else {
+            return;
+        };
+        let top = bounds.y + first as f32 * self.line_height;
+        let bottom = bounds.y + (last + 1) as f32 * self.line_height;
+        for y in [top, bottom - 1.0] {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(Point::new(clip.x, y), Size::new(clip.width, 1.0)),
+                    ..Default::default()
+                },
+                Color {
+                    a: 0.7,
+                    ..text_color
+                },
+            );
+        }
+    }
+
     /// 1 行ぶんの一致を描く。
     ///
     /// **行に掛かる一致だけを見る。** 一致は位置順に並んでいるので、
@@ -1546,7 +1941,7 @@ impl<'a> EditorView<'a> {
         Renderer: text::Renderer<Font = iced::Font>,
     {
         // 折り返していれば、はみ出さない（v2.2.0）
-        if self.wrap.is_some() {
+        if self.wraps() {
             return false;
         }
         let edge = self.text_area_width(bounds) + self.state.scroll_x;
@@ -1566,7 +1961,7 @@ impl<'a> EditorView<'a> {
         Renderer: text::Renderer<Font = iced::Font>,
     {
         // 折り返していれば横には送らない（v2.2.0）
-        if self.wrap.is_some() {
+        if self.wraps() {
             return 0.0;
         }
         let available = self.text_area_width(bounds);
@@ -1666,7 +2061,7 @@ impl<'a> EditorView<'a> {
         Renderer: text::Renderer<Font = iced::Font>,
     {
         // 折り返していれば横には寄せない（v2.2.0）
-        if self.wrap.is_some() {
+        if self.wraps() {
             return None;
         }
         let (x, _) = self.caret_position::<Renderer>(bounds);
@@ -1695,7 +2090,7 @@ impl<'a> EditorView<'a> {
         Renderer: text::Renderer<Font = iced::Font>,
     {
         let text_x = x - self.gutter_width() - TEXT_PADDING;
-        if self.wrap.is_some() {
+        if self.wraps() {
             return self.column_in_segment::<Renderer>(line, segment, text_x);
         }
         let rendered = self.rendered(line);
@@ -1731,7 +2126,7 @@ impl<'a> EditorView<'a> {
         );
 
         // **折り返していれば段の左端から測る**（v2.2.0）。横には送らない
-        let shift = if self.wrap.is_some() {
+        let shift = if self.wraps() {
             let (start, _) = self.segment_span::<Renderer>(
                 &rendered.text,
                 self.state.cursor_line,
@@ -2235,8 +2630,8 @@ where
         if self.show_gutter {
             renderer.with_layer(own_clip, |renderer| {
                 for (row, &(line_index, segment)) in drawn.iter().enumerate() {
-                    // **行番号は行の最初の段にだけ出す**（折り返した続きには出さない）
-                    if segment > 0 {
+                    // **行番号は行の最初の段にだけ出す**（折り返した続きと、空きの段には出さない）
+                    if !self.is_first_text_segment(line_index, segment) {
                         continue;
                     }
                     let y = bounds.y + row as f32 * self.line_height;
@@ -2280,14 +2675,76 @@ where
 
         renderer.with_layer(text_clip, |renderer| {
             let base = bounds.x + gutter + TEXT_PADDING;
-            let scroll_x = if self.wrap.is_some() {
+            let scroll_x = if self.wraps() {
                 0.0
             } else {
                 self.state.scroll_x
             };
 
+            // 指定した桁の縦線（v2.3.0 R-07）。**本文の下に敷く**
+            if !self.guides.is_empty() {
+                let cell = measure_width::<Renderer>(
+                    "0000000000",
+                    self.font,
+                    self.text_size,
+                    self.line_height,
+                ) / 10.0;
+                for &column in self.guides {
+                    let x = base - scroll_x + column as f32 * cell;
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(x, text_clip.y),
+                                Size::new(1.0, text_clip.height),
+                            ),
+                            ..Default::default()
+                        },
+                        Color {
+                            a: 0.18,
+                            ..text_color
+                        },
+                    );
+                }
+            }
+
             for (row, &(line_index, segment)) in drawn.iter().enumerate() {
                 let y = bounds.y + row as f32 * self.line_height;
+
+                // **diff の地を先に敷く**（v2.3.0 R-02）。空きの段は塗るだけで、文字は無い
+                if let Some(diff) = self.diff {
+                    let full = Rectangle {
+                        y,
+                        height: self.line_height,
+                        ..text_clip
+                    };
+                    if self.is_spacer(line_index, segment) {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: full,
+                                ..Default::default()
+                            },
+                            diff.spacer,
+                        );
+                        continue;
+                    }
+                    let color = match diff.lines.get(line_index) {
+                        Some(LineMark::Changed) => Some(diff.changed),
+                        Some(LineMark::Only) => Some(diff.only),
+                        Some(LineMark::Other) => Some(diff.other),
+                        _ => None,
+                    };
+                    if let Some(color) = color {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: full,
+                                ..Default::default()
+                            },
+                            color,
+                        );
+                    }
+                } else if self.is_spacer(line_index, segment) {
+                    continue;
+                }
 
                 // 本文。**可視行だけをロープから取り出す**
                 //
@@ -2301,7 +2758,7 @@ where
                 let left = base - scroll_x - start;
                 // **左端は本文の始まり**。行番号の欄との余白まで開けると、前の段の
                 // 終わりの字が欠けて見える。キャレット（幅 2px）のぶんだけ左へ広げる
-                let clip_left = if self.wrap.is_some() {
+                let clip_left = if self.wraps() {
                     base - 1.0
                 } else {
                     text_clip.x
@@ -2322,6 +2779,8 @@ where
                     ..text_clip
                 });
                 renderer.with_layer(row_clip, |renderer| {
+                    // 行の中で違う部分（v2.3.0 R-02 b）。**選択より下に敷く**
+                    self.draw_inline_diff::<Renderer>(renderer, &rendered, line_index, left, y);
                     // **空行でも選択は描く。** 行末の改行が選ばれていることが分かる
                     self.draw_selection::<Renderer>(
                         renderer, &rendered, line_index, left, y, text_color,
@@ -2329,6 +2788,8 @@ where
                     self.draw_rect::<Renderer>(
                         renderer, &rendered, line_index, left, y, text_color,
                     );
+                    // Markdown の検査の波線（v2.3.0 R-11）。**空行の指摘（MD012）もあるので、空行でも引く**
+                    self.draw_lint::<Renderer>(renderer, &rendered, line_index, left, y);
 
                     if rendered.text.is_empty() && !self.show_invisibles {
                         return;
@@ -2338,6 +2799,8 @@ where
                         overflowing.push(y);
                     }
 
+                    // 目 grep（v2.3.0 R-05）。検索の一致より下に敷く
+                    self.draw_eye_marks::<Renderer>(renderer, &rendered, left, y);
                     // 検索の一致（§15.5）。**本文の下へ敷く**
                     self.draw_matches::<Renderer>(
                         renderer, &rendered, line_index, left, y, text_color,
@@ -2348,17 +2811,31 @@ where
                     }
 
                     // 折り返していれば、その段の文字だけを段の左端から描く
-                    draw_text(
-                        renderer,
-                        self.segment_text(&rendered.text, line_index, segment),
-                        Point::new(left + start, y),
-                        self.font,
-                        self.text_size,
-                        self.line_height,
-                        text_color,
-                        text::Alignment::Left,
-                        &text_clip,
-                    );
+                    match self.syntax {
+                        // **記法の色**（v2.3.0 R-05）。色の違う区間ごとに切り分けて描く
+                        Some(colors) => self.draw_colored::<Renderer>(
+                            renderer,
+                            &rendered.text,
+                            line_index,
+                            segment,
+                            left,
+                            y,
+                            text_color,
+                            colors,
+                            &text_clip,
+                        ),
+                        None => draw_text(
+                            renderer,
+                            self.segment_text(&rendered.text, line_index, segment),
+                            Point::new(left + start, y),
+                            self.font,
+                            self.text_size,
+                            self.line_height,
+                            text_color,
+                            text::Alignment::Left,
+                            &text_clip,
+                        ),
+                    }
 
                     // **本文の上に薄く重ねる**（§4.11）。下に敷くと文字で隠れる
                     if self.show_invisibles {
@@ -2381,6 +2858,11 @@ where
                         }
                     }
                 });
+            }
+
+            // 選んでいる違いの枠（v2.3.0 R-02 a）。上下に線を引く
+            if let Some(range) = self.diff.and_then(|diff| diff.current.clone()) {
+                self.draw_current_diff(renderer, &drawn, range, bounds, text_clip, text_color);
             }
 
             // --- キャレット ---
@@ -2965,6 +3447,30 @@ where
     line.chars().count()
 }
 
+/// 行番号の欄の幅（行数と文字の大きさから。**ルーラーを本文に揃えるのにも使う**）
+pub fn gutter_width_for(lines: usize, text_size: f32) -> f32 {
+    let digits = digit_count(lines);
+    // 等幅フォントの目安。厳密な字幅は描画時に決まるが、欄の幅は概算で足りる
+    digits as f32 * text_size * 0.62 + GUTTER_PADDING * 2.0
+}
+
+/// 本文の左端（ウィジェットの左からの px。行番号の欄と余白）。ルーラーが使う（v2.3.0 R-07）
+pub fn text_left(lines: usize, text_size: f32) -> f32 {
+    gutter_width_for(lines, text_size) + TEXT_PADDING
+}
+
+/// 行の `column` 文字目までの表示の幅（**全角は 2 桁、タブは広げる**。v2.3.0 R-07）
+pub fn cells_before(line: &str, column: usize, tab_width: usize) -> usize {
+    let rendered = Rendered::new(line.trim_end_matches(['\n', '\r']).to_owned(), tab_width);
+    let display = rendered.column_of_char(column);
+    rendered
+        .text
+        .chars()
+        .take(display)
+        .map(|ch| if is_wide(ch) { 2 } else { 1 })
+        .sum()
+}
+
 fn digit_count(value: usize) -> usize {
     let mut digits = 1;
     let mut value = value;
@@ -3001,6 +3507,45 @@ mod caret_follow_tests {
 
     fn view<'a>(document: &'a Document, state: &'a EditorState) -> EditorView<'a> {
         EditorView::new(document, state, |_| super::super::Message::BlinkCaret)
+    }
+
+    /// **空きの段は描く段に入るが、行番号も文字も持たない**（v2.3.0 R-02）。
+    /// 折り返しの表と違い、横へは送れる
+    #[test]
+    fn spacers_are_rows_without_text() {
+        let document = Document::from_text("a\nb\nc".to_owned());
+        let state = EditorState::default();
+        let table = Wrap::spacers(3, &[(1, 2)]);
+        let view = view(&document, &state).spacers(Some(&table));
+        assert!(!view.wraps(), "空きの段だけの表は折り返していない");
+        assert_eq!(view.total_rows(), 5);
+        assert_eq!(
+            view.drawn_rows(1000.0),
+            vec![(0, 0), (1, 0), (1, 1), (1, 2), (2, 0)]
+        );
+        assert!(view.is_spacer(1, 0) && view.is_spacer(1, 1));
+        assert!(!view.is_spacer(1, 2) && !view.is_spacer(0, 0));
+        assert!(view.is_first_text_segment(1, 2));
+        assert!(!view.is_first_text_segment(1, 0));
+        // キャレットは文字の段に来る
+        let mut state = EditorState::default();
+        state.place_caret(1, 0);
+        let view = EditorView::new(&document, &state, |_| super::super::Message::BlinkCaret)
+            .spacers(Some(&table));
+        assert_eq!(view.caret_row(), 3);
+    }
+
+    /// 折り返しの表は、これまでどおり折り返している（横へは送らない）
+    #[test]
+    fn a_wrap_table_still_wraps() {
+        let document = Document::from_text("abcdefghijklmnop".to_owned());
+        let state = EditorState::default();
+        let table = Wrap::build(&document, &crate::app::fold::FoldMap::default(), 8, 4);
+        let view = view(&document, &state).wrapping(Some(&table), true);
+        assert!(view.wraps());
+        assert!(!view.is_spacer(0, 1));
+        assert!(view.is_first_text_segment(0, 0));
+        assert!(!view.is_first_text_segment(0, 1));
     }
 
     /// **巻き上げたあと、キャレットが動いていなければ寄せない。**

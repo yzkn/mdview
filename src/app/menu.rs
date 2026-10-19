@@ -218,6 +218,8 @@ pub struct Context<'a> {
     pub table_format: bool,
     /// 常に最前面か（R-02）
     pub on_top: bool,
+    /// 集中モードか（v2.3.0 R-13）
+    pub focus_mode: bool,
     /// 読み取り専用か（v2.1.3）
     pub read_only: bool,
     /// 畳んでいる見出しがあるか（R-20）
@@ -265,6 +267,35 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
             )
             .enabled(!context.busy)
             .access('I'),
+            // **2 つの文書を比べる**（v2.3.0 R-02）
+            Item::action(
+                "ファイルを比べる…",
+                c(Command::CompareFiles),
+                Message::Diff(crate::app::diff::DiffMessage::OpenFiles { in_app: false }),
+            )
+            .enabled(!context.busy)
+            .access('C'),
+            Item::action(
+                "アプリ内で選んで比べる…",
+                c(Command::CompareFilesInApp),
+                Message::Diff(crate::app::diff::DiffMessage::OpenFiles { in_app: true }),
+            )
+            .enabled(!context.busy),
+            Item::action(
+                "保存してある元と比べる",
+                c(Command::CompareSaved),
+                Message::Diff(crate::app::diff::DiffMessage::OpenSaved),
+            )
+            .enabled(!context.busy)
+            .access('D'),
+            // **パッチを編集中の文書に当てる**（v2.3.0 R-04）
+            Item::action(
+                "パッチを当てる…",
+                c(Command::ApplyPatch),
+                Message::Diff(crate::app::diff::DiffMessage::OpenPatch),
+            )
+            .enabled(!context.busy)
+            .access('U'),
             Item::Fold {
                 label: Submenu::Recent.label(),
                 open: context.open_submenu == Some(Submenu::Recent),
@@ -414,11 +445,51 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
                 },
                 Item::Separator,
                 Item::action("検索・置換…", c(Command::Find), Message::OpenSearch).access('F'),
+                // **スニペットを一覧から入れる**（v2.3.0 R-08）
+                Item::action(
+                    "スニペットを入れる…",
+                    c(Command::InsertSnippet),
+                    Message::OpenSnippetPicker,
+                ),
+                // **目次と見出しの番号**（v2.3.0 R-10）
+                Item::Separator,
+                Item::action(
+                    "目次を入れる",
+                    c(Command::InsertToc),
+                    Message::Toc(crate::app::TocCommand::Insert),
+                ),
+                Item::action(
+                    "目次を作り直す",
+                    c(Command::UpdateToc),
+                    Message::Toc(crate::app::TocCommand::Update),
+                ),
+                Item::action(
+                    "見出しに番号を振る",
+                    c(Command::NumberHeadings),
+                    Message::Toc(crate::app::TocCommand::Number),
+                ),
+                Item::action(
+                    "見出しの番号を外す",
+                    c(Command::UnnumberHeadings),
+                    Message::Toc(crate::app::TocCommand::Unnumber),
+                ),
+                // **選んだ文字を目 grep に足す**（v2.3.0 R-05 C-3）
+                Item::action(
+                    "選んだ文字に印を付ける（目 grep）",
+                    c(Command::EyeMarkSelection),
+                    Message::EyeMarkSelection,
+                ),
             ]);
             items
         }
 
         Menu::View => vec![
+            // **Markdown の検査の一覧**（v2.3.0 R-11）
+            Item::action(
+                "Markdown の検査の一覧",
+                c(Command::LintPanel),
+                Message::Lint(crate::app::LintMessage::TogglePanel),
+            ),
             Item::action(
                 "編集",
                 c(Command::ViewEdit),
@@ -488,6 +559,14 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
             )
             .checked(context.on_top)
             .access('F'),
+            // **全画面にして本文だけにする**（v2.3.0 R-13）。Esc でも出られる
+            Item::action(
+                "集中モード",
+                c(Command::FocusMode),
+                Message::ToggleFocusMode,
+            )
+            .checked(context.focus_mode)
+            .access('U'),
             // **見るだけに使う**（v2.1.3）。起動引数 `-r` / `--readonly` でも入る
             Item::action(
                 "読み取り専用",
@@ -840,6 +919,7 @@ mod tests {
             keymap: keymap(),
             table_format: true,
             on_top: false,
+            focus_mode: false,
             read_only: false,
             has_folds: true,
         }

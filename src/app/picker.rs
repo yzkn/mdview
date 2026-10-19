@@ -51,6 +51,25 @@ impl Picker {
         }
     }
 
+    /// 決めた種類のファイルを開く（v2.3.0 R-04。パッチ）。**すべてのファイルも選べる**
+    pub fn open_kind(label: &str, extensions: &[&str]) -> Self {
+        Self {
+            save: false,
+            filters: vec![
+                (
+                    label.to_owned(),
+                    extensions
+                        .iter()
+                        .map(|extension| (*extension).to_owned())
+                        .collect(),
+                ),
+                ("すべてのファイル".to_owned(), vec!["*".to_owned()]),
+            ],
+            file_name: None,
+            directory: None,
+        }
+    }
+
     /// 保存（名前を付けて保存・出力）。
     pub fn save(label: &str, extension: &str, file_name: String) -> Self {
         Self {

@@ -63,8 +63,24 @@ mod window;
 mod settings_view;
 // 文字コード・改行コードのダイアログ（R-04）
 mod encoding_dialog;
+// 設定画面の「自分の配色」（v2.3.0 R-05）
+mod palette_view;
+// 目 grep（v2.3.0 R-05）
+mod eyegrep;
+// Fluent Design を考えた光と影（v2.3.0 R-12）
+pub(crate) mod fluent;
+// コードスニペット（v2.3.0 R-08 / R-09）
+mod snippets;
+// 目次を作る・見出しに番号を振る（v2.3.0 R-10）
+mod doc_toc;
+pub use doc_toc::TocCommand;
+// Markdown の検査（v2.3.0 R-11）
+mod lint_view;
+pub use lint_view::LintMessage;
 // 試験用の操作口（GUI 自動テスト。`--automation` のときだけ働く）
 pub(crate) mod automation;
+// diff の画面（v2.3.0 R-02）
+pub mod diff;
 
 pub use crate::edit::navigate::Seek;
 pub use encoding_dialog::{EncodingAction, EncodingChoice};
@@ -272,6 +288,25 @@ pub struct App {
     settings_screen: Option<settings_view::SettingsScreen>,
     /// 文字コード・改行コードのダイアログ（R-04）
     encoding_dialog: Option<encoding_dialog::EncodingDialog>,
+    /// diff の画面（v2.3.0 R-02）
+    diff_screen: Option<diff::DiffScreen>,
+    /// 外（ほかの窓・試験の口）から比べ方が変わったか（v2.3.0 R-02）。**`update` の出口で比べ直す**
+    diff_resync: bool,
+    /// 目 grep の探すもの（v2.3.0 R-05）。**`update` の出口で、一覧が変わったときだけ作り直す**
+    eye: eyegrep::EyeCompiled,
+    /// Markdown の検査の結果と一覧の窓（v2.3.0 R-11）
+    lint: lint_view::LintState,
+    /// スニペットの入力位置を移っている最中（v2.3.0 R-08）
+    snippet_session: Option<snippets::Session>,
+    /// スニペットの一覧の欄（絞り込みの文字。出していなければ `None`）
+    snippet_picker: Option<String>,
+    /// 設定画面で直しているスニペットの中身（`text_editor` の状態。複製できないので画面の状態とは別に持つ）
+    snippet_body: Option<iced::widget::text_editor::Content>,
+    /// どのファイルの部分を当てるか選んでもらっている最中のパッチ（v2.3.0 R-04 D-6）
+    patch_choice: Option<Vec<crate::diff::patch::FilePatch>>,
+    /// diff の面の文書を本文と入れ替えている最中か（`App::in_pane`）。
+    /// **立っている間は、退避・自動保存・目次など本文にしか関わらない後始末をしない**
+    diff_own: bool,
     /// 自前のファイル選択で選んだ文字コード（R-04）。**答えと一緒に使う**
     browser_choice: Option<BrowserChoice>,
     /// 見出しの絞り込み（R-18）
@@ -282,6 +317,10 @@ pub struct App {
     results: Option<navigation::Results>,
     /// いま最前面か（R-02）
     on_top: bool,
+    /// 集中モードか（v2.3.0 R-13）。**全画面にして本文だけを出す**
+    focus_mode: bool,
+    /// 集中モードに入る前に最大化していたか（終わるときに覚える窓の様子）
+    focus_was_maximized: bool,
     /// 読み取り専用か（v2.1.3）。**本文も元のファイルも書き換えない**
     read_only: bool,
     /// 窓の位置と大きさ（R-05 の「前回終了時」に使う）
@@ -611,6 +650,17 @@ fn closes_menu(message: &Message) -> bool {
                     | Action::ScrollXTo { .. }
                     | Action::WrapColumns(_)
             )
+            // diff の面も同じ（v2.3.0 R-02）。裏で比べ終わった知らせでも閉じない
+            | Message::Diff(
+                diff::DiffMessage::Pane(
+                    _,
+                    Action::Ime(ImeAction::Opened | ImeAction::Closed)
+                        | Action::ScrollTo { .. }
+                        | Action::ScrollToRow { .. }
+                        | Action::ScrollXTo { .. }
+                        | Action::WrapColumns(_)
+                ) | diff::DiffMessage::Computed(..)
+            )
             // 打鍵は割り当てを引いてから決める（何も無ければ閉じない）
             | Message::KeyChord { .. }
             // 試験の要求は、要求の中身で決める（メニューの項目を押す前に閉じてはいけない）
@@ -891,12 +941,23 @@ impl App {
                 preloading: false,
                 pending_goto: None,
                 settings_screen: None,
+                diff_screen: None,
+                diff_resync: false,
+                patch_choice: None,
+                snippet_session: None,
+                lint: Default::default(),
+                snippet_picker: None,
+                snippet_body: None,
+                eye: Default::default(),
+                diff_own: false,
                 encoding_dialog: None,
                 browser_choice: None,
                 heading_picker: None,
                 toc_filter: String::new(),
                 results: None,
                 on_top,
+                focus_mode: false,
+                focus_was_maximized: false,
                 read_only: launch.read_only,
                 window_position: None,
                 window_size: None,
@@ -925,6 +986,9 @@ impl App {
         );
         app.0.spawned = spawned;
         app.0.rebuild_folds();
+        // 目 grep（v2.3.0 R-05）。**最初の描画から塗る**（`update` を待たない）
+        app.0.refresh_eye();
+        app.0.refresh_lint();
         app.0.reset_watch();
         app.0.settings_baseline = app.0.settings.clone();
         app.0.settings_stamp = settings_stamp();
@@ -1043,9 +1107,11 @@ impl App {
                     row![
                         button(text("戻す").size(13))
                             .padding([6, 16])
+                            .style(fluent::accent)
                             .on_press(Message::RestoreDraft),
                         button(text("捨てる").size(13))
                             .padding([6, 16])
+                            .style(fluent::standard)
                             .on_press(Message::DiscardDraft),
                     ]
                     .spacing(8),
@@ -1054,7 +1120,7 @@ impl App {
             )
             .padding(24)
             .width(Length::Fixed(520.0))
-            .style(container::bordered_box),
+            .style(fluent::card),
         )
         .center_x(Length::Fill)
         .center_y(Length::Fill)
@@ -1073,6 +1139,12 @@ impl App {
         let answer = |label: &'static str, answer: Answer| {
             button(text(label).size(13))
                 .padding([6, 16])
+                // **保存が主な操作**（Fluent の強調）
+                .style(if answer == Answer::Save {
+                    fluent::accent
+                } else {
+                    fluent::standard
+                })
                 .on_press(Message::Answer(answer))
         };
 
@@ -1090,7 +1162,9 @@ impl App {
                 ]
                 .spacing(12),
             )
-            .padding(24),
+            .padding(24)
+            .width(Length::Fixed(520.0))
+            .style(fluent::card),
         )
         .center_x(Length::Fill)
         .center_y(Length::Fill)
@@ -1163,7 +1237,7 @@ impl App {
 
         let decide = if browser.save { "保存" } else { "開く" };
 
-        column![
+        let body = column![
             row![
                 text(title).size(13),
                 text(browser.directory.display().to_string()).size(12),
@@ -1188,9 +1262,11 @@ impl App {
                 .size(13),
                 button(text(decide).size(12))
                     .padding([4, 10])
+                    .style(fluent::accent)
                     .on_press(Message::BrowserSubmit),
                 button(text("取り消し").size(12))
                     .padding([4, 10])
+                    .style(fluent::standard)
                     .on_press(Message::BrowserCancel),
             ]
             .spacing(8)
@@ -1206,9 +1282,9 @@ impl App {
             })
             .size(11),
         ]
-        .spacing(8)
-        .padding(12)
-        .into()
+        .spacing(8);
+        // **ほかのダイアログと同じ浮き上がる面**（v2.3.0 R-12）
+        fluent::sheet(body)
     }
 
     /// 自前のファイル選択の、文字コードの欄（R-04）。
@@ -1399,7 +1475,7 @@ impl App {
                 container(entries)
                     .padding(6)
                     .width(Length::Fixed(MENU_PANEL_WIDTH))
-                    .style(container::bordered_box),
+                    .style(fluent::menu),
             ],
         ]
         .into()
@@ -1466,6 +1542,7 @@ impl App {
             keymap: &self.keymap,
             table_format: self.settings.table_format && self.markdown_assist(),
             on_top: self.on_top,
+            focus_mode: self.focus_mode,
             read_only: self.read_only,
             has_folds: !self.folded.is_empty(),
         }
@@ -1497,13 +1574,14 @@ impl App {
                     scrollable(licenses).height(Length::Fixed(280.0)),
                     button(text("閉じる").size(13))
                         .padding([6, 16])
+                        .style(fluent::accent)
                         .on_press(Message::CloseAbout),
                 ]
                 .spacing(10),
             )
             .padding(24)
             .width(Length::Fixed(620.0))
-            .style(container::bordered_box),
+            .style(fluent::card),
         )
         .center_x(Length::Fill)
         .center_y(Length::Fill)
@@ -1646,15 +1724,17 @@ impl App {
             row![
                 button(text("出力").size(13))
                     .padding([6, 16])
+                    .style(fluent::accent)
                     .on_press(Message::StartExport),
                 button(text("キャンセル").size(13))
                     .padding([6, 16])
+                    .style(fluent::standard)
                     .on_press(Message::DismissExportDialog),
             ]
             .spacing(8),
         );
 
-        container(container(panel).padding(24))
+        container(container(panel).padding(24).style(fluent::card))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into()
@@ -1734,7 +1814,38 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_inner(message);
+        // 目 grep の一覧が変わっていたら、探すものを作り直す（v2.3.0 R-05）
+        self.refresh_eye();
+        // 書き換えていたら検査し直す（v2.3.0 R-11）
+        self.refresh_lint();
+        task
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
+        // **diff の画面を出している間は、編集の操作を面へ回す**（v2.3.0 R-02）。
+        // 編集中の文書を差し替える操作は受け付けない
+        if self.diff_screen.is_some() && self.settings_screen.is_none() && self.browser.is_none() {
+            match diff::route(&message) {
+                diff::Route::Pane => return self.route_to_pane(message),
+                diff::Route::Save => {
+                    let focus = self
+                        .diff_screen
+                        .as_ref()
+                        .map_or(crate::diff::Side::Right, |screen| screen.focus);
+                    return self.save_pane(focus);
+                }
+                diff::Route::Blocked => return Task::none(),
+                diff::Route::Pass => {}
+            }
+        }
         let task = self.handle(message);
+        // 外から比べ方が変わっていたら、出している diff の画面へ移す（v2.3.0 R-02）
+        let task = if std::mem::take(&mut self.diff_resync) {
+            Task::batch([task, self.sync_diff_options()])
+        } else {
+            task
+        };
 
         // 折り返しの表を合わせる（v2.2.0）
         self.sync_wrap();
@@ -1914,9 +2025,32 @@ impl App {
                 if self.bench.is_none() {
                     self.editor.caret_visible = !self.editor.caret_visible;
                 }
+                // diff の面は、打鍵を受けている面だけ点滅させる（v2.3.0 R-02）
+                self.diff_blink();
                 return Task::batch([watch, save]);
             }
             Message::BenchTick => return self.bench_tick(),
+            Message::Diff(message) => return self.diff_message(message),
+            Message::EyeMarkSelection => self.add_selection_to_eye(),
+            Message::Toc(command) => self.toc_command(command),
+            Message::Lint(message) => self.lint_message(message),
+            Message::OpenSnippetPicker => {
+                if self.editing_blocked() {
+                    return Task::none();
+                }
+                return self.open_snippet_picker();
+            }
+            Message::SnippetPickerInput(query) => {
+                if let Some(picker) = self.snippet_picker.as_mut() {
+                    *picker = query;
+                }
+            }
+            Message::SnippetPickerSubmit => return self.pick_snippet(None),
+            Message::SnippetPickerPick(index) => return self.pick_snippet(Some(index)),
+            Message::CloseSnippetPicker => {
+                self.snippet_picker = None;
+                return self.focus_editor_now();
+            }
             Message::Editor(action) => {
                 // **本文を触ったら焦点を戻す**（§10.40）。
                 // 巻き上げだけでは戻さない——読みながら検索語を直すことがある
@@ -2106,9 +2240,16 @@ impl App {
             Message::WindowResized(width) => self.window_width = width,
             Message::WindowSized(size) => {
                 self.window_width = size.width;
-                self.window_size = Some(size);
+                // **全画面の大きさは覚えない**（v2.3.0 R-13）。次に開くと画面いっぱいの窓になる
+                if !self.focus_mode {
+                    self.window_size = Some(size);
+                }
             }
-            Message::WindowMoved(position) => self.window_position = Some(position),
+            Message::WindowMoved(position) => {
+                if !self.focus_mode {
+                    self.window_position = Some(position);
+                }
+            }
             Message::PickedOpen(path) => {
                 self.picking = false;
                 let choice = self.browser_choice.take();
@@ -2306,16 +2447,23 @@ impl App {
             Message::UnfoldAll => self.unfold_all(),
             Message::ToggleReadOnly => self.toggle_read_only(),
             Message::ToggleAlwaysOnTop => return self.toggle_on_top(),
+            Message::ToggleFocusMode => return self.toggle_focus_mode(),
+            Message::FocusWasMaximized(maximized) => self.focus_was_maximized = maximized,
             Message::ExitGeometry {
                 maximized,
                 position,
                 size,
             } => {
-                self.maximized = maximized;
-                if position.is_some() {
-                    self.window_position = position;
+                if self.focus_mode {
+                    // **全画面のまま終わるときは、入る前の窓の様子を覚える**（v2.3.0 R-13）
+                    self.maximized = self.focus_was_maximized;
+                } else {
+                    self.maximized = maximized;
+                    if position.is_some() {
+                        self.window_position = position;
+                    }
+                    self.window_size = Some(size);
                 }
-                self.window_size = Some(size);
                 return self.exit_now();
             }
             Message::PlaceWindow { id, monitor, scale } => {
@@ -2345,6 +2493,7 @@ impl App {
         self.search_focused
             || self.goto.is_some()
             || self.heading_picker.is_some()
+            || self.snippet_picker.is_some()
             || self.settings_screen.is_some()
             || self.encoding_dialog.is_some()
             || self.browser.is_some()
@@ -2467,6 +2616,10 @@ impl App {
             // **選んでいれば行ごと字下げ、選んでいなければ 1 つ入れる**
             // （TeraPad と同じ。§4.9）
             Action::Tab { shift } => {
+                // **スニペット**（v2.3.0 R-08）。略語が一致したとき・入力位置を移っている最中だけ
+                if !shift && self.snippet_tab() {
+                    return Task::none();
+                }
                 if self.selected().is_some() {
                     self.reindent(!shift);
                 } else if !shift {
@@ -2869,7 +3022,8 @@ impl App {
     /// **戻りの同期は起きない。** 合わせる側の状態を直接書いており、
     /// メッセージを投げ返さないため、§16.14 が警告するループにならない
     fn sync_from_editor(&mut self) {
-        if !self.syncing() {
+        // diff の面を動かしてもプレビューは動かさない（v2.3.0 R-02）
+        if !self.syncing() || self.diff_own {
             return;
         }
         self.preview.anchor = sync::to_preview(&self.document, self.editor.top_line);
@@ -3160,6 +3314,11 @@ impl App {
                 .edit(range, &edit.inserted, self.width(), &self.metrics);
         }
         self.meta.dirty = true;
+        // **diff の面の文書なら、ここまで**（v2.3.0 R-02）。目次・畳み込み・退避・自動保存・
+        // 図は編集中の文書のもので、面の文書には関わらない
+        if self.diff_own {
+            return true;
+        }
         self.rebuild_toc();
         // 見出しが動いたかもしれない（R-20）
         self.rebuild_folds();
@@ -3899,6 +4058,8 @@ impl App {
 
     /// 指定の場所へ書く。
     fn save_to(&mut self, path: std::path::PathBuf, how: SaveAs) -> Task<Message> {
+        // **書く前に、目次と見出しの番号を作り直す**（v2.3.0 R-10。印がある・番号を振った文書だけ）
+        self.refresh_toc_before_save();
         let text = self.document.text().to_string();
         let mut format = self.meta.format.clone();
         match how {
@@ -4221,10 +4382,22 @@ impl App {
         if previous.toc_visible != self.settings.toc_visible {
             self.rebuild_toc();
         }
+        // 比べ方（v2.3.0 R-02）。**ここでは比べ直さない**（仕事を返せないので `update` の出口で）
+        if previous.diff_layout != self.settings.diff_layout
+            || previous.diff_whitespace != self.settings.diff_whitespace
+            || previous.diff_ignore_case != self.settings.diff_ignore_case
+            || previous.diff_ignore_eol != self.settings.diff_ignore_eol
+        {
+            self.diff_resync = true;
+        }
         // **打ちかけの欄は、値が外から変わったときだけ作り直す。**
         // いつも作り直すと、欄を空にして打ち直すことができない
         let outside = previous.window_custom != self.settings.window_custom
-            || previous.autosave_seconds != self.settings.autosave_seconds;
+            || previous.autosave_seconds != self.settings.autosave_seconds
+            || previous.sun_latitude != self.settings.sun_latitude
+            || previous.sun_longitude != self.settings.sun_longitude
+            || previous.sun_rise_offset != self.settings.sun_rise_offset
+            || previous.sun_set_offset != self.settings.sun_set_offset;
         if let Some(screen) = self.settings_screen.as_mut().filter(|_| outside) {
             screen.refresh(&self.settings);
         }
@@ -4261,7 +4434,126 @@ impl App {
     }
 
     /// いま使う外観（§10.4）。
+    /// 編集画面の記法の色（v2.3.0 R-05 C-1）。**切っていれば `None`**（1 色で描く）。
+    /// 自分の配色を使っていれば、その色で上書きする
+    pub(super) fn syntax_colors(&self) -> Option<crate::render::syntax::SyntaxColors> {
+        if !self.settings.editor_syntax {
+            return None;
+        }
+        let mut colors = crate::render::syntax::SyntaxColors::for_text(self.theme().palette().text);
+        if let Some(palette) = self.active_palette() {
+            for (key, slot) in [
+                ("editor.heading", &mut colors.heading),
+                ("editor.emphasis", &mut colors.emphasis),
+                ("editor.code", &mut colors.code),
+                ("editor.link", &mut colors.link),
+                ("editor.quote", &mut colors.quote),
+                ("editor.marker", &mut colors.marker),
+            ] {
+                if let Some(color) = palette.color(key) {
+                    *slot = color;
+                }
+            }
+        }
+        Some(colors)
+    }
+
+    /// プレビューの色の上書き（v2.3.0 R-05）。自分の配色を使っていなければ何も上書きしない
+    fn preview_colors(&self) -> crate::render::PreviewColors {
+        let Some(palette) = self.active_palette() else {
+            return crate::render::PreviewColors::default();
+        };
+        crate::render::PreviewColors {
+            heading: palette.color("preview.heading"),
+            link: palette.color("preview.link"),
+            emphasis: palette.color("preview.emphasis"),
+            code_background: palette.color("preview.code_background"),
+            keyword: palette.color("preview.keyword"),
+            string: palette.color("preview.string"),
+            comment: palette.color("preview.comment"),
+            number: palette.color("preview.number"),
+            kind: palette.color("preview.type"),
+            function: palette.color("preview.function"),
+            table_rule: palette.color("preview.table_rule"),
+            quote_rule: palette.color("preview.quote_rule"),
+        }
+    }
+
+    /// キャレットのある行の文字（ルーラーの印に使う。v2.3.0 R-07）
+    fn cursor_line_text(&self) -> String {
+        let rope = self.document.text();
+        if self.editor.cursor_line >= rope.len_lines() {
+            return String::new();
+        }
+        rope.line(self.editor.cursor_line).to_string()
+    }
+
+    /// いま使っている配色の指定。**日の出・日の入りに合わせるなら、いまの時刻で明るい・暗いを選ぶ**
+    pub(super) fn effective_theme(&self) -> ThemePreference {
+        self.effective_theme_at(chrono::Utc::now())
+    }
+
+    /// `now` の時刻での配色の指定（試験で時刻を決めるため）
+    pub(super) fn effective_theme_at(&self, now: chrono::DateTime<chrono::Utc>) -> ThemePreference {
+        if self.settings.theme != ThemePreference::Sun {
+            return self.settings.theme.clone();
+        }
+        let today = now.with_timezone(&chrono::Local).date_naive();
+        let day = crate::io::sun::is_day(
+            now,
+            today,
+            self.settings.sun_latitude,
+            self.settings.sun_longitude,
+            self.settings.sun_rise_offset,
+            self.settings.sun_set_offset,
+        );
+        if day {
+            self.settings.sun_day_theme.clone()
+        } else {
+            self.settings.sun_night_theme.clone()
+        }
+    }
+
+    /// いま使っている自分の配色（プリセットを使っていれば `None`）
+    pub(super) fn active_palette(&self) -> Option<&crate::io::palette::CustomPalette> {
+        let ThemePreference::Custom(name) = self.effective_theme() else {
+            return None;
+        };
+        self.settings
+            .palettes
+            .iter()
+            .find(|palette| palette.name == name)
+    }
+
     pub fn theme(&self) -> iced::Theme {
+        self.theme_of(&self.effective_theme())
+    }
+
+    /// 配色の指定を iced の配色にする。**自分の配色は、元のプリセットに色を上書きして作る**
+    pub(super) fn theme_of(&self, preference: &ThemePreference) -> iced::Theme {
+        if let ThemePreference::Custom(name) = preference {
+            let Some(palette) = self.settings.palettes.iter().find(|p| p.name == *name) else {
+                // 消した配色を指していたら OS に合わせる
+                return self.theme_of(&ThemePreference::System);
+            };
+            let base = ThemePreference::parse(&palette.base);
+            // 自分の配色は元にしない（巡回を作らない）
+            let base = match base {
+                ThemePreference::Custom(_) => ThemePreference::System,
+                other => other,
+            };
+            let mut colors = self.theme_of(&base).palette();
+            for (key, slot) in [
+                ("ui.background", &mut colors.background),
+                ("ui.text", &mut colors.text),
+                ("ui.primary", &mut colors.primary),
+            ] {
+                if let Some(color) = palette.color(key) {
+                    *slot = color;
+                }
+            }
+            return iced::Theme::custom(palette.name.clone(), colors);
+        }
         let system = || {
             if self.system_dark {
                 iced::Theme::Dark
@@ -4269,7 +4561,7 @@ impl App {
                 iced::Theme::Light
             }
         };
-        match &self.settings.theme {
+        match preference {
             ThemePreference::Light => iced::Theme::Light,
             ThemePreference::Dark => iced::Theme::Dark,
             ThemePreference::System => system(),
@@ -4279,6 +4571,9 @@ impl App {
                 .find(|theme| theme.to_string() == *name)
                 .cloned()
                 .unwrap_or_else(system),
+            ThemePreference::Custom(_) => system(),
+            // 明るい時間・暗い時間の配色に「日の出・日の入り」は入らない（入っていても OS に合わせる）
+            ThemePreference::Sun => system(),
         }
     }
 
@@ -4548,6 +4843,13 @@ impl App {
                 escape(|| Message::CloseEncodingDialog)
             } else if self.heading_picker.is_some() {
                 escape(|| Message::CloseHeadingPicker)
+            } else if self.snippet_picker.is_some() {
+                escape(|| Message::CloseSnippetPicker)
+            } else if self.diff_screen.is_some() && self.browser.is_none() {
+                escape(|| Message::Diff(diff::DiffMessage::Close))
+            } else if self.focus_mode && self.nothing_on_top() {
+                // **集中モードは Esc でも出られる**（v2.3.0 R-13）。開いたものを先に閉じる
+                escape(|| Message::ToggleFocusMode)
             } else {
                 iced::Subscription::none()
             },
@@ -4601,13 +4903,29 @@ impl App {
 
         // **文字の大きさと行間は設定から**（R-11）。表示倍率を掛け合わせる
         let (editor_size, editor_line) = self.editor_sizes();
+        let eye_marks = &self.eye.compiled;
         let mut editor = EditorView::new(&self.document, &self.editor, Message::Editor)
             .font(self.editor_font())
             .sizes(editor_size, editor_line)
             .folding(&self.folds, &self.fold_headings)
             // 右端で折り返す（v2.2.0）
             .wrapping(self.wrap.as_ref(), self.wrap_wanted())
-            .minimap(self.settings.minimap.then_some(self.settings.minimap_width))
+            // 集中モードではミニマップを出さない（v2.3.0 R-13）
+            .minimap(
+                (self.settings.minimap && !self.focus_mode).then_some(self.settings.minimap_width),
+            )
+            // 記法の色（v2.3.0 R-05 C-1）
+            .syntax(self.syntax_colors())
+            // 目 grep（v2.3.0 R-05 C-3）
+            .eye_marks(eye_marks.as_slice())
+            // Markdown の検査の波線（v2.3.0 R-11）
+            .lint_marks(&self.lint.results)
+            // 指定した桁の縦線（v2.3.0 R-07）
+            .guides(if self.settings.editor_guides {
+                self.settings.editor_guide_columns.as_slice()
+            } else {
+                &[]
+            })
             .highlight(&self.search.matches, self.search.current_match())
             // **検索バーへ入力している間だけ本文へ入れない**（§10.40）。
             // 開いているだけなら打てる——探した場所を見ながら直せるように
@@ -4616,7 +4934,8 @@ impl App {
                 !self.search_focused
                     && self.goto.is_none()
                     && self.open_menu.is_none()
-                    && self.heading_picker.is_none(),
+                    && self.heading_picker.is_none()
+                    && self.snippet_picker.is_none(),
             )
             .display(
                 self.tab_width(),
@@ -4628,10 +4947,48 @@ impl App {
         if self.bench.is_some() {
             editor = editor.show_gutter(bench_show_gutter());
         }
+        // 桁の目盛り（v2.3.0 R-07）。**本文の上に置き、本文の左端と横の送りに揃える**
+        let editor: Element<'_, Message> = if self.settings.editor_ruler && !self.focus_mode {
+            let left = crate::render::text_left(self.document.text().len_lines(), editor_size);
+            let scroll_x = if self
+                .wrap
+                .as_ref()
+                .is_some_and(crate::render::wrap::Wrap::wraps)
+            {
+                0.0
+            } else {
+                self.editor.scroll_x
+            };
+            let line = self.cursor_line_text();
+            let caret =
+                crate::render::cells_before(&line, self.editor.cursor_column, self.tab_width());
+            column![
+                crate::render::ruler::Ruler::new(
+                    left,
+                    scroll_x,
+                    caret,
+                    self.editor_font(),
+                    editor_size
+                )
+                // ミニマップの上には描かない
+                .right_reserve(if self.settings.minimap {
+                    self.settings.minimap_width
+                } else {
+                    0.0
+                }),
+                editor,
+            ]
+            .into()
+        } else {
+            editor.into()
+        };
         let editor = container(editor).width(Length::Fill).height(Length::Fill);
         let preview = container(
             PreviewView::new(&self.document, &self.preview, Message::Preview)
                 .zoom(preview_factor(&self.settings))
+                // 自分の配色（v2.3.0 R-05）
+                .colors(self.preview_colors())
+                .eye_marks(eye_marks.as_slice())
                 .embeds(&self.embeds)
                 .base_dir(self.meta.base_dir())
                 .highlight(if self.search.open {
@@ -4671,6 +5028,9 @@ impl App {
         } else if let Some(browser) = &self.browser {
             // **答えるまで本文を触らせない**（確認ダイアログと同じ扱い）
             self.browser_view(browser)
+        } else if let Some(screen) = &self.diff_screen {
+            // **diff の画面は本文を覆う**（v2.3.0 R-02。設定画面と同じ扱い）
+            self.diff_view(screen)
         } else if let Some(draft) = &self.draft {
             // **いちばん先に出す**（§18.3）。起動直後に答えるもの
             self.draft_view(draft)
@@ -4681,7 +5041,7 @@ impl App {
         } else if let Some(dialog) = &self.export_dialog {
             // **答えるまで本文を触らせない**（確認ダイアログと同じ扱い）
             self.export_dialog_view(dialog)
-        } else if self.settings.toc_visible {
+        } else if self.settings.toc_visible && !self.focus_mode {
             row![
                 container(self.toc_view())
                     .width(Length::Fixed(self.settings.toc_width))
@@ -4710,17 +5070,27 @@ impl App {
             .push(text(tail).size(12))
             .align_y(iced::Alignment::Center);
 
-        let mut body = column![container(self.chrome()).padding(6)];
+        // **集中モードではメニューを隠す**（v2.3.0 R-13）。打鍵と Esc で出られる
+        let mut body = if self.focus_mode {
+            column![]
+        } else {
+            column![container(self.chrome()).padding(6)]
+        };
 
         // 検索バー（§8.2）
+        // **本文の上の帯は一段浮かせる**（v2.3.0 R-12。検索・行へ移動・絞り込み）
         if self.search.open {
-            body = body.push(container(focusable(self.search_view())).padding([0, 6]));
+            body = body.push(fluent::float(focusable(self.search_view())));
         }
         if let Some(input) = &self.goto {
-            body = body.push(container(self.goto_view(input)).padding([0, 6]));
+            body = body.push(fluent::float(self.goto_view(input)));
         }
         if let Some(picker) = &self.heading_picker {
-            body = body.push(container(self.heading_picker_view(picker)).padding([0, 6]));
+            body = body.push(fluent::float(self.heading_picker_view(picker)));
+        }
+        // スニペットの一覧（v2.3.0 R-08）
+        if let Some(query) = &self.snippet_picker {
+            body = body.push(fluent::float(self.snippet_picker_view(query)));
         }
 
         // **外で書き換えられたことを帯で知らせる**（R-21）
@@ -4793,14 +5163,29 @@ impl App {
             );
         }
 
+        // **どのファイルの部分を当てるか選ぶ帯**（v2.3.0 R-04 D-6）
+        if let Some(files) = &self.patch_choice {
+            body = body.push(container(self.patch_choice_view(files)).padding([0, 6]));
+        }
         let mut body = body.push(main);
+        // Markdown の検査の一覧（v2.3.0 R-11）。**本文の下に出す**
+        if self.lint.panel
+            && self.settings_screen.is_none()
+            && self.diff_screen.is_none()
+            && !self.focus_mode
+        {
+            body = body.push(self.lint_panel());
+        }
         // 参照・リンク切れの一覧（R-07 / R-19）。**本文の下に出す**
         if let Some(results) = &self.results {
-            if self.settings_screen.is_none() {
+            if self.settings_screen.is_none() && !self.focus_mode {
                 body = body.push(container(self.results_view(results)).padding([0, 6]));
             }
         }
-        let body = body.push(container(status).padding(6));
+        // 集中モードではステータスバーを隠す（v2.3.0 R-13）
+        if !self.focus_mode {
+            body = body.push(container(status).padding(6));
+        }
 
         // **開いたメニューは本文の上に重ねる。** 押し下げると画面が跳ねる
         match self.open_menu {

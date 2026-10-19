@@ -39,6 +39,9 @@ pub struct Wrap {
     first_row: Vec<usize>,
     /// 行ごとの段の切れ目（2 段目以降の開始位置。表示の文字番号）。折り返さない行は空
     breaks: Vec<Vec<usize>>,
+    /// 右端で折り返しているか。**空きの段だけの表（`spacers`）では `false`**。
+    /// 折り返していなければ、横へ送れる（エディタは折り返しの表と同じに扱う）
+    wraps: bool,
 }
 
 /// 表を作り直すかを決める鍵。**どれかが変われば作り直す**
@@ -137,7 +140,46 @@ impl Wrap {
             tab_width,
             first_row,
             breaks,
+            wraps: true,
         }
+    }
+
+    /// **空きの段**だけを持つ表（v2.3.0 R-02。diff の左右の面）。折り返さない。
+    ///
+    /// `gaps` は `(この行の前に挟む, 段の数)`。挟む段は、その行の**前の段**（文字の無い段）
+    /// として持つ。切れ目を 0 に置くと、文字はすべて最後の段に入る。
+    /// **文書の最後より後ろに挟む段は持たない**（行が無い。下は元から空いている）
+    pub fn spacers(lines: usize, gaps: &[(usize, usize)]) -> Self {
+        let mut breaks = vec![Vec::new(); lines];
+        for &(line, count) in gaps {
+            if let Some(entry) = breaks.get_mut(line) {
+                entry.extend(std::iter::repeat_n(0, count));
+            }
+        }
+        let mut first_row = Vec::with_capacity(lines + 1);
+        let mut row = 0usize;
+        for entry in &breaks {
+            first_row.push(row);
+            row += entry.len() + 1;
+        }
+        first_row.push(row);
+        Self {
+            columns: usize::MAX,
+            tab_width: 1,
+            first_row,
+            breaks,
+            wraps: false,
+        }
+    }
+
+    /// 右端で折り返しているか（空きの段だけの表なら `false`）
+    pub fn wraps(&self) -> bool {
+        self.wraps
+    }
+
+    /// その行の、文字を描く最初の段。**前に空きの段があれば、そのぶん後ろ**
+    pub fn text_segment(&self, line: usize) -> usize {
+        self.segment_of(line, 0)
     }
 
     fn lines(&self) -> usize {
@@ -218,7 +260,17 @@ impl Wrap {
 
         let last = self.total().saturating_sub(1) as i64;
         let row = (self.row_of(line, segment) as i64 + rows).clamp(0, last.max(0));
-        let (line, segment) = self.position(row as usize);
+        let (mut line, mut segment) = self.position(row as usize);
+        // **空きの段には止まらない**（v2.3.0。diff の面）。下へなら、その行の文字の段へ。
+        // 上へなら、前の行の最後の段へ（前の行が無ければ、その行の文字の段へ）
+        if segment < self.text_segment(line) {
+            if rows < 0 && line > 0 {
+                line -= 1;
+                segment = self.rows_of(line).saturating_sub(1);
+            } else {
+                segment = self.text_segment(line);
+            }
+        }
         let rendered = self.rendered(document, line);
         let (start, end) = self.segment_range(line, segment);
         // 段の右端より右には置かない（次の段の先頭へ入らない）。最後の段は行末まで
@@ -377,5 +429,47 @@ mod tests {
     fn tabs_are_expanded_first() {
         let w = wrap("\tabcdefgh", 8);
         assert_eq!(w.rows_of(0), 2);
+    }
+
+    /// **空きの段は、行の前に文字の無い段として入る**（v2.3.0 R-02）
+    #[test]
+    fn spacers_come_before_the_line() {
+        // 3 行の文書の、1 行目の前に 2 段
+        let w = Wrap::spacers(3, &[(1, 2)]);
+        assert!(!w.wraps());
+        assert_eq!(w.total(), 5);
+        assert_eq!(w.rows_of(1), 3);
+        assert_eq!(w.text_segment(0), 0);
+        assert_eq!(w.text_segment(1), 2, "文字は空きの段のあと");
+        assert_eq!(w.row_of(1, w.text_segment(1)), 3);
+        assert_eq!(w.position(1), (1, 0), "空きの段");
+        assert_eq!(w.position(3), (1, 2));
+        // 文字の段は行をまるごと持つ（切れ目は 0 だけ）
+        assert_eq!(w.segment_range(1, 2), (0, None));
+        assert_eq!(w.segment_range(1, 0), (0, Some(0)));
+    }
+
+    /// 文書の最後より後ろに挟む段は持たない
+    #[test]
+    fn spacers_after_the_last_line_are_dropped() {
+        let w = Wrap::spacers(2, &[(2, 3)]);
+        assert_eq!(w.total(), 2);
+    }
+
+    /// **上下の移動は空きの段に止まらない**
+    #[test]
+    fn stepping_skips_spacers() {
+        let document = Document::from_text("a\nb\nc".to_owned());
+        let w = Wrap::spacers(3, &[(1, 2)]);
+        // 0 行目から下へ 1 段 → 空きの段を飛ばして 1 行目
+        let (line, _, _) = w.step(&document, 0, 0, None, 1);
+        assert_eq!(line, 1);
+        // 1 行目から上へ 1 段 → 空きの段を飛ばして 0 行目
+        let (line, _, _) = w.step(&document, 1, 0, None, -1);
+        assert_eq!(line, 0);
+        // 先頭の行の前の空きの段からは、その行へ
+        let w = Wrap::spacers(2, &[(0, 1)]);
+        let (line, _, _) = w.step(&document, 0, 0, None, -1);
+        assert_eq!(line, 0);
     }
 }

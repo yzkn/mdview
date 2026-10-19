@@ -88,13 +88,13 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 |`mode`|`edit` / `preview` / `split`|
 |`encoding` `bom` `line_ending`|文字コード・BOM・改行コード|
 |`caret` `selection` `top_line` `line_count` `bytes`|キャレット（0 始まり）・選択（文字も）・先頭行・行数・大きさ|
-|`overlay`|本文を覆っているもの: `settings` `about` `browser` `draft` `confirm` `encoding` `export`、無ければ空|
+|`overlay`|本文を覆っているもの: `settings` `about` `browser` `draft` `confirm` `encoding` `export` `diff`（v2.3.0）、無ければ空|
 |`settings_page` `open_menu`|開いている設定の分類・メニュー|
 |`notice`|知らせの帯の文字|
 |`search`|`open` `query` `matches` `searching`|
 |`results`|参照・リンク切れの一覧（`title` `count`）|
 |`folded_ranges`|畳んで隠している行の範囲|
-|`on_top` `read_only`（v2.1.3） `zoom` `theme` `toc_visible` `external_changed` `busy` `can_undo` `can_redo`|そのまま|
+|`on_top` `read_only`（v2.1.3） `focus_mode`（v2.3.0） `zoom` `theme` `toc_visible` `external_changed` `busy` `can_undo` `can_redo`|そのまま|
 |`status`|ステータスバーの文字|
 |`editor_text_size` `editor_line_height` `preview_factor`|エディタの文字の大きさと行の高さ・プレビューの倍率（設定 × 表示倍率）|
 |`recent`|最近使ったファイル|
@@ -124,7 +124,8 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 |外での変更の帯|`external.reload` `external.ignore`|—|
 |一覧（参照・リンク切れ）|`results.title` `results.item.<番号>` `results.close`|—|
 |出力の進み具合|`export.progress` `export.cancel`|—|
-|設定画面|`settings.page.<window\|editor\|preview\|appearance\|file\|assist\|keys>` `settings.close`|button（`checked` は表示中）|
+|設定画面|`settings.page.<window\|editor\|preview\|appearance\|file\|assist\|snippets\|compare\|keys>` `settings.close`（`snippets` `compare` は v2.3.0）|button（`checked` は表示中）|
+|設定画面（自分の配色・スニペット。v2.3.0）|`settings.palette.new` `settings.palette.select`（配色を選ぶ）`settings.palette.color.<鍵>`（`#rrggbb`）`settings.snippet.<番号>` `settings.snippet.add`|button / combobox / textbox|
 |設定画面（キー割り当て）|`settings.key.<操作名>`（`value` は打鍵）`settings.key.<操作名>.change` `settings.key.<操作名>.reset`|—|
 |未保存の確認|`confirm.save` `confirm.discard` `confirm.cancel`|button|
 |異常終了後の復元|`draft.restore` `draft.discard`|button|
@@ -266,3 +267,4 @@ xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --
 |2026-10-08|2 回目の敵対的検証の残りを直した: 要素に `options`、割り当て待ちの打鍵をアプリ側で断る、ミニマップの押す・掴むを単体試験で、配色の色の作り方を画素で確かめる（§6.1・§6.3）|
 |2026-10-09|v2.1.1: §6 に OS ごとの動かし方（Linux は Xvfb と `libxkbcommon-x11-0`）と、出力の UTF-8 固定・起動中に終わったときの知らせを足した|
 |2026-10-13|v2.1.3: 状態に `read_only` を足した|
+|2026-10-19|v2.3.0: 状態に `focus_mode`、`overlay` に `diff`、設定画面の分類 `snippets` `compare` と自分の配色・スニペットの要素を足した。`Esc` は開いたものを先に閉じ、何も無ければ集中モードを出る|

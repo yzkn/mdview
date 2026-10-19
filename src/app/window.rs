@@ -374,6 +374,45 @@ impl App {
         self.apply_on_top()
     }
 
+    /// 集中モードに入る・出る（v2.3.0 R-13）。
+    ///
+    /// **全画面にし、メニュー・ステータスバー・目次・ミニマップ・一覧を隠して本文だけにする。**
+    /// 表示モード（編集・分割・プレビュー）はそのまま。OS の通知は扱わない（要件定義書 R-13）
+    pub(super) fn toggle_focus_mode(&mut self) -> Task<Message> {
+        self.focus_mode = !self.focus_mode;
+        self.open_menu = None;
+        let entering = self.focus_mode;
+        iced::window::latest().then(move |id| match id {
+            // **入る前に最大化していたかを聞いておく**（全画面のまま終わったときに覚えるため）
+            Some(id) if entering => iced::window::is_maximized(id).then(move |maximized| {
+                Task::batch([
+                    Task::done(Message::FocusWasMaximized(maximized)),
+                    iced::window::set_mode(id, iced::window::Mode::Fullscreen),
+                ])
+            }),
+            Some(id) => iced::window::set_mode(id, iced::window::Mode::Windowed),
+            None => Task::none(),
+        })
+    }
+
+    /// 本文の上に開いているもの（検索・メニュー・ダイアログ）が無いか。
+    /// **Esc はそちらを先に閉じる**ので、何も無いときだけ集中モードを出る
+    pub(super) fn nothing_on_top(&self) -> bool {
+        !self.search.open
+            && self.goto.is_none()
+            && self.open_menu.is_none()
+            && !self.about_open
+            && self.browser.is_none()
+            && self.settings_screen.is_none()
+            && self.encoding_dialog.is_none()
+            && self.heading_picker.is_none()
+            && self.snippet_picker.is_none()
+            && self.diff_screen.is_none()
+            && self.draft.is_none()
+            && !self.confirming
+            && self.export_dialog.is_none()
+    }
+
     /// いまの最前面の状態を窓へ伝える。
     pub(super) fn apply_on_top(&self) -> Task<Message> {
         let level = if self.on_top {
@@ -703,5 +742,48 @@ mod tests {
         }
         // 知らない短い旗もファイルにしない（`-x.md` という名前は `./-x.md` で渡せる）
         assert!(launch(&["-x"]).files.is_empty());
+    }
+
+    /// 集中モード（v2.3.0 R-13）。**入る・出るは打鍵とメニューから**、表示モードはそのまま
+    #[test]
+    fn focus_mode_toggles_and_keeps_the_view_mode() {
+        let mut app = super::super::App::new().0;
+        let mode = app.mode;
+        let _ = app.update(Message::ToggleFocusMode);
+        assert!(app.focus_mode);
+        assert_eq!(app.mode, mode, "表示モードは変えない");
+        assert!(app.menu_context().focus_mode, "メニューに印が付く");
+        let _ = app.update(Message::ToggleFocusMode);
+        assert!(!app.focus_mode);
+    }
+
+    /// **全画面の大きさは覚えない。** 入る前の窓の様子を覚える
+    #[test]
+    fn focus_mode_does_not_remember_the_fullscreen_size() {
+        let mut app = super::super::App::new().0;
+        let _ = app.update(Message::WindowSized(iced::Size::new(1000.0, 700.0)));
+        let _ = app.update(Message::ToggleFocusMode);
+        let _ = app.update(Message::FocusWasMaximized(false));
+        let _ = app.update(Message::WindowSized(iced::Size::new(1920.0, 1080.0)));
+        let _ = app.update(Message::WindowMoved(iced::Point::new(0.0, 0.0)));
+        assert_eq!(app.window_size, Some(iced::Size::new(1000.0, 700.0)));
+        assert_eq!(app.window_width, 1920.0, "画面の組み立てには今の幅を使う");
+        assert_eq!(app.window_position, None);
+    }
+
+    /// **Esc は開いたものを先に閉じる。** 何も無いときだけ集中モードを出る
+    #[test]
+    fn escape_closes_the_search_before_leaving_focus_mode() {
+        let mut app = super::super::App::new().0;
+        let _ = app.update(Message::ToggleFocusMode);
+        assert!(app.nothing_on_top());
+        let _ = app.update(Message::OpenSearch);
+        assert!(!app.nothing_on_top());
+        assert!(matches!(app.escape_message(), Some(Message::CloseSearch)));
+        let _ = app.update(Message::CloseSearch);
+        assert!(matches!(
+            app.escape_message(),
+            Some(Message::ToggleFocusMode)
+        ));
     }
 }

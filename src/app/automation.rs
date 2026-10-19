@@ -211,6 +211,8 @@ fn page_key(page: SettingsPage) -> &'static str {
         SettingsPage::Appearance => "appearance",
         SettingsPage::File => "file",
         SettingsPage::Assist => "assist",
+        SettingsPage::Snippets => "snippets",
+        SettingsPage::Compare => "compare",
         SettingsPage::Keys => "keys",
     }
 }
@@ -265,7 +267,7 @@ fn editor_action(chord: &Chord) -> Option<Action> {
 
 impl App {
     /// `Esc` を押したときに閉じるもの（購読の `Esc` と同じ順）。
-    fn escape_message(&self) -> Option<Message> {
+    pub(super) fn escape_message(&self) -> Option<Message> {
         if let Some(screen) = &self.settings_screen {
             return Some(if screen.capturing.is_some() {
                 Message::Setting(super::SettingChange::CancelCapture)
@@ -282,14 +284,26 @@ impl App {
         if self.heading_picker.is_some() {
             return Some(Message::CloseHeadingPicker);
         }
+        // スニペットの一覧（v2.3.0 R-08）
+        if self.snippet_picker.is_some() {
+            return Some(Message::CloseSnippetPicker);
+        }
         if self.goto.is_some() {
             return Some(Message::CloseGoto);
         }
         if self.open_menu.is_some() || self.about_open {
             return Some(Message::CloseMenu);
         }
+        // diff の画面（v2.3.0 R-02）
+        if self.diff_screen.is_some() {
+            return Some(Message::Diff(super::diff::DiffMessage::Close));
+        }
         if self.search.open {
             return Some(Message::CloseSearch);
+        }
+        // 集中モード（v2.3.0 R-13）。**開いたものが無いときだけ**
+        if self.focus_mode && self.nothing_on_top() {
+            return Some(Message::ToggleFocusMode);
         }
         None
     }
@@ -298,8 +312,13 @@ impl App {
     fn elements(&self) -> Vec<Element> {
         let mut out = Vec::new();
 
-        // --- メニュー（いつも出ている） ---
-        for heading in menu::Menu::ALL {
+        // --- メニュー（集中モードのほかはいつも出ている。v2.3.0 R-13） ---
+        let headings: &[menu::Menu] = if self.focus_mode {
+            &[]
+        } else {
+            &menu::Menu::ALL
+        };
+        for &heading in headings {
             out.push(
                 Element::new(
                     format!("menubar.{}", menu_key(heading)),
@@ -384,9 +403,9 @@ impl App {
                 // 配色は画面の選択肢をそのまま出す（R-13。何が選べるかを試験が見る）
                 if key == "theme" {
                     item.options = Some(
-                        super::settings_view::theme_choices()
+                        super::settings_view::theme_choices(&self.settings)
                             .iter()
-                            .map(|choice| choice.as_str().to_owned())
+                            .map(|choice| choice.as_str().into_owned())
                             .collect(),
                     );
                 }
@@ -409,6 +428,68 @@ impl App {
                         "いまの窓を使う",
                         Message::Setting(super::SettingChange::UseCurrentWindow),
                     ));
+                }
+                // スニペット（v2.3.0 R-09）。選ぶ・足す
+                SettingsPage::Snippets => {
+                    use super::snippets::SnippetChange;
+                    for (index, snippet) in self.settings.snippets.iter().enumerate() {
+                        out.push(
+                            Element::button(
+                                format!("settings.snippet.{index}"),
+                                &snippet.name,
+                                Message::Setting(super::SettingChange::Snippet(
+                                    SnippetChange::Select(index),
+                                )),
+                            )
+                            .checked(screen.snippet == Some(index)),
+                        );
+                    }
+                    out.push(Element::button(
+                        "settings.snippet.add",
+                        "足す",
+                        Message::Setting(super::SettingChange::Snippet(SnippetChange::Add)),
+                    ));
+                }
+                // 自分の配色（v2.3.0 R-05）。作る・選ぶ・色を書く
+                SettingsPage::Appearance => {
+                    use super::palette_view::PaletteChange;
+                    out.push(Element::button(
+                        "settings.palette.new",
+                        "新しく作る",
+                        Message::Setting(super::SettingChange::Palette(PaletteChange::New)),
+                    ));
+                    let mut select =
+                        Element::new("settings.palette.select", "combobox", "直す配色を選ぶ");
+                    select.value = screen.palette.clone();
+                    select.options = Some(
+                        self.settings
+                            .palettes
+                            .iter()
+                            .map(|palette| palette.name.clone())
+                            .collect(),
+                    );
+                    select.set = Some(Box::new(|value: &str| {
+                        Some(Message::Setting(super::SettingChange::Palette(
+                            PaletteChange::Edit(Some(value.to_owned())),
+                        )))
+                    }));
+                    out.push(select);
+                    if screen.palette.is_some() {
+                        for (key, label, _) in crate::io::palette::KEYS {
+                            let mut item = Element::new(
+                                format!("settings.palette.color.{key}"),
+                                "textbox",
+                                label,
+                            );
+                            item.value = screen.palette_colors.get(key).cloned();
+                            item.set = Some(Box::new(move |value: &str| {
+                                Some(Message::Setting(super::SettingChange::Palette(
+                                    PaletteChange::Color(key.to_owned(), value.to_owned()),
+                                )))
+                            }));
+                            out.push(item);
+                        }
+                    }
                 }
                 SettingsPage::File => {
                     out.push(
@@ -898,6 +979,10 @@ impl App {
 
     /// ステータスバー（いつも出ている）を足す。
     fn with_status(&self, mut out: Vec<Element>) -> Vec<Element> {
+        // 集中モードでは隠している（v2.3.0 R-13）
+        if self.focus_mode {
+            return out;
+        }
         out.push(Element::new("status", "text", self.status_text()));
         // **書式に `{encoding}` が無ければ押す所は無い**（v2.2.0）
         let (_, encoding, _) = self.status().parts(&self.settings.status_format);
@@ -919,6 +1004,8 @@ impl App {
             "about"
         } else if self.browser.is_some() {
             "browser"
+        } else if self.diff_screen.is_some() {
+            "diff"
         } else if self.draft.is_some() {
             "draft"
         } else if self.confirming {
@@ -969,6 +1056,7 @@ impl App {
             "folded_ranges": self.folds.ranges().iter()
                 .map(|r| json!([r.start, r.end])).collect::<Vec<_>>(),
             "on_top": self.on_top,
+            "focus_mode": self.focus_mode,
             "read_only": self.read_only,
             "zoom": self.settings.zoom,
             "theme": self.settings.theme.to_string(),

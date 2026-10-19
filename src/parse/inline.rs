@@ -343,30 +343,7 @@ fn collect<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut BlockContent) {
                 out.lines.push(line);
             }
 
-            NodeValue::List(list) => {
-                let ordered = list.list_type == ListType::Ordered;
-                let mut number = list.start.max(1);
-                for item in child.children() {
-                    // **チェックリストは箱を出す**（受入条件 §23.1）。
-                    // `- [ ]` と `- [x]` は行頭記号そのものが違う
-                    let marker = match item.data.borrow().value {
-                        NodeValue::TaskItem(task) if task.symbol.is_some() => "☑ ".to_owned(),
-                        NodeValue::TaskItem(_) => "☐ ".to_owned(),
-                        _ if ordered => {
-                            let delimiter = if list.delimiter == ListDelimType::Paren {
-                                ')'
-                            } else {
-                                '.'
-                            };
-                            let text = format!("{number}{delimiter} ");
-                            number += 1;
-                            text
-                        }
-                        _ => "• ".to_owned(),
-                    };
-                    collect_item(item, depth, Some(marker), out);
-                }
-            }
+            NodeValue::List(_) => collect_list(child, depth, out),
 
             NodeValue::BlockQuote => collect(child, depth.saturating_add(1), out),
 
@@ -381,6 +358,35 @@ fn collect<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut BlockContent) {
 
             _ => collect(child, depth, out),
         }
+    }
+}
+
+/// リストの項目を、行頭記号を付けて取り込む。
+fn collect_list<'a>(list_node: &'a AstNode<'a>, depth: u8, out: &mut BlockContent) {
+    let NodeValue::List(list) = list_node.data.borrow().value else {
+        return;
+    };
+    let ordered = list.list_type == ListType::Ordered;
+    let mut number = list.start.max(1);
+    for item in list_node.children() {
+        // **チェックリストは箱を出す**（受入条件 §23.1）。
+        // `- [ ]` と `- [x]` は行頭記号そのものが違う
+        let marker = match item.data.borrow().value {
+            NodeValue::TaskItem(task) if task.symbol.is_some() => "☑ ".to_owned(),
+            NodeValue::TaskItem(_) => "☐ ".to_owned(),
+            _ if ordered => {
+                let delimiter = if list.delimiter == ListDelimType::Paren {
+                    ')'
+                } else {
+                    '.'
+                };
+                let text = format!("{number}{delimiter} ");
+                number += 1;
+                text
+            }
+            _ => "• ".to_owned(),
+        };
+        collect_item(item, depth, Some(marker), out);
     }
 }
 
@@ -404,8 +410,9 @@ fn collect_item<'a>(
                 out.lines.push(line);
                 first = false;
             }
-            // 入れ子のリストは 1 段深くする
-            NodeValue::List(_) => collect(item, depth.saturating_add(1), out),
+            // 入れ子のリストは 1 段深くする。**渡すのは入れ子のリストだけ**
+            // （項目ごと渡すと、項目の段落をもう一度取り込んで 2 回出ていた）
+            NodeValue::List(_) => collect_list(child, depth.saturating_add(1), out),
             _ => {}
         }
     }
@@ -692,6 +699,31 @@ mod tests {
     fn plain_list_keeps_its_bullet() {
         let content = parse_block("- ふつうの項目\n", &BlockKind::List);
         assert_eq!(flat(&content), "• ふつうの項目");
+    }
+
+    /// **入れ子のリストで、親の項目の文字を 2 回出さない**
+    #[test]
+    fn nested_list_does_not_repeat_the_parent() {
+        let content = parse_block("- 親 **大事**\n  - 子\n- 次\n", &BlockKind::List);
+        let lines: Vec<(u8, Option<&str>, String)> = content
+            .lines
+            .iter()
+            .map(|line| {
+                (
+                    line.indent,
+                    line.marker.as_deref(),
+                    line.spans.iter().map(|s| s.text.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                (0, Some("• "), "親 大事".to_owned()),
+                (1, Some("• "), "子".to_owned()),
+                (0, Some("• "), "次".to_owned()),
+            ]
+        );
     }
 
     #[test]

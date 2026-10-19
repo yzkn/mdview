@@ -110,6 +110,7 @@ impl App {
         let action = |label: &'static str, message: Option<Message>| {
             button(text(label).size(13))
                 .padding([6, 14])
+                .style(super::fluent::standard)
                 .on_press_maybe(message)
         };
 
@@ -163,7 +164,7 @@ impl App {
             )
             .padding(24)
             .width(Length::Fixed(720.0))
-            .style(container::bordered_box),
+            .style(super::fluent::card),
         )
         .center_x(Length::Fill)
         .center_y(Length::Fill)

@@ -228,6 +228,23 @@ impl Default for State {
     }
 }
 
+/// プレビューの色の上書き（v2.3.0 R-05。自分の配色）。**`None` の色は元のまま**
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PreviewColors {
+    pub heading: Option<Color>,
+    pub link: Option<Color>,
+    pub emphasis: Option<Color>,
+    pub code_background: Option<Color>,
+    pub keyword: Option<Color>,
+    pub string: Option<Color>,
+    pub comment: Option<Color>,
+    pub number: Option<Color>,
+    pub kind: Option<Color>,
+    pub function: Option<Color>,
+    pub table_rule: Option<Color>,
+    pub quote_rule: Option<Color>,
+}
+
 pub struct PreviewView<'a> {
     document: &'a Document,
     state: &'a PreviewState,
@@ -239,6 +256,10 @@ pub struct PreviewView<'a> {
     on_action: Box<dyn Fn(PreviewAction) -> super::Message + 'a>,
     /// 検索語。**表示されている文字を探す**（§8.2）
     query: &'a str,
+    /// 色の上書き（v2.3.0 R-05）
+    colors: PreviewColors,
+    /// 目 grep（v2.3.0 R-05 C-3）
+    eye: &'a [(regex::Regex, Color)],
 }
 
 impl<'a> PreviewView<'a> {
@@ -255,7 +276,21 @@ impl<'a> PreviewView<'a> {
             text_size: Self::BASE_SIZE,
             on_action: Box::new(on_action),
             query: "",
+            colors: PreviewColors::default(),
+            eye: &[],
         }
+    }
+
+    /// 目 grep の印を塗る（v2.3.0 R-05 C-3）
+    pub fn eye_marks(mut self, marks: &'a [(regex::Regex, Color)]) -> Self {
+        self.eye = marks;
+        self
+    }
+
+    /// 色を上書きする（v2.3.0 R-05。自分の配色）
+    pub fn colors(mut self, colors: PreviewColors) -> Self {
+        self.colors = colors;
+        self
     }
 
     /// 本文の基準の大きさ（等倍）。
@@ -820,7 +855,23 @@ where
             a: text_color.a,
         };
 
-        let palette = Palette::new(text_color);
+        let mut palette = Palette::new(text_color);
+        // 自分の配色で上書きする（v2.3.0 R-05）
+        let over = self.colors;
+        let emphasis = over.emphasis.unwrap_or(emphasis);
+        let link = over.link.unwrap_or(link);
+        for (slot, color) in [
+            (&mut palette.keyword, over.keyword),
+            (&mut palette.string, over.string),
+            (&mut palette.comment, over.comment),
+            (&mut palette.number, over.number),
+            (&mut palette.kind, over.kind),
+            (&mut palette.function, over.function),
+        ] {
+            if let Some(color) = color {
+                *slot = color;
+            }
+        }
         // 強調の位置を測るのに使う。**レイアウトと同じ規則で測る**
         let search_measurer = IcedMeasurer::<Renderer>::new(self.text_size);
 
@@ -843,7 +894,7 @@ where
                             ),
                             ..Default::default()
                         },
-                        muted,
+                        over.quote_rule.unwrap_or(muted),
                     );
                 }
 
@@ -857,7 +908,7 @@ where
                             ),
                             ..Default::default()
                         },
-                        Color { a: 0.25, ..muted },
+                        over.table_rule.unwrap_or(Color { a: 0.25, ..muted }),
                     );
                 }
 
@@ -950,7 +1001,27 @@ where
                                     },
                                     ..Default::default()
                                 },
-                                Color { a: 0.10, ..muted },
+                                over.code_background.unwrap_or(Color { a: 0.10, ..muted }),
+                            );
+                        }
+
+                        // 目 grep（v2.3.0 R-05）。**ランの中だけを探す**（検索と同じ）
+                        for (range, color) in crate::io::marks::find_in(&run.text, self.eye) {
+                            let before = search_measurer.width(&run.text[..range.start], run.style);
+                            let width = search_measurer.width(&run.text[range.clone()], run.style);
+                            renderer.fill_quad(
+                                renderer::Quad {
+                                    bounds: Rectangle::new(
+                                        Point::new(x + before, line_y),
+                                        Size::new(width.max(1.0), line.height),
+                                    ),
+                                    border: iced::Border {
+                                        radius: 2.0.into(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                },
+                                color,
                             );
                         }
 
@@ -982,9 +1053,10 @@ where
 
                         // **色は役割から決める**（§16.10）。
                         // レイアウト層は色を持たず、ここでテーマに当てはめる
-                        let color = match run.decoration {
-                            RunDecoration::Emphasis => emphasis,
-                            RunDecoration::Link => link,
+                        let color = match (run.decoration, run.style, over.heading) {
+                            (RunDecoration::Emphasis, ..) => emphasis,
+                            (RunDecoration::Link, ..) => link,
+                            (_, crate::layout::TextStyle::Heading(_), Some(heading)) => heading,
                             _ => palette.of(run.role, text_color),
                         };
 

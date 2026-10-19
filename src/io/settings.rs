@@ -20,15 +20,21 @@ pub enum ThemePreference {
     System,
     /// iced の配色名（`Theme::to_string()` の値）
     Named(String),
+    /// 自分の配色の名前（v2.3.0 R-05。設定ファイルでは `custom:<名前>`）
+    Custom(String),
+    /// 日の出・日の入りに合わせて、明るい時間と暗い時間の配色を切り替える（v2.3.0 R-06）
+    Sun,
 }
 
 impl ThemePreference {
-    pub(crate) fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> std::borrow::Cow<'_, str> {
         match self {
-            Self::Light => "light",
-            Self::Dark => "dark",
-            Self::System => "system",
-            Self::Named(name) => name,
+            Self::Light => "light".into(),
+            Self::Dark => "dark".into(),
+            Self::System => "system".into(),
+            Self::Named(name) => name.as_str().into(),
+            Self::Custom(name) => format!("custom:{name}").into(),
+            Self::Sun => "sun".into(),
         }
     }
 
@@ -37,7 +43,11 @@ impl ThemePreference {
             "light" => Self::Light,
             "dark" => Self::Dark,
             "system" | "" => Self::System,
-            _ => Self::Named(value.trim().to_owned()),
+            "sun" => Self::Sun,
+            _ => match value.trim().strip_prefix("custom:") {
+                Some(name) => Self::Custom(name.to_owned()),
+                None => Self::Named(value.trim().to_owned()),
+            },
         }
     }
 }
@@ -70,11 +80,14 @@ impl ViewMode {
 }
 
 /// 起動時のウィンドウの置き方（v2.1.0 R-05）。
+///
+/// **既定は画面の中央**（v2.3.0 R-01）。v2.2 までの既定は「OS に任せる」（`Default`）。
+/// 設定ファイルに書いてある値はそのまま読むので、すでに使っている人の置き方は変わらない
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WindowPlacement {
-    /// OS に任せる（v2.0 と同じ）
-    #[default]
+    /// OS に任せる（v2.0 と同じ。v2.2 までの既定）
     Default,
+    #[default]
     Center,
     /// 前回終了時の位置と大きさ
     Last,
@@ -186,6 +199,8 @@ impl std::fmt::Display for ThemePreference {
             Self::Dark => f.write_str("暗い"),
             Self::System => f.write_str("OS に合わせる"),
             Self::Named(name) => f.write_str(name),
+            Self::Custom(name) => write!(f, "{name}（自分の配色）"),
+            Self::Sun => f.write_str("日の出・日の入りに合わせる"),
         }
     }
 }
@@ -223,6 +238,119 @@ impl std::fmt::Display for ImageMarkup {
         f.write_str(match self {
             Self::Img => "<img> タグ（大きさ付き。GitHub と同じ）",
             Self::Markdown => "![](…)（Markdown の画像）",
+        })
+    }
+}
+
+/// 2 つの文書の差分の出し方（v2.3.0 R-02）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffLayout {
+    /// 左右に並べる（分割表示と同じ）
+    #[default]
+    SideBySide,
+    /// 1 列に混ぜる（読むだけ）
+    Unified,
+}
+
+impl DiffLayout {
+    pub const ALL: [DiffLayout; 2] = [Self::SideBySide, Self::Unified];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SideBySide => "side_by_side",
+            Self::Unified => "unified",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "unified" => Self::Unified,
+            _ => Self::SideBySide,
+        }
+    }
+}
+
+impl std::fmt::Display for DiffLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SideBySide => "左右に並べる",
+            Self::Unified => "1 列に混ぜる（読むだけ）",
+        })
+    }
+}
+
+/// 差分で空白の違いをどう扱うか（v2.3.0 R-02 d）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffWhitespace {
+    #[default]
+    Exact,
+    IgnoreChanges,
+    IgnoreAll,
+}
+
+impl DiffWhitespace {
+    pub const ALL: [DiffWhitespace; 3] = [Self::Exact, Self::IgnoreChanges, Self::IgnoreAll];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::IgnoreChanges => "ignore_changes",
+            Self::IgnoreAll => "ignore_all",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ignore_changes" => Self::IgnoreChanges,
+            "ignore_all" => Self::IgnoreAll,
+            _ => Self::Exact,
+        }
+    }
+}
+
+impl std::fmt::Display for DiffWhitespace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Exact => "空白も比べる",
+            Self::IgnoreChanges => "空白の量の違いを無視",
+            Self::IgnoreAll => "空白をすべて無視",
+        })
+    }
+}
+
+/// 書き出すパッチの形式（v2.3.0 R-03）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PatchFormat {
+    /// unified diff（`git diff` と同じ）
+    #[default]
+    Unified,
+    /// context diff（`diff -c`）
+    Context,
+}
+
+impl PatchFormat {
+    pub const ALL: [PatchFormat; 2] = [Self::Unified, Self::Context];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unified => "unified",
+            Self::Context => "context",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "context" => Self::Context,
+            _ => Self::Unified,
+        }
+    }
+}
+
+impl std::fmt::Display for PatchFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unified => "unified diff（git diff と同じ）",
+            Self::Context => "context diff（diff -c）",
         })
     }
 }
@@ -318,11 +446,84 @@ pub struct Settings {
     pub title_format: String,
     /// ステータスバーの書式
     pub status_format: String,
+    /// 編集画面に記法の色を付けるか（v2.3.0 R-05 C-1）
+    pub editor_syntax: bool,
+    /// 編集画面の上に桁の目盛りを出すか（v2.3.0 R-07）
+    pub editor_ruler: bool,
+    /// 指定した桁に縦線を引くか（v2.3.0 R-07）
+    pub editor_guides: bool,
+    /// 縦線を引く桁（表示の幅で数える。小さい順）
+    pub editor_guide_columns: Vec<usize>,
+    /// 自分の配色（v2.3.0 R-05 C-2）。いくつでも持てる
+    pub palettes: Vec<super::palette::CustomPalette>,
+    /// 目 grep（v2.3.0 R-05 C-3）。登録した順
+    pub marks: Vec<super::marks::EyeMark>,
+    /// コードスニペット（v2.3.0 R-09）。**初めは初めからのもの**。変えたときだけ書く
+    pub snippets: Vec<crate::edit::snippet::Snippet>,
+    /// 目次に入れる見出しの深さ（v2.3.0 R-10。1〜6）
+    pub toc_depth: u8,
+    /// Markdown の検査をするか（v2.3.0 R-11）
+    pub lint_enabled: bool,
+    /// 外した検査の規則（`MD009` など）
+    pub lint_disabled: Vec<String>,
+    /// 日の出・日の入りで切り替えるときの場所（v2.3.0 R-06。北・東を正。既定は東京）
+    pub sun_latitude: f64,
+    pub sun_longitude: f64,
+    /// 日の出・日の入りをずらす分（＋は遅く、−は早く）
+    pub sun_rise_offset: i32,
+    pub sun_set_offset: i32,
+    /// 明るい時間と暗い時間の配色（**「日の出・日の入りに合わせる」は選べない**）
+    pub sun_day_theme: ThemePreference,
+    pub sun_night_theme: ThemePreference,
+    /// 差分の出し方（v2.3.0 R-02）
+    pub diff_layout: DiffLayout,
+    /// 差分で空白の違いをどう扱うか（R-02 d）
+    pub diff_whitespace: DiffWhitespace,
+    /// 差分で大文字と小文字の違いを無視するか
+    pub diff_ignore_case: bool,
+    /// 差分で改行コードの違いを無視するか
+    pub diff_ignore_eol: bool,
+    /// 書き出すパッチの形式（R-03）
+    pub patch_format: PatchFormat,
 
     /// キー割り当て（R-10）。**既定から変えたものだけ**持つ。
     /// 鍵は操作の名前、値は打鍵（`Ctrl+Shift+S`）
     pub keys: BTreeMap<String, String>,
 }
+
+/// 縦線を引ける桁の数と、桁の上限（v2.3.0 R-07）
+pub const GUIDE_COUNT_MAX: usize = 10;
+pub const GUIDE_COLUMN_MAX: usize = 1000;
+
+/// 縦線の桁を読む（`80, 120` のように `,` か空白で区切る）。**1 つでも読めなければ `None`**
+pub fn parse_guide_columns(text: &str) -> Option<Vec<usize>> {
+    let mut columns: Vec<usize> = Vec::new();
+    for part in text
+        .split([',', ' ', '、'])
+        .filter(|part| !part.trim().is_empty())
+    {
+        let column: usize = part.trim().parse().ok()?;
+        if column == 0 || column > GUIDE_COLUMN_MAX {
+            return None;
+        }
+        columns.push(column);
+    }
+    columns.sort_unstable();
+    columns.dedup();
+    (columns.len() <= GUIDE_COUNT_MAX).then_some(columns)
+}
+
+/// 縦線の桁を書く（`80, 120`）
+pub fn guide_columns_text(columns: &[usize]) -> String {
+    columns
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// 日の出・日の入りをずらせる分の上限（v2.3.0 R-06。±12 時間）
+pub const SUN_OFFSET_MAX: i32 = 720;
 
 /// 窓の題名の既定の書式（v2.2.0）。v2.1 までの題名と同じものになる
 pub const DEFAULT_TITLE_FORMAT: &str = "{readonly}{name}{dirty} — {app}";
@@ -373,7 +574,8 @@ impl Default for Settings {
             autosave_draft: true,
             recent: Vec::new(),
             recent_limit: MAX_RECENT,
-            window_placement: WindowPlacement::Default,
+            // **既定は画面の中央**（v2.3.0 R-01）。項目が無い設定ファイルもこれになる
+            window_placement: WindowPlacement::Center,
             window_custom: WindowRect::default(),
             last_window: None,
             last_maximized: false,
@@ -402,6 +604,28 @@ impl Default for Settings {
             // **v2.1 までの表示を再現する書式**（`app::template` の DEFAULT_TITLE / DEFAULT_STATUS と同じ）
             title_format: DEFAULT_TITLE_FORMAT.to_owned(),
             status_format: DEFAULT_STATUS_FORMAT.to_owned(),
+            // **既定で付ける**（C-1）
+            editor_syntax: true,
+            editor_ruler: false,
+            editor_guides: false,
+            editor_guide_columns: vec![80],
+            palettes: Vec::new(),
+            marks: Vec::new(),
+            snippets: crate::edit::snippet::defaults(),
+            toc_depth: crate::edit::toc::DEFAULT_DEPTH,
+            lint_enabled: true,
+            lint_disabled: Vec::new(),
+            sun_latitude: super::sun::TOKYO.0,
+            sun_longitude: super::sun::TOKYO.1,
+            sun_rise_offset: 0,
+            sun_set_offset: 0,
+            sun_day_theme: ThemePreference::Light,
+            sun_night_theme: ThemePreference::Dark,
+            diff_layout: DiffLayout::SideBySide,
+            diff_whitespace: DiffWhitespace::Exact,
+            diff_ignore_case: false,
+            diff_ignore_eol: false,
+            patch_format: PatchFormat::Unified,
             keys: BTreeMap::new(),
         }
     }
@@ -546,6 +770,42 @@ impl Settings {
             self.autosave,
             self.autosave_seconds,
         );
+        out.push_str(&format!("editor_syntax = {}\n", self.editor_syntax));
+        // 列番号（v2.3.0 R-07）
+        out.push_str(&format!(
+            "editor_ruler = {}\neditor_guides = {}\neditor_guide_columns = \"{}\"\n",
+            self.editor_ruler,
+            self.editor_guides,
+            guide_columns_text(&self.editor_guide_columns),
+        ));
+        out.push_str(&super::palette::to_lines(&self.palettes));
+        out.push_str(&super::marks::to_lines(&self.marks));
+        out.push_str(&crate::edit::snippet::to_lines(&self.snippets));
+        out.push_str(&format!("toc_depth = {}\n", self.toc_depth));
+        out.push_str(&format!(
+            "lint_enabled = {}\nlint_disabled = \"{}\"\n",
+            self.lint_enabled,
+            self.lint_disabled.join(","),
+        ));
+        // 日の出・日の入り（v2.3.0 R-06）
+        out.push_str(&format!(
+            "sun_latitude = {}\nsun_longitude = {}\nsun_rise_offset = {}\nsun_set_offset = {}\nsun_day_theme = \"{}\"\nsun_night_theme = \"{}\"\n",
+            self.sun_latitude,
+            self.sun_longitude,
+            self.sun_rise_offset,
+            self.sun_set_offset,
+            self.sun_day_theme.as_str(),
+            self.sun_night_theme.as_str(),
+        ));
+        // 差分の比べ方（v2.3.0 R-02）
+        out.push_str(&format!(
+            "diff_layout = \"{}\"\ndiff_whitespace = \"{}\"\ndiff_ignore_case = {}\ndiff_ignore_eol = {}\npatch_format = \"{}\"\n",
+            self.diff_layout.as_str(),
+            self.diff_whitespace.as_str(),
+            self.diff_ignore_case,
+            self.diff_ignore_eol,
+            self.patch_format.as_str(),
+        ));
         if let Some(last) = self.last_window {
             out.push_str(&format!(
                 "last_x = {}\nlast_y = {}\nlast_width = {}\nlast_height = {}\n",
@@ -586,6 +846,33 @@ impl Settings {
         out
     }
 
+    /// 日の出・日の入りの数の項目を入れる（v2.3.0 R-06）。**範囲の外・読めない値なら変えずに `false`**
+    pub fn set_sun_field(&mut self, key: &str, value: &str) -> bool {
+        let value = value.trim();
+        match key {
+            "sun_latitude" => match value.parse::<f64>() {
+                Ok(v) if (-90.0..=90.0).contains(&v) => self.sun_latitude = v,
+                _ => return false,
+            },
+            "sun_longitude" => match value.parse::<f64>() {
+                Ok(v) if (-180.0..=180.0).contains(&v) => self.sun_longitude = v,
+                _ => return false,
+            },
+            "sun_rise_offset" | "sun_set_offset" => match value.parse::<i32>() {
+                Ok(v) if (-SUN_OFFSET_MAX..=SUN_OFFSET_MAX).contains(&v) => {
+                    if key == "sun_rise_offset" {
+                        self.sun_rise_offset = v;
+                    } else {
+                        self.sun_set_offset = v;
+                    }
+                }
+                _ => return false,
+            },
+            _ => return false,
+        }
+        true
+    }
+
     /// 最近開いたものへ加える（先頭へ。重複は畳む）。
     pub fn remember(&mut self, path: &std::path::Path) {
         self.recent.retain(|known| known != path);
@@ -601,7 +888,7 @@ impl Settings {
     /// 外部クレートを使わない。読むのは平らな数項目だけで、
     /// TOML の全機能は要らない。
     pub fn from_toml(text: &str) -> Self {
-        const BOOL_KEYS: [&str; 16] = [
+        const BOOL_KEYS: [&str; 22] = [
             "toc_visible",
             "scroll_sync",
             "show_invisibles",
@@ -618,10 +905,19 @@ impl Settings {
             "watch_external",
             "reload_unmodified",
             "autosave",
+            "diff_ignore_case",
+            "diff_ignore_eol",
+            "editor_syntax",
+            "editor_ruler",
+            "editor_guides",
+            "lint_enabled",
         ];
 
         let mut settings = Self::default();
         let mut recent: Vec<(usize, std::path::PathBuf)> = Vec::new();
+        let mut marks: Vec<(usize, super::marks::EyeMark)> = Vec::new();
+        let mut snippets: Vec<(usize, crate::edit::snippet::Snippet)> = Vec::new();
+        let mut snippets_custom = false;
         let mut last = WindowRect::default();
         let mut last_seen = 0;
 
@@ -641,6 +937,22 @@ impl Settings {
                 continue;
             }
             let flag = value == "true";
+            // 自分の配色（`palette.<名前>.…`）。1 色 1 行
+            if super::palette::read_line(&mut settings.palettes, key, value) {
+                continue;
+            }
+            // 目 grep（`mark_<番号>`）
+            if super::marks::read_line(&mut marks, key, value) {
+                continue;
+            }
+            // スニペット（`snippet_<番号>`）。`snippets_custom` が立っていなければ初めからのもの
+            if crate::edit::snippet::read_line(&mut snippets, key, value) {
+                continue;
+            }
+            if key == "snippets_custom" {
+                snippets_custom = value == "true";
+                continue;
+            }
 
             match key {
                 "theme" => settings.theme = ThemePreference::parse(value),
@@ -661,6 +973,50 @@ impl Settings {
                 "paste_url_as_link" => settings.paste_url_as_link = flag,
                 "paste_images" => settings.paste_images = flag,
                 "image_markup" => settings.image_markup = ImageMarkup::parse(value),
+                "editor_syntax" => settings.editor_syntax = flag,
+                "editor_ruler" => settings.editor_ruler = flag,
+                "lint_enabled" => settings.lint_enabled = flag,
+                // 知らない番号は落とす（規則を減らしたとき）
+                "lint_disabled" => {
+                    settings.lint_disabled = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|id| crate::edit::lint::RULES.iter().any(|(rule, _)| rule == id))
+                        .map(str::to_owned)
+                        .collect();
+                }
+                "toc_depth" => {
+                    if let Ok(depth) = value.parse::<u8>() {
+                        if (1..=crate::edit::toc::MAX_DEPTH).contains(&depth) {
+                            settings.toc_depth = depth;
+                        }
+                    }
+                }
+                "editor_guides" => settings.editor_guides = flag,
+                "editor_guide_columns" => {
+                    if let Some(columns) = parse_guide_columns(value) {
+                        settings.editor_guide_columns = columns;
+                    }
+                }
+                "sun_latitude" | "sun_longitude" | "sun_rise_offset" | "sun_set_offset" => {
+                    settings.set_sun_field(key, value);
+                }
+                // **明るい時間・暗い時間に「日の出・日の入りに合わせる」は選べない**（巡回する）
+                "sun_day_theme" | "sun_night_theme" => {
+                    let theme = ThemePreference::parse(value);
+                    if theme != ThemePreference::Sun {
+                        if key == "sun_day_theme" {
+                            settings.sun_day_theme = theme;
+                        } else {
+                            settings.sun_night_theme = theme;
+                        }
+                    }
+                }
+                "diff_layout" => settings.diff_layout = DiffLayout::parse(value),
+                "diff_whitespace" => settings.diff_whitespace = DiffWhitespace::parse(value),
+                "diff_ignore_case" => settings.diff_ignore_case = flag,
+                "diff_ignore_eol" => settings.diff_ignore_eol = flag,
+                "patch_format" => settings.patch_format = PatchFormat::parse(value),
                 "watch_external" => settings.watch_external = flag,
                 "reload_unmodified" => settings.reload_unmodified = flag,
                 "autosave" => settings.autosave = flag,
@@ -794,6 +1150,12 @@ impl Settings {
         }
 
         // **鍵の番号で並べ直す。** 書いた順に読めるとは限らない
+        marks.sort_by_key(|(index, _)| *index);
+        settings.marks = marks.into_iter().map(|(_, mark)| mark).collect();
+        if snippets_custom {
+            snippets.sort_by_key(|(index, _)| *index);
+            settings.snippets = snippets.into_iter().map(|(_, snippet)| snippet).collect();
+        }
         recent.sort_by_key(|(index, _)| *index);
         settings.recent = recent
             .into_iter()
@@ -870,6 +1232,15 @@ impl Settings {
                 || key
                     .strip_prefix("recent_")
                     .is_some_and(|rest| rest.parse::<usize>().is_ok())
+                // 目 grep は一覧ごと（v2.3.0）。番号は並びなので、項目ごとには重ねられない
+                || key
+                    .strip_prefix("mark_")
+                    .is_some_and(|rest| rest.parse::<usize>().is_ok())
+                // スニペットも一覧ごと（v2.3.0）
+                || key == "snippets_custom"
+                || key
+                    .strip_prefix("snippet_")
+                    .is_some_and(|rest| rest.parse::<usize>().is_ok())
         };
 
         let keys: std::collections::BTreeSet<&String> = disk_entries
@@ -912,6 +1283,17 @@ impl Settings {
             disk.recent.clone()
         };
         merged.recent.truncate(merged.recent_limit.max(1));
+        // 目 grep は、この窓で変えていればこの窓の一覧、変えていなければディスクの一覧
+        merged.marks = if mine.marks != baseline.marks {
+            mine.marks.clone()
+        } else {
+            disk.marks.clone()
+        };
+        merged.snippets = if mine.snippets != baseline.snippets {
+            mine.snippets.clone()
+        } else {
+            disk.snippets.clone()
+        };
         merged
     }
 
@@ -1011,6 +1393,37 @@ mod tests {
             autosave_seconds: 10,
             title_format: "{path} {date:yyyy-mm-dd}".to_owned(),
             status_format: "{name} ・ {time}".to_owned(),
+            editor_syntax: false,
+            editor_ruler: true,
+            editor_guides: true,
+            editor_guide_columns: vec![72, 100],
+            palettes: vec![crate::io::palette::CustomPalette {
+                name: "夜用".to_owned(),
+                base: "dark".to_owned(),
+                colors: [("editor.heading".to_owned(), "#ff8800".to_owned())]
+                    .into_iter()
+                    .collect(),
+            }],
+            marks: vec![crate::io::marks::EyeMark::new("TODO".to_owned(), &[])],
+            toc_depth: 2,
+            lint_enabled: false,
+            lint_disabled: vec!["MD009".to_owned(), "MD026".to_owned()],
+            snippets: vec![crate::edit::snippet::Snippet {
+                name: "署名".to_owned(),
+                prefix: "sig".to_owned(),
+                body: "--\n$1".to_owned(),
+            }],
+            sun_latitude: 43.0618,
+            sun_longitude: 141.3545,
+            sun_rise_offset: -30,
+            sun_set_offset: 45,
+            sun_day_theme: ThemePreference::Named("Nord".to_owned()),
+            sun_night_theme: ThemePreference::Custom("夜用".to_owned()),
+            diff_layout: DiffLayout::Unified,
+            diff_whitespace: DiffWhitespace::IgnoreChanges,
+            diff_ignore_case: true,
+            diff_ignore_eol: true,
+            patch_format: PatchFormat::Context,
             keys,
         };
         assert_eq!(Settings::from_toml(&settings.to_toml()), settings);
@@ -1227,6 +1640,46 @@ mod tests {
         assert_eq!(read.recent, settings.recent);
     }
 
+    /// **すでに使っている人の置き方は変えない**（v2.3.0 R-01）。
+    ///
+    /// 既定は中央になったが、設定ファイルに書いてある値はそのまま読む。
+    /// 項目が無いときと、読めない値のときだけ中央にする
+    #[test]
+    fn the_window_is_centered_only_when_the_file_does_not_say() {
+        assert_eq!(
+            Settings::from_toml("").window_placement,
+            WindowPlacement::Center
+        );
+        assert_eq!(
+            Settings::from_toml("theme = \"dark\"\n").window_placement,
+            WindowPlacement::Center,
+            "項目が無い"
+        );
+        assert_eq!(
+            Settings::from_toml("window_position = \"default\"\n").window_placement,
+            WindowPlacement::Default,
+            "v2.2 までの既定を書いた設定ファイル"
+        );
+        assert_eq!(
+            Settings::from_toml("window_position = \"last\"\n").window_placement,
+            WindowPlacement::Last
+        );
+        assert_eq!(
+            Settings::from_toml("window_position = \"somewhere\"\n").window_placement,
+            WindowPlacement::Center,
+            "読めない値"
+        );
+        // 書き出して読み直しても変わらない（「OS に任せる」を選んだ人が中央にされない）
+        let chosen = Settings {
+            window_placement: WindowPlacement::Default,
+            ..Settings::default()
+        };
+        assert_eq!(
+            Settings::from_toml(&chosen.to_toml()).window_placement,
+            WindowPlacement::Default
+        );
+    }
+
     #[test]
     fn defaults_match_the_design() {
         let settings = Settings::default();
@@ -1237,8 +1690,8 @@ mod tests {
         assert!(settings.scroll_sync);
         assert_eq!(settings.toc_width, 280.0);
         assert_eq!(settings.split_ratio, 0.5);
-        // v2.1.0 の既定（要件定義書 §4）
-        assert_eq!(settings.window_placement, WindowPlacement::Default);
+        // v2.1.0 の既定（要件定義書 §4）。窓の置き方だけ v2.3.0 で中央に変えた（R-01）
+        assert_eq!(settings.window_placement, WindowPlacement::Center);
         assert_eq!(settings.always_on_top, OnTop::Off);
         assert!(settings.minimap);
         assert!(settings.continue_lists);

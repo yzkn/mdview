@@ -24,17 +24,23 @@ pub enum SettingsPage {
     Appearance,
     File,
     Assist,
+    /// コードスニペット（v2.3.0 R-09）
+    Snippets,
+    /// 2 つの文書を比べる（v2.3.0 R-02）
+    Compare,
     Keys,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 7] = [
+    pub const ALL: [SettingsPage; 9] = [
         Self::Window,
         Self::Editor,
         Self::Preview,
         Self::Appearance,
         Self::File,
         Self::Assist,
+        Self::Snippets,
+        Self::Compare,
         Self::Keys,
     ];
 
@@ -46,6 +52,8 @@ impl SettingsPage {
             Self::Appearance => "外観",
             Self::File => "ファイル",
             Self::Assist => "編集補助",
+            Self::Snippets => "スニペット",
+            Self::Compare => "比べる",
             Self::Keys => "キー割り当て",
         }
     }
@@ -71,6 +79,18 @@ pub enum SettingChange {
     Gremlins(bool),
     /// 右端で折り返す（v2.2.0）
     SoftWrap(bool),
+    /// 記法の色（v2.3.0 R-05）
+    EditorSyntax(bool),
+    /// 目次に入れる深さ（v2.3.0 R-10）
+    TocDepth(u8),
+    /// Markdown の検査（v2.3.0 R-11）。全体と、規則ごと
+    LintEnabled(bool),
+    LintRule(String, bool),
+    /// 列番号（v2.3.0 R-07）
+    EditorRuler(bool),
+    EditorGuides(bool),
+    /// 縦線の桁の欄に打った（**読めるときだけ変える**）
+    GuideColumns(String),
     RecentLimit(usize),
     AutosaveDraft(bool),
     WatchExternal(bool),
@@ -83,6 +103,23 @@ pub enum SettingChange {
     PasteImages(bool),
     ImageFolder(String),
     ImageMarkup(ImageMarkup),
+    /// 差分の比べ方（v2.3.0 R-02）
+    DiffLayout(settings::DiffLayout),
+    DiffWhitespace(settings::DiffWhitespace),
+    DiffIgnoreCase(bool),
+    DiffIgnoreEol(bool),
+    /// 書き出すパッチの形式（v2.3.0 R-03）
+    PatchFormat(settings::PatchFormat),
+    /// 自分の配色の操作（v2.3.0 R-05）
+    Palette(super::palette_view::PaletteChange),
+    /// 目 grep の操作（v2.3.0 R-05）
+    Eye(super::eyegrep::EyeChange),
+    /// スニペットの操作（v2.3.0 R-09）
+    Snippet(super::snippets::SnippetChange),
+    /// 日の出・日の入りの数の欄（v2.3.0 R-06。0: 緯度, 1: 経度, 2: 日の出のずらし, 3: 日の入りのずらし）
+    SunField(usize, String),
+    SunDayTheme(ThemePreference),
+    SunNightTheme(ThemePreference),
     /// 窓の題名の書式（v2.2.0）
     TitleFormat(String),
     /// ステータスバーの書式（v2.2.0）
@@ -106,6 +143,17 @@ pub struct SettingsScreen {
     /// 座標の欄（打ちかけの文字を保つ）
     pub custom: [String; 4],
     pub autosave_seconds: String,
+    /// 直している自分の配色の名前（v2.3.0 R-05）
+    pub palette: Option<String>,
+    /// 打ちかけの名前と色（**読めない値を打っている途中でも消さない**）
+    pub palette_name: String,
+    pub palette_colors: std::collections::BTreeMap<String, String>,
+    /// 日の出・日の入りの数の欄（打ちかけの文字を保つ。v2.3.0 R-06）
+    pub sun_fields: [String; 4],
+    /// 縦線の桁の欄（打ちかけの文字を保つ。v2.3.0 R-07）
+    pub guide_columns: String,
+    /// 直しているスニペット（v2.3.0 R-09）
+    pub snippet: Option<usize>,
 }
 
 impl SettingsScreen {
@@ -114,6 +162,8 @@ impl SettingsScreen {
         let fresh = Self::new(settings);
         self.custom = fresh.custom;
         self.autosave_seconds = fresh.autosave_seconds;
+        self.sun_fields = fresh.sun_fields;
+        self.guide_columns = fresh.guide_columns;
     }
 
     pub fn new(settings: &settings::Settings) -> Self {
@@ -128,14 +178,37 @@ impl SettingsScreen {
                 rect.height.to_string(),
             ],
             autosave_seconds: settings.autosave_seconds.to_string(),
+            palette: None,
+            palette_name: String::new(),
+            palette_colors: std::collections::BTreeMap::new(),
+            sun_fields: [
+                settings.sun_latitude.to_string(),
+                settings.sun_longitude.to_string(),
+                settings.sun_rise_offset.to_string(),
+                settings.sun_set_offset.to_string(),
+            ],
+            guide_columns: settings::guide_columns_text(&settings.editor_guide_columns),
+            snippet: None,
         }
     }
 }
 
 /// 選べる配色（R-13）。**明暗と OS を先に、iced の配色を後に**
-pub fn theme_choices() -> Vec<ThemePreference> {
+/// 日の出・日の入りの項目（v2.3.0 R-06）。**数の 4 つが先**（`SunField` の番号と同じ）
+pub(super) const SUN_KEYS: [&str; 6] = [
+    "sun_latitude",
+    "sun_longitude",
+    "sun_rise_offset",
+    "sun_set_offset",
+    "sun_day_theme",
+    "sun_night_theme",
+];
+
+pub fn theme_choices(settings: &Settings) -> Vec<ThemePreference> {
     let mut choices = vec![
         ThemePreference::System,
+        // 日の出・日の入りに合わせる（v2.3.0 R-06）
+        ThemePreference::Sun,
         ThemePreference::Light,
         ThemePreference::Dark,
     ];
@@ -146,6 +219,13 @@ pub fn theme_choices() -> Vec<ThemePreference> {
         }
         choices.push(ThemePreference::Named(name));
     }
+    // 自分の配色（v2.3.0 R-05）
+    choices.extend(
+        settings
+            .palettes
+            .iter()
+            .map(|palette| ThemePreference::Custom(palette.name.clone())),
+    );
     choices
 }
 
@@ -215,11 +295,23 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "tab_width",
             "show_gremlins",
             "soft_wrap",
+            "editor_syntax",
+            "editor_ruler",
+            "editor_guides",
+            "editor_guide_columns",
             "minimap",
             "minimap_width",
         ],
         SettingsPage::Preview => vec!["preview_font_size"],
-        SettingsPage::Appearance => vec!["theme", "title_format", "status_format"],
+        SettingsPage::Appearance => {
+            let mut items = vec!["theme"];
+            // 日の出・日の入りに合わせるときだけ出る（v2.3.0 R-06）
+            if settings.theme == ThemePreference::Sun {
+                items.extend(SUN_KEYS);
+            }
+            items.extend(["title_format", "status_format"]);
+            items
+        }
         SettingsPage::File => vec![
             "recent_limit",
             "autosave_draft",
@@ -235,6 +327,16 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "paste_images",
             "image_markup",
             "image_folder",
+            "toc_depth",
+            "lint_enabled",
+        ],
+        SettingsPage::Snippets => Vec::new(),
+        SettingsPage::Compare => vec![
+            "diff_layout",
+            "diff_whitespace",
+            "diff_ignore_case",
+            "diff_ignore_eol",
+            "patch_format",
         ],
         SettingsPage::Keys => Vec::new(),
     }
@@ -265,6 +367,12 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "recent_limit" => SettingChange::RecentLimit(value.trim().parse().ok()?),
         "show_gremlins" => SettingChange::Gremlins(flag()?),
         "soft_wrap" => SettingChange::SoftWrap(flag()?),
+        "editor_syntax" => SettingChange::EditorSyntax(flag()?),
+        "editor_ruler" => SettingChange::EditorRuler(flag()?),
+        "toc_depth" => SettingChange::TocDepth(value.trim().parse().ok()?),
+        "lint_enabled" => SettingChange::LintEnabled(flag()?),
+        "editor_guides" => SettingChange::EditorGuides(flag()?),
+        "editor_guide_columns" => SettingChange::GuideColumns(value.to_owned()),
         "minimap" => SettingChange::Minimap(flag()?),
         "autosave_draft" => SettingChange::AutosaveDraft(flag()?),
         "autosave" => SettingChange::Autosave(flag()?),
@@ -277,6 +385,17 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "paste_images" => SettingChange::PasteImages(flag()?),
         "image_markup" => SettingChange::ImageMarkup(ImageMarkup::parse(value)),
         "image_folder" => SettingChange::ImageFolder(value.to_owned()),
+        "diff_layout" => SettingChange::DiffLayout(settings::DiffLayout::parse(value)),
+        "diff_whitespace" => SettingChange::DiffWhitespace(settings::DiffWhitespace::parse(value)),
+        "diff_ignore_case" => SettingChange::DiffIgnoreCase(flag()?),
+        "diff_ignore_eol" => SettingChange::DiffIgnoreEol(flag()?),
+        "patch_format" => SettingChange::PatchFormat(settings::PatchFormat::parse(value)),
+        "sun_latitude" => SettingChange::SunField(0, value.to_owned()),
+        "sun_longitude" => SettingChange::SunField(1, value.to_owned()),
+        "sun_rise_offset" => SettingChange::SunField(2, value.to_owned()),
+        "sun_set_offset" => SettingChange::SunField(3, value.to_owned()),
+        "sun_day_theme" => SettingChange::SunDayTheme(ThemePreference::parse(value)),
+        "sun_night_theme" => SettingChange::SunNightTheme(ThemePreference::parse(value)),
         "title_format" => SettingChange::TitleFormat(value.to_owned()),
         "status_format" => SettingChange::StatusFormat(value.to_owned()),
         _ => return None,
@@ -419,6 +538,30 @@ impl App {
             SettingChange::TabWidth(width) => self.settings.tab_width = width.clamp(1, 16),
             SettingChange::Gremlins(on) => self.settings.show_gremlins = on,
             SettingChange::SoftWrap(on) => self.settings.soft_wrap = on,
+            SettingChange::EditorSyntax(on) => self.settings.editor_syntax = on,
+            SettingChange::EditorRuler(on) => self.settings.editor_ruler = on,
+            SettingChange::LintEnabled(on) => self.settings.lint_enabled = on,
+            SettingChange::LintRule(rule, on) => {
+                self.settings.lint_disabled.retain(|id| *id != rule);
+                if !on {
+                    self.settings.lint_disabled.push(rule);
+                    self.settings.lint_disabled.sort();
+                }
+            }
+            SettingChange::TocDepth(depth) => {
+                if (1..=crate::edit::toc::MAX_DEPTH).contains(&depth) {
+                    self.settings.toc_depth = depth;
+                }
+            }
+            SettingChange::EditorGuides(on) => self.settings.editor_guides = on,
+            SettingChange::GuideColumns(typed) => {
+                if let Some(screen) = self.settings_screen.as_mut() {
+                    screen.guide_columns.clone_from(&typed);
+                }
+                if let Some(columns) = settings::parse_guide_columns(&typed) {
+                    self.settings.editor_guide_columns = columns;
+                }
+            }
             SettingChange::RecentLimit(limit) => {
                 self.settings.recent_limit = limit.clamp(1, settings::RECENT_LIMIT_MAX);
                 self.settings.recent.truncate(self.settings.recent_limit);
@@ -455,6 +598,48 @@ impl App {
             SettingChange::PasteUrl(on) => self.settings.paste_url_as_link = on,
             SettingChange::PasteImages(on) => self.settings.paste_images = on,
             SettingChange::ImageMarkup(markup) => self.settings.image_markup = markup,
+            // **比べている最中なら、その場で比べ直す**（v2.3.0 R-02 d）
+            SettingChange::DiffLayout(layout) => {
+                self.settings.diff_layout = layout;
+                task = self.sync_diff_options();
+            }
+            SettingChange::DiffWhitespace(whitespace) => {
+                self.settings.diff_whitespace = whitespace;
+                task = self.sync_diff_options();
+            }
+            SettingChange::DiffIgnoreCase(on) => {
+                self.settings.diff_ignore_case = on;
+                task = self.sync_diff_options();
+            }
+            SettingChange::DiffIgnoreEol(on) => {
+                self.settings.diff_ignore_eol = on;
+                task = self.sync_diff_options();
+            }
+            SettingChange::PatchFormat(format) => self.settings.patch_format = format,
+            SettingChange::Palette(change) => self.apply_palette(change),
+            SettingChange::Eye(change) => self.apply_eye(change),
+            SettingChange::Snippet(change) => self.apply_snippet(change),
+            SettingChange::SunField(index, value) => {
+                if let Some(screen) = self.settings_screen.as_mut() {
+                    if let Some(field) = screen.sun_fields.get_mut(index) {
+                        field.clone_from(&value);
+                    }
+                }
+                if let Some(key) = SUN_KEYS.get(index) {
+                    self.settings.set_sun_field(key, &value);
+                }
+            }
+            // 明るい時間・暗い時間に「日の出・日の入りに合わせる」は選べない（巡回する）
+            SettingChange::SunDayTheme(theme) => {
+                if theme != ThemePreference::Sun {
+                    self.settings.sun_day_theme = theme;
+                }
+            }
+            SettingChange::SunNightTheme(theme) => {
+                if theme != ThemePreference::Sun {
+                    self.settings.sun_night_theme = theme;
+                }
+            }
             // **`"` と改行は入れさせない**（設定ファイルに書けず、次に起動すると消える）
             SettingChange::TitleFormat(format) => {
                 if quotable_format(&format) {
@@ -562,11 +747,13 @@ impl App {
 
         let body: Element<'a, Message> = match screen.page {
             SettingsPage::Window => self.window_page(screen),
-            SettingsPage::Editor => self.editor_page(),
+            SettingsPage::Editor => self.editor_page(screen),
             SettingsPage::Preview => self.preview_page(),
-            SettingsPage::Appearance => self.appearance_page(),
+            SettingsPage::Appearance => self.appearance_page(screen),
             SettingsPage::File => self.file_page(screen),
             SettingsPage::Assist => self.assist_page(),
+            SettingsPage::Snippets => self.snippets_page(screen),
+            SettingsPage::Compare => self.compare_page(),
             SettingsPage::Keys => self.keys_page(screen),
         };
 
@@ -574,13 +761,14 @@ impl App {
             .map(|path| format!("設定ファイル: {}", path.display()))
             .unwrap_or_else(|| "設定ファイルの置き場が分かりません（保存されません）".to_owned());
 
-        container(
+        let page = container(
             column![
                 row![
                     text("設定").size(18),
                     iced::widget::Space::new().width(Length::Fill),
                     button(text("閉じる").size(13))
                         .padding([6, 16])
+                        .style(super::fluent::accent)
                         .on_press(Message::CloseSettings),
                 ]
                 .align_y(iced::Alignment::Center),
@@ -596,10 +784,12 @@ impl App {
             ]
             .spacing(10),
         )
+        // **ほかのダイアログと同じ浮き上がる面**（v2.3.0 R-12）
         .padding(16)
         .width(Length::Fill)
         .height(Length::Fill)
-        .into()
+        .style(super::fluent::card);
+        container(page).padding(12).into()
     }
 
     fn window_page<'a>(&'a self, screen: &'a SettingsScreen) -> Element<'a, Message> {
@@ -685,7 +875,7 @@ impl App {
         page.into()
     }
 
-    fn editor_page(&self) -> Element<'_, Message> {
+    fn editor_page<'a>(&'a self, screen: &'a SettingsScreen) -> Element<'a, Message> {
         let s = &self.settings;
         let d = Settings::default();
         column![
@@ -780,6 +970,55 @@ impl App {
                 differs(&s.soft_wrap, &d.soft_wrap, SettingChange::SoftWrap(d.soft_wrap)),
             ),
             note("大きいファイルでは縦の位置の計算が重いため、設定を入れても折り返しません。"),
+            // 列番号（v2.3.0 R-07）
+            with_reset(
+                toggle(
+                    "編集画面の上に桁の目盛り（ルーラー）を出す",
+                    s.editor_ruler,
+                    SettingChange::EditorRuler
+                ),
+                differs(
+                    &s.editor_ruler,
+                    &d.editor_ruler,
+                    SettingChange::EditorRuler(d.editor_ruler)
+                ),
+            ),
+            with_reset(
+                toggle(
+                    "指定した桁に縦線を引く",
+                    s.editor_guides,
+                    SettingChange::EditorGuides
+                ),
+                differs(
+                    &s.editor_guides,
+                    &d.editor_guides,
+                    SettingChange::EditorGuides(d.editor_guides)
+                ),
+            ),
+            with_reset(
+                line(
+                    "縦線を引く桁（, で区切る）",
+                    text_input("80, 120", &screen.guide_columns)
+                        .on_input(|v| Message::Setting(SettingChange::GuideColumns(v)))
+                        .size(12)
+                        .width(Length::Fixed(160.0)),
+                ),
+                reset_change("editor_guide_columns", s),
+            ),
+            note("桁は表示の幅で数えます（全角は 2 桁、タブはタブ幅で広げます）。"),
+            // 記法の色（v2.3.0 R-05 C-1）
+            with_reset(
+                toggle(
+                    "見出し・強調・コード・リンクなどに色を付ける",
+                    s.editor_syntax,
+                    SettingChange::EditorSyntax
+                ),
+                differs(
+                    &s.editor_syntax,
+                    &d.editor_syntax,
+                    SettingChange::EditorSyntax(d.editor_syntax)
+                ),
+            ),
             heading("ミニマップ"),
             with_reset(
                 toggle(
@@ -845,15 +1084,15 @@ impl App {
         .into()
     }
 
-    fn appearance_page(&self) -> Element<'_, Message> {
+    fn appearance_page<'a>(&'a self, screen: &'a SettingsScreen) -> Element<'a, Message> {
         let d = Settings::default();
-        column![
+        let page = column![
             heading("配色"),
             with_reset(
                 line(
                     "配色",
                     pick_list(
-                        theme_choices(),
+                        theme_choices(&self.settings),
                         Some(self.settings.theme.clone()),
                         |theme| { Message::Setting(SettingChange::Theme(theme)) }
                     )
@@ -866,6 +1105,8 @@ impl App {
                 ),
             ),
             note("本文・選択・検索の色は、配色の文字色から作ります。"),
+            // 日の出・日の入りに合わせるとき（v2.3.0 R-06）
+            self.sun_section(screen),
             heading("窓の題名とステータスバー"),
             with_reset(
                 line(
@@ -903,8 +1144,12 @@ impl App {
                 "{encoding} の所は押すと文字コードを選べます。書式から外すと押す所も無くなります。"
             ),
         ]
-        .spacing(10)
-        .into()
+        .spacing(10);
+        // 自分の配色（v2.3.0 R-05）
+        page.push(self.palette_section(screen))
+            // 目 grep（v2.3.0 R-05）
+            .push(self.eye_section())
+            .into()
     }
 
     fn file_page<'a>(&'a self, screen: &'a SettingsScreen) -> Element<'a, Message> {
@@ -1008,6 +1253,185 @@ impl App {
         .into()
     }
 
+    /// 日の出・日の入りに合わせるときの欄（v2.3.0 R-06）。**今日の時刻も出す**
+    fn sun_section<'a>(&'a self, screen: &'a SettingsScreen) -> Element<'a, Message> {
+        let s = &self.settings;
+        if s.theme != ThemePreference::Sun {
+            return column![].into();
+        }
+        let field = |label: &'a str, index: usize| {
+            with_reset(
+                line(
+                    label,
+                    text_input("", &screen.sun_fields[index])
+                        .on_input(move |v| Message::Setting(SettingChange::SunField(index, v)))
+                        .size(12)
+                        .width(Length::Fixed(120.0)),
+                ),
+                reset_change(SUN_KEYS[index], s),
+            )
+        };
+        let choices: Vec<ThemePreference> = theme_choices(s)
+            .into_iter()
+            .filter(|choice| *choice != ThemePreference::Sun)
+            .collect();
+
+        // 今日の日の出・日の入り（ずらしたあと）と、いまどちらか
+        let now = chrono::Utc::now();
+        let today = now.with_timezone(&chrono::Local).date_naive();
+        let shown = match crate::io::sun::times(today, s.sun_latitude, s.sun_longitude) {
+            crate::io::sun::SunTimes::Normal { rise, set } => {
+                let local = |time: chrono::DateTime<chrono::Utc>, offset: i32| {
+                    (time + chrono::Duration::minutes(offset.into()))
+                        .with_timezone(&chrono::Local)
+                        .format("%H:%M")
+                        .to_string()
+                };
+                format!(
+                    "今日は {} から明るい配色、{} から暗い配色（ずらしたあとの時刻）",
+                    local(rise, s.sun_rise_offset),
+                    local(set, s.sun_set_offset)
+                )
+            }
+            crate::io::sun::SunTimes::AlwaysUp => {
+                "今日は一日中日が出ています（明るい配色）".to_owned()
+            }
+            crate::io::sun::SunTimes::AlwaysDown => {
+                "今日は一日中日が出ません（暗い配色）".to_owned()
+            }
+        };
+        let day = crate::io::sun::is_day(
+            now,
+            today,
+            s.sun_latitude,
+            s.sun_longitude,
+            s.sun_rise_offset,
+            s.sun_set_offset,
+        );
+
+        column![
+            heading("日の出・日の入り"),
+            field("緯度（北が＋）", 0),
+            field("経度（東が＋）", 1),
+            note("既定は東京（35.6895, 139.6917）。ネットにはつながず計算で求めます（誤差 1〜2 分）。"),
+            field("日の出をずらす（分。＋で遅く）", 2),
+            field("日の入りをずらす（分。＋で遅く）", 3),
+            with_reset(
+                line(
+                    "明るい時間の配色",
+                    pick_list(choices.clone(), Some(s.sun_day_theme.clone()), |theme| {
+                        Message::Setting(SettingChange::SunDayTheme(theme))
+                    })
+                    .text_size(12),
+                ),
+                reset_change("sun_day_theme", s),
+            ),
+            with_reset(
+                line(
+                    "暗い時間の配色",
+                    pick_list(choices, Some(s.sun_night_theme.clone()), |theme| {
+                        Message::Setting(SettingChange::SunNightTheme(theme))
+                    })
+                    .text_size(12),
+                ),
+                reset_change("sun_night_theme", s),
+            ),
+            note(if day {
+                "いまは明るい時間です。"
+            } else {
+                "いまは暗い時間です。"
+            }),
+            text(shown).size(11),
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    /// 比べる（v2.3.0 R-02）。**比べる画面の帯からも同じものを変えられる**
+    fn compare_page(&self) -> Element<'_, Message> {
+        let s = &self.settings;
+        let d = Settings::default();
+        column![
+            heading("出し方"),
+            with_reset(
+                line(
+                    "出し方",
+                    pick_list(
+                        settings::DiffLayout::ALL.to_vec(),
+                        Some(s.diff_layout),
+                        |layout| Message::Setting(SettingChange::DiffLayout(layout))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.diff_layout,
+                    &d.diff_layout,
+                    SettingChange::DiffLayout(d.diff_layout)
+                ),
+            ),
+            heading("無視する違い"),
+            with_reset(
+                line(
+                    "空白",
+                    pick_list(
+                        settings::DiffWhitespace::ALL.to_vec(),
+                        Some(s.diff_whitespace),
+                        |whitespace| Message::Setting(SettingChange::DiffWhitespace(whitespace))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.diff_whitespace,
+                    &d.diff_whitespace,
+                    SettingChange::DiffWhitespace(d.diff_whitespace)
+                ),
+            ),
+            with_reset(
+                toggle(
+                    "大文字と小文字の違いを無視する",
+                    s.diff_ignore_case,
+                    SettingChange::DiffIgnoreCase
+                ),
+                differs(
+                    &s.diff_ignore_case,
+                    &d.diff_ignore_case,
+                    SettingChange::DiffIgnoreCase(d.diff_ignore_case)
+                ),
+            ),
+            with_reset(
+                toggle(
+                    "改行コード（CRLF と LF）の違いを無視する",
+                    s.diff_ignore_eol,
+                    SettingChange::DiffIgnoreEol
+                ),
+                differs(
+                    &s.diff_ignore_eol,
+                    &d.diff_ignore_eol,
+                    SettingChange::DiffIgnoreEol(d.diff_ignore_eol)
+                ),
+            ),
+            heading("パッチ"),
+            with_reset(
+                line(
+                    "書き出す形式",
+                    pick_list(
+                        settings::PatchFormat::ALL.to_vec(),
+                        Some(s.patch_format),
+                        |format| Message::Setting(SettingChange::PatchFormat(format))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.patch_format,
+                    &d.patch_format,
+                    SettingChange::PatchFormat(d.patch_format)
+                ),
+            ),
+        ]
+        .spacing(10)
+        .into()
+    }
+
     fn assist_page(&self) -> Element<'_, Message> {
         let s = &self.settings;
         let d = Settings::default();
@@ -1087,6 +1511,40 @@ impl App {
                     SettingChange::ImageFolder(d.image_folder.clone())
                 ),
             ),
+            // 目次（v2.3.0 R-10）
+            heading("目次"),
+            with_reset(
+                line(
+                    "目次に入れる見出しの深さ",
+                    pick_list(
+                        (1..=crate::edit::toc::MAX_DEPTH).collect::<Vec<u8>>(),
+                        Some(s.toc_depth),
+                        |depth| Message::Setting(SettingChange::TocDepth(depth))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.toc_depth,
+                    &d.toc_depth,
+                    SettingChange::TocDepth(d.toc_depth)
+                ),
+            ),
+            note("編集メニューの「目次を入れる」で <!-- TOC --> と <!-- /TOC --> の間に目次を入れます。保存のたびに作り直し、番号を振った見出しも振り直します。"),
+            // Markdown の検査（v2.3.0 R-11）
+            heading("Markdown の検査"),
+            with_reset(
+                toggle(
+                    "検査して、指摘を波線で示す（一覧は 表示 → Markdown の検査の一覧）",
+                    s.lint_enabled,
+                    SettingChange::LintEnabled
+                ),
+                differs(
+                    &s.lint_enabled,
+                    &d.lint_enabled,
+                    SettingChange::LintEnabled(d.lint_enabled)
+                ),
+            ),
+            self.lint_rules_section(),
         ]
         .spacing(10)
         .into()

@@ -9,6 +9,12 @@ pub mod gremlin;
 pub mod markdown;
 // 移動の判定（v2.1.0 R-07 / R-18 / R-19）
 pub mod navigate;
+// コードスニペット（v2.3.0 R-08 / R-09）
+pub mod snippet;
+// 目次を作る・見出しに番号を振る（v2.3.0 R-10）
+pub mod toc;
+// Markdown の検査（v2.3.0 R-11）
+pub mod lint;
 pub mod transform;
 
 /// 対応する括弧を探す（§4.8）。
