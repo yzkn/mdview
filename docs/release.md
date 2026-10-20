@@ -575,6 +575,8 @@ gh run view <実行 ID> --log-failed
 |deb の煙試験で `dependency problems - leaving unconfigured`|`dpkg -i` は依存を取りに行かない。**`apt-get install ./…` で入れる**（v2.1.1 で直した）|
 |「まっさらな環境で deb を起動する」が終わらない|`docker run` に `--init` が無い。`xvfb-run` が PID 1 になり、Xvfb の準備完了の合図が届かずに待ち続ける。段の `timeout-minutes: 10` で切れる|
 |「まっさらな環境で deb を起動する」で `cannot open shared object file`|実行時に読み込むライブラリが `.deb` の `Depends` から漏れている。`packaging/linux/build-deb.sh` の `Depends` に足す|
+|Linux の段で `You are running out of disk space`・`dpkg returned an error code (2)`|ランナーの空きが足りない（1 つのジョブで 3 通りに組み、包み、docker で試すため）。検査のジョブの最初の「ランナーの空きを広げる（Linux）」で使わない道具を消している（2026-10-20）。前後の `df -h /` で空いた量を見る。まだ足りなければ、消すものを足す|
+|「main の先頭（…）ではない。後の実行に任せる」と出て Release が出来ない|CI が終わる前に main へ続けて push した。Actions のトークンは、ブランチの先頭でないコミットに Release（タグ）を作れない（403 になる）ので、後から push した分の実行が配る。そちらの結果を見る|
 
 GUI 試験で踏んだもの（v2.1.1 で直した）:
 

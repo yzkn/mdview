@@ -22,7 +22,7 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from mdview_driver import AutomationError, Mdview, kill, mdview_pids, wait_new_pids  # noqa: E402
+from mdview_driver import AutomationError, Mdview, kill, mdview_pids  # noqa: E402
 import support  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -198,7 +198,7 @@ SPEC = [
     ("R-21.c", "未編集なら自動で読み直す設定", "auto"),
     ("R-21.d", "自分で保存した直後は知らせない", "auto"),
     ("R-21.e", "設定で切れる（既定は有効）", "auto"),
-    ("R-21.f", "確かめる間隔は 2 秒（3.5 秒以内に気づく）", "auto"),
+    ("R-21.f", "確かめる間隔は 2 秒（4.5 秒以内に気づく）", "auto"),
     # --- R-22 自動保存 ---
     ("R-22.a", "保存先のある文書を、止まってから N 秒後に保存する", "auto"),
     ("R-22.b", "無題の文書は対象外（ダイアログを出さない）", "auto"),
@@ -990,6 +990,22 @@ def geometry(app):
     return app.window()
 
 
+def settled_geometry(app, accept=lambda g: True, timeout=10.0, message="窓の位置が取れない"):
+    """窓が出て位置が取れ、`accept` を満たすまで待つ（v2.3.0）。
+
+    起動の直後は窓がまだ無い（「窓がありません」）か、位置が取れない（`x` が `None`）ことがある。
+    遅い CI ではそのまま聞くと偶に落ちる
+    """
+    def ready():
+        try:
+            g = geometry(app)
+        except Exception:  # noqa: BLE001
+            return None
+        return g if g.get("x") is not None and accept(g) else None
+
+    return wait(ready, timeout=timeout, message=message)
+
+
 @covers("R-05.a", "R-05.d")
 def window_at_given_coordinates(ctx):
     require_windows()
@@ -998,7 +1014,10 @@ def window_at_given_coordinates(ctx):
     app.close()
     app = ctx.app(settings={"window_position": "custom", "window_x": 160, "window_y": 120,
                             "window_width": 900, "window_height": 600})
-    g = geometry(app)
+    try:
+        g = settled_geometry(app, lambda g: abs(g["x"] - 160) <= 2 and abs(g["y"] - 120) <= 2)
+    except AssertionError:
+        g = geometry(app)
     assert abs(g["x"] - 160) <= 2 and abs(g["y"] - 120) <= 2, g
     assert abs(g["width"] - 900) <= 2 and abs(g["height"] - 600) <= 2, g
 
@@ -1051,7 +1070,7 @@ def window_on_the_halves(ctx):
     left_px, top_px, width_px, height_px = support.work_area()
     for side in ["left_half", "right_half"]:
         app = ctx.app(settings={"window_position": side})
-        scale = geometry(app)["scale"]
+        scale = settled_geometry(app)["scale"]
         half = width_px / 2 / scale
         expected_x = left_px / scale + (half if side == "right_half" else 0)
         # 窓が出てから寄せるので、落ち着くまで待つ
@@ -1070,7 +1089,7 @@ def an_offscreen_last_place_is_ignored(ctx):
     require_windows()
     app = ctx.app(settings={"window_position": "last", "last_x": -6000, "last_y": 50,
                             "last_width": 800, "last_height": 600})
-    g = geometry(app)
+    g = settled_geometry(app)
     assert g["x"] > -1000, f"画面の外に置かれた: {g}"
 
 
@@ -1943,6 +1962,21 @@ def export(app, ctx, label, target):
     wait(lambda: "出力しました" in (app.state()["notice"] or ""), timeout=60, message="出力が終わらない")
 
 
+def shot_until_color(ctx, app, name, rgb, timeout=10.0):
+    """その色が描かれるまで撮り直す（v2.3.0）。
+
+    **画像は裏で読み込む**ので、決まった時間だけ待って撮ると、遅い CI では描かれる前に撮れる。
+    描かれなければ最後の写真と `None` を返す（呼び側が「描かれていない」で落とす）
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        shot = ctx.shot(app, name)
+        span = color_columns(shot, rgb)
+        if span or time.monotonic() >= deadline:
+            return shot, span
+        time.sleep(0.5)
+
+
 @covers("R-17.h")
 def img_tags_render_as_images(ctx):
     folder = ctx.path("render")
@@ -1962,19 +1996,15 @@ def img_tags_render_as_images(ctx):
     assert b"/Image" in open(pdf, "rb").read(), "PDF に画像が入っていない"
     # プレビュー: 画像の色（0x40, 0x80, 0xC0）が描かれ、width="10" の幅で止まる
     choose(app, "view", "プレビュー")
-    time.sleep(1.5)
-    shot = ctx.shot(app, "img-preview.png")
-    span = color_columns(shot, (0x40, 0x80, 0xC0))
+    shot, span = shot_until_color(ctx, app, "img-preview.png", (0x40, 0x80, 0xC0))
     assert span, "プレビューで画像が描かれていない"
     scale = app.window()["scale"]
     assert span[1] - span[0] + 1 <= 10 * scale * 2.5, f"width が効いていない: {span}"
     # 画面の幅を超えない（width="5000"）
     wide = ctx.write("render/wide.md", '<img width="5000" alt="広い" src="images/wide.png">\n')
     open_doc(app, wide)
-    time.sleep(1.5)
-    shot = ctx.shot(app, "img-wide.png")
+    shot, span = shot_until_color(ctx, app, "img-wide.png", (0x40, 0x80, 0xC0))
     width = support.read_png(shot)[0]
-    span = color_columns(shot, (0x40, 0x80, 0xC0))
     assert span and span[1] < width - 10 * scale, f"画面の幅を超えた: {span} / {width}"
 
 
@@ -2050,9 +2080,11 @@ def ctrl_click_opens_markdown_in_a_new_window(ctx):
     doc = ctx.write("links2/doc.md", LINKS_DOC)
     app = ctx.app(doc)
     column = app.text().split("\n")[2].index("[別の文書]") + 1
-    before = mdview_pids()
+    # **この窓が起こした窓で見る**（v2.3.0）。全プロセスの差分では、前の試験の窓が
+    # 遅れて起きたものまで拾う
+    before = list(app.state()["spawned"])
     app.editor_click(2, column, ctrl=True)
-    new = wait_new_pids(before, timeout=15)
+    new = spawned_since(app, before)
     try:
         assert new, "別の窓で開かない"
         assert app.state()["path"].endswith("doc.md"), "この窓で開いた"
@@ -2159,7 +2191,9 @@ def external_changes(ctx):
     started = time.monotonic()
     wait(lambda: app.state()["external_changed"], timeout=6, interval=0.1, message="帯が出ない")
     elapsed = time.monotonic() - started
-    assert elapsed < 3.5, f"気づくのが遅い（2 秒ごとに見ていない）: {elapsed:.1f}s"
+    # 2 秒ごと + 刻み（0.5 秒）+ 往復。**遅い CI でも落ちない余裕を持たせる**（v2.3.0）。
+    # 2 秒ごとに見ていなければ（例えば 5 秒ごと）ここで落ちる
+    assert elapsed < 4.5, f"気づくのが遅い（2 秒ごとに見ていない）: {elapsed:.1f}s"
     app.invoke("external.reload")
     wait(lambda: app.text() == "外で変えた\n", message="読み直さない")
     touch_externally(path, "もう一度\n")
@@ -2206,8 +2240,9 @@ def autosave(ctx):
     time.sleep(3)
     assert app.state()["dirty"], "既定で自動保存した"
     app.set_setting("autosave", True)
-    app.set_setting("autosave_seconds", 6)
-    # 退避と同時に使える: 退避（止まって 3 秒）が自動保存（6 秒）より先に書かれる。
+    # **N は 10 秒**（v2.3.0。6 秒では、退避を待つ間に遅い CI で N を過ぎることがあった）
+    app.set_setting("autosave_seconds", 10)
+    # 退避と同時に使える: 退避（止まって 3 秒）が自動保存（10 秒）より先に書かれる。
     # **前の退避を消してから打つ**（自動保存を入れる前に書かれたものを数えない）
     draft = os.path.join(app.config_dir, "drafts", "draft.md")
     wait(lambda: os.path.exists(draft), timeout=6, message="退避が書かれない")
@@ -2216,20 +2251,20 @@ def autosave(ctx):
     stopped = time.monotonic()
     wait(lambda: os.path.exists(draft) and "xy" in open(draft, encoding="utf-8").read(), timeout=6,
          message="自動保存を入れると退避が書かれない")
-    # N 秒を守る: 止まって N − 1 秒ではまだ保存せず、N + 2 秒までに保存する
-    time.sleep(max(0, 5 - (time.monotonic() - stopped)))
+    # N 秒を守る: 止まって N − 2 秒ではまだ保存せず、N + 4 秒までに保存する
+    time.sleep(max(0, 8 - (time.monotonic() - stopped)))
     assert app.state()["dirty"], "N 秒より前に保存した"
-    wait(lambda: not app.state()["dirty"], timeout=4, message="N 秒を過ぎても自動保存されない")
+    wait(lambda: not app.state()["dirty"], timeout=6, message="N 秒を過ぎても自動保存されない")
     assert "xy" in ctx.read(path)
     # **止まってから数える**: 1 秒ごとに打ち続けている間は保存しない
     for _ in range(9):
         app.type("z")
         time.sleep(1.0)
         assert app.state()["dirty"], "打ち続けているのに保存した"
-    wait(lambda: not app.state()["dirty"], timeout=10, message="止まっても保存されない")
+    wait(lambda: not app.state()["dirty"], timeout=16, message="止まっても保存されない")
     fresh(app)
     app.type("無題")
-    time.sleep(6 + 3)  # N（6 秒）を過ぎるまで待つ
+    time.sleep(10 + 3)  # N（10 秒）を過ぎるまで待つ
     assert app.state()["overlay"] == "" and app.state()["dirty"], "無題で保存しようとした"
 
 

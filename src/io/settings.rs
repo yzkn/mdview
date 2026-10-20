@@ -649,6 +649,19 @@ pub fn settings_path() -> Option<PathBuf> {
     settings_base().map(|base| base.join(FOLDER).join("settings.toml"))
 }
 
+/// `path` のロック用のファイルを排他で掴む（`Settings::lock`）。
+fn lock_at(path: &std::path::Path) -> Option<std::fs::File> {
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
 /// 名前を変える前の置き場。**読むときだけ使う。**
 fn legacy_settings_path() -> Option<PathBuf> {
     settings_base().map(|base| base.join(LEGACY_FOLDER).join("settings.toml"))
@@ -1189,6 +1202,21 @@ impl Settings {
             std::fs::create_dir_all(parent).map_err(|error| format!("{error}"))?;
         }
         std::fs::write(&path, self.to_toml()).map_err(|error| format!("{error}"))
+    }
+
+    /// 設定ファイルを読んで重ねて書く間、**他の窓に書かせない**（v2.3.0）。
+    ///
+    /// 窓は別のプロセスで動く（R-09）。2 つの窓がほぼ同時に「読む → 重ねる → 書く」を行うと、
+    /// 後から書いた窓は先の窓の変更を知らずに上書きし、先の窓もそれを取り込んで自分の変更を失う。
+    /// 書いている途中のファイルを読むと、欠けた設定を取り込む
+    /// （最近使ったファイルが 1 件消えた。公開側の CI の GUI 試験で見つかった）。
+    /// **書く側も読む側も掴む。** 一時ファイルからの置き換えにしないのは、Windows では
+    /// 他のプロセス（ウイルス対策など）が開いている間の置き換えが失敗することがあるため
+    /// 設定ファイルの隣の `settings.lock` を排他で掴む。**掴めなければ掴まずに進む**
+    /// （ロックの無いファイルシステムでも設定は書ける。競合の手当てが無くなるだけ）。
+    /// 返り値を落とすと離す
+    pub fn lock() -> Option<std::fs::File> {
+        lock_at(&settings_path()?.with_file_name("settings.lock"))
     }
 
     /// 項目ごとの値（TOML の 1 行 = 1 項目）。**突き合わせに使う**
@@ -1806,5 +1834,19 @@ mod tests {
         if let Some(path) = settings_path() {
             assert!(path.ends_with("mdview/settings.toml"));
         }
+    }
+
+    /// **掴んでいる間は、他の者は掴めない。** 離せば掴める（v2.3.0。窓をまたいで設定を書く）
+    #[test]
+    fn the_settings_lock_is_exclusive() {
+        let dir = std::env::temp_dir().join(format!("mdview-lock-test-{}", std::process::id()));
+        let path = dir.join("settings.lock");
+        let held = lock_at(&path).expect("掴める");
+        let other = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        assert!(other.try_lock().is_err(), "掴んでいる間に他が掴めた");
+        drop(held);
+        assert!(other.try_lock().is_ok(), "離しても掴めない");
+        drop(other);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

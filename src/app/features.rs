@@ -72,6 +72,26 @@ fn is_fence(line: &str) -> bool {
     trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
+/// **他のプロセスがクリップボードを開いている間は、少し待って試し直す**（v2.3.0）。
+///
+/// Windows のクリップボードは 1 度に 1 つのプロセスしか開けない。写した直後のアプリや
+/// クリップボードの履歴が開いていると、すぐには開けない（`ClipboardOccupied`）。
+/// 他の失敗はそのまま返す
+pub(super) fn retry_clipboard<T>(
+    mut action: impl FnMut() -> Result<T, arboard::Error>,
+) -> Result<T, arboard::Error> {
+    let mut tries = 0;
+    loop {
+        match action() {
+            Err(arboard::Error::ClipboardOccupied) if tries < 10 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// クリップボードの画像を読み、PNG で保存する（R-17）。
 ///
 /// **文字があれば画像は読まない。** Excel や Word から写すと、文字と
@@ -79,11 +99,11 @@ fn is_fence(line: &str) -> bool {
 ///
 /// 戻りは、画像が無ければ `None`（文字として貼る）。
 fn grab_image(target: Option<(std::path::PathBuf, String)>, folder: String) -> Option<ClipImage> {
-    let mut clipboard = arboard::Clipboard::new().ok()?;
-    if clipboard.get_text().is_ok_and(|text| !text.is_empty()) {
+    let mut clipboard = retry_clipboard(arboard::Clipboard::new).ok()?;
+    if retry_clipboard(|| clipboard.get_text()).is_ok_and(|text| !text.is_empty()) {
         return None;
     }
-    let image = clipboard.get_image().ok()?;
+    let image = retry_clipboard(|| clipboard.get_image()).ok()?;
 
     let Some((directory, stem)) = target else {
         return Some(ClipImage::NeedsPath);

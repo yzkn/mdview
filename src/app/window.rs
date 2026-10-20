@@ -37,6 +37,9 @@ pub struct Watch {
     pub pending: bool,
     /// 変わったことを知らせている最中か
     pub changed: bool,
+    /// 印を覚え直した回数（v2.3.0）。**覚え直す前に頼んだ確かめの結果は捨てる**。
+    /// 捨てないと、保存する前の古い印が保存の後に届き、自分の保存を外の変更と取り違える
+    pub generation: u64,
 }
 
 /// 確かめる間隔（要件定義書 R-21）。
@@ -521,6 +524,7 @@ impl App {
             checked: Some(Instant::now()),
             pending: false,
             changed: false,
+            generation: self.watch.generation.wrapping_add(1),
         };
     }
 
@@ -542,10 +546,21 @@ impl App {
         self.watch.pending = true;
         self.watch.checked = Some(Instant::now());
         // **別の糸で見る。** 遅い共有フォルダで UI を止めない（§4.3 と同じ）
-        Task::perform(async move { FileStamp::of(&path) }, Message::ExternalStamp)
+        let generation = self.watch.generation;
+        Task::perform(async move { FileStamp::of(&path) }, move |stamp| {
+            Message::ExternalStamp(generation, stamp)
+        })
     }
 
-    pub(super) fn external_checked(&mut self, stamp: Option<FileStamp>) -> Task<Message> {
+    pub(super) fn external_checked(
+        &mut self,
+        generation: u64,
+        stamp: Option<FileStamp>,
+    ) -> Task<Message> {
+        // **覚え直す前に頼んだものは捨てる**（v2.3.0）。`pending` は覚え直したときに戻してある
+        if generation != self.watch.generation {
+            return Task::none();
+        }
         self.watch.pending = false;
         let Some(stamp) = stamp else {
             // 消えた・読めない。**知らせない**（保存し直せば戻る）
@@ -582,6 +597,9 @@ impl App {
         self.watch.changed = false;
         // **いまのものを知っているものとする。** そうしないと次の刻みでまた出る
         self.watch.known = self.meta.path.as_deref().and_then(FileStamp::of);
+        // 頼んでいた確かめは捨てるので、待つのもやめる（待ったままだと二度と確かめない）
+        self.watch.generation = self.watch.generation.wrapping_add(1);
+        self.watch.pending = false;
     }
 
     /// 編集が止まってから上書き保存する（R-22）。
@@ -785,5 +803,29 @@ mod tests {
             app.escape_message(),
             Some(Message::ToggleFocusMode)
         ));
+    }
+
+    /// **覚え直す前に頼んだ確かめの結果は捨てる**（v2.3.0）。保存の前の古い印が
+    /// 保存の後に届いても、外の変更と取り違えない
+    #[test]
+    fn a_stale_external_check_is_dropped() {
+        let mut app = super::super::App::new().0;
+        app.settings.reload_unmodified = false;
+        let before = app.watch.generation;
+        app.reset_watch();
+        let saved = FileStamp {
+            modified: None,
+            len: 1,
+        };
+        app.watch.known = Some(saved);
+        let old = FileStamp {
+            modified: None,
+            len: 2,
+        };
+        let _ = app.external_checked(before, Some(old));
+        assert!(!app.watch.changed, "古い結果で帯が出た");
+        // いまの世代の結果なら知らせる
+        let _ = app.external_checked(app.watch.generation, Some(old));
+        assert!(app.watch.changed);
     }
 }

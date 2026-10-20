@@ -72,6 +72,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # **Linux のランナーの空きを広げる**（2026-10-20）。1 つのジョブで dist・dev・test の 3 通りに
+      # 組み、deb と AppImage を包み、まっさらな環境（docker）で入れて試すため、2026-10-19 の
+      # 本体の手動起動で「まっさらな環境で deb を起動する」の段が空き 61 MB で落ちた。
+      # ランナーに入っていて使わない道具（.NET・Android・GHC・CodeQL）を消す（20 GB 以上空く見込み。前後の df で確かめる）
+      - name: ランナーの空きを広げる（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
       - name: Rust ツールチェーンを用意する
         # **版は rust-toolchain.toml で固定している。** `stable` のままにすると
         # 手元と CI が別の版になり、clippy の指摘が増えた版で CI だけが落ちる
@@ -111,12 +123,22 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # **作ったアイコンを使い回す**（2026-10-20。B 案）。材料（SVG・作る example・依存の版）が
+      # 同じなら、できるものも同じ。当たれば example を組む・つなぐ（fat LTO）時間を丸ごと省く
+      - name: アイコンのキャッシュ
+        id: icons
+        uses: actions/cache@v6
+        with:
+          path: assets/icons
+          key: icons-${{ runner.os }}-${{ hashFiles('assets/icon.svg', 'assets/icon-small.svg', 'assets/icon-doc.svg', 'examples/make-icons.rs', 'Cargo.lock') }}
+
       # **検査より先に作る。** `build.rs` が Windows の実行ファイルへ埋めるため、
       # この時点で `assets/icons/mdview.ico` が要る。無いと黙って埋めずに通り、
       # アイコンと版数の無い実行ファイルを試験していた。
       # **ビルドと同じ `dist` で作る。** example も本体の依存を全部組むので、組み方が違うと依存を
       # 2 回組む（release で作っていたとき、Windows で約 13 分余計にかかった。2026-10-16）
       - name: アイコンを作る
+        if: steps.icons.outputs.cache-hit != 'true'
         run: cargo run --profile dist --target ${{ matrix.target }} --example make-icons
 
       - name: 書式
@@ -448,8 +470,15 @@ jobs:
           # **配った版は配り直さない。** タグが在れば何もしない（普段の push）。
           # タグは Release を公開したときに出来る（下書きのうちは出来ない）ので、
           # 途中で止まった下書きは「まだ配っていない」と見て作り直す
+          # **この実行のコミットが main の先頭でなければ配らない**（2026-10-20）。Actions のトークンは
+          # ブランチの先頭でないコミットへタグを打てず、Release を作る呼び出しが 403 で拒まれる
+          # （本体で踏んだ）。後から push した分の実行が、同じ版をまだ配っていないと見て配る
+          head=$(git ls-remote origin refs/heads/main | cut -f 1)
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
             echo "$tag は配布済み。リリースしない（版数を上げれば配る）"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$head" != "$GITHUB_SHA" ]; then
+            echo "$tag はまだ無いが、この実行（$GITHUB_SHA）は main の先頭（$head）ではない。後の実行に任せる"
             echo "release=false" >> "$GITHUB_OUTPUT"
           else
             echo "$tag はまだ無い。配る"

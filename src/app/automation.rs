@@ -1289,10 +1289,13 @@ impl App {
                 let result = CLIPBOARD.with_borrow_mut(|held| {
                     let clipboard = match held {
                         Some(clipboard) => clipboard,
-                        None => held.insert(arboard::Clipboard::new()?),
+                        None => {
+                            held.insert(super::features::retry_clipboard(arboard::Clipboard::new)?)
+                        }
                     };
+                    // **他のプロセスが開いていたら試し直す**（v2.3.0。CI で偶に失敗しうる）
                     if let Some(text) = arg("text") {
-                        clipboard.set_text(text)
+                        super::features::retry_clipboard(|| clipboard.set_text(text.clone()))
                     } else if let Some(path) = arg("image") {
                         let image = image::open(&path)
                             .map_err(|e| arboard::Error::Unknown {
@@ -1300,13 +1303,16 @@ impl App {
                             })?
                             .to_rgba8();
                         let (width, height) = image.dimensions();
-                        clipboard.set_image(arboard::ImageData {
-                            width: width as usize,
-                            height: height as usize,
-                            bytes: std::borrow::Cow::Owned(image.into_raw()),
+                        let bytes = image.into_raw();
+                        super::features::retry_clipboard(|| {
+                            clipboard.set_image(arboard::ImageData {
+                                width: width as usize,
+                                height: height as usize,
+                                bytes: std::borrow::Cow::Borrowed(&bytes),
+                            })
                         })
                     } else {
-                        clipboard.clear()
+                        super::features::retry_clipboard(|| clipboard.clear())
                     }
                 });
                 match result {

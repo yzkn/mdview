@@ -351,8 +351,8 @@ pub enum Message {
     },
     /// 最近使ったファイルの一覧を消す（R-12）
     ClearRecent,
-    /// 外で書き換えられたかを確かめた結果（R-21）
-    ExternalStamp(Option<crate::app::FileStamp>),
+    /// 外で書き換えられたかを確かめた結果（R-21）。**頼んだときの見張りの世代**を添える
+    ExternalStamp(u64, Option<crate::app::FileStamp>),
     /// 外の変更を読み直す／無視する（R-21）
     ReloadExternal,
     IgnoreExternal,

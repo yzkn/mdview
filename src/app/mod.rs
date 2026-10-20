@@ -338,8 +338,8 @@ pub struct App {
     /// **これと比べて変わった項目だけを書く。** 窓は別のプロセスで動くため、
     /// 丸ごと書くと他の窓の変更を古い値で上書きする
     settings_baseline: Settings,
-    /// 設定ファイルの印。**他の窓が書いたことに気づくため**に持つ
-    settings_stamp: Option<window::FileStamp>,
+    /// 設定ファイルの印（中身の要約）。**他の窓が書いたことに気づくため**に持つ
+    settings_stamp: Option<u64>,
     /// この窓へファイルを落としたか（2 つ目からは別の窓。R-09）
     dropped_here: bool,
     /// 試験用の操作口を開いているか（`--automation`）
@@ -590,8 +590,16 @@ const ABOUT_SEEK_NOTE: &str =
      コードブロックの中では同じ言語のブロックを書き方の目安で探します（言語の意味は解きません）。";
 
 /// 設定ファイルの印（他の窓が書いたかを見る）。
-fn settings_stamp() -> Option<window::FileStamp> {
-    crate::io::settings::settings_path().and_then(|path| window::FileStamp::of(&path))
+///
+/// **中身の要約にする**（v2.3.0）。更新時刻と大きさでは、他の窓が同じ大きさの中身を
+/// 同じ時刻の刻み（Windows は 15.6 ms ほど）のうちに書くと見分けられず、取り込みそこねる。
+/// 設定ファイルは数 KB なので、刻みごとに読んでも重くない
+fn settings_stamp() -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let bytes = crate::io::settings::settings_path().and_then(|path| std::fs::read(path).ok())?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 /// プレビューの倍率（表示倍率 × 設定の文字の大きさ ÷ 基準。R-11）。
@@ -635,7 +643,7 @@ fn closes_menu(message: &Message) -> bool {
             // 周期的・裏で届くもの（v2.1.0）
             | Message::WindowMoved(_)
             | Message::WindowSized(_)
-            | Message::ExternalStamp(_)
+            | Message::ExternalStamp(..)
             | Message::ClipboardImage(_)
             | Message::PlaceWindow { .. }
             | Message::Noop
@@ -2474,7 +2482,9 @@ impl App {
                 self.open_submenu = None;
                 self.touch_settings_now();
             }
-            Message::ExternalStamp(stamp) => return self.external_checked(stamp),
+            Message::ExternalStamp(generation, stamp) => {
+                return self.external_checked(generation, stamp)
+            }
             Message::ReloadExternal => {
                 // **編集中の内容は捨てる。** 帯の文言で断っている
                 self.meta.dirty = false;
@@ -4359,7 +4369,10 @@ impl App {
         if stamp == self.settings_stamp {
             return;
         }
-        self.settings_stamp = stamp;
+        // **他の窓が書き終えるまで待ってから読む**（v2.3.0）。書きかけを読むと欠けた設定になる。
+        // 印は掴んでから取り直す（待つ間に書かれた分も、この 1 回で取り込む）
+        let _lock = Settings::lock();
+        self.settings_stamp = settings_stamp();
         let disk = Settings::load();
         let mut merged = Settings::merge_changes(&disk, &self.settings_baseline, &self.settings);
         merged.keep_window_local(&self.settings);
@@ -4418,7 +4431,10 @@ impl App {
             return;
         }
         // **この窓で変えた項目だけを、ディスク上のものへ重ねて書く**（v2.1.0）。
-        // 他の窓の変更を古い値で上書きしない。窓ごとの項目はこの窓の値を保つ
+        // 他の窓の変更を古い値で上書きしない。窓ごとの項目はこの窓の値を保つ。
+        // **読んでから印を取るまで、他の窓に書かせない**（v2.3.0）。間に書かれると、
+        // その変更を知らずに上書きし、印も取り違えて取り込まない
+        let _lock = Settings::lock();
         let disk = Settings::load();
         let mut merged = Settings::merge_changes(&disk, &self.settings_baseline, &self.settings);
         // **書けなくても動き続ける。** 設定は保存できなくても致命ではない
