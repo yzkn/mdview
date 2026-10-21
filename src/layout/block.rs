@@ -301,6 +301,13 @@ fn image_source(
     let content = parse_block(source, &BlockKind::Paragraph);
     let reference = content.lone_image.as_deref()?;
 
+    // 設定で入れていれば URL から取る（v2.4.0 R-09）
+    if let Some(url) = crate::embed::image::remote_url(reference) {
+        let width = content
+            .lone_image_width
+            .map_or(width, |wanted| wanted.min(width));
+        return Some(EmbedSource::new(EmbedKind::Image, url, width));
+    }
     // **ネットワークは最初から取りに行かない**（§16.12）
     if crate::embed::is_remote(reference) {
         return None;
@@ -664,7 +671,7 @@ fn layout_plain(source: &str, style: TextStyle, cx: &LayoutContext) -> Vec<LineB
 /// フェンスを除いた中身と、その開始位置を返す。
 ///
 /// **閉じフェンスが無いことがある**（文書末尾で開いたまま。§12.3）。
-fn code_body(source: &str) -> (usize, &str) {
+pub fn code_body(source: &str) -> (usize, &str) {
     let is_fence = |line: &str| {
         let trimmed = line.trim_start();
         trimmed.starts_with("```") || trimmed.starts_with("~~~")

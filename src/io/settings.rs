@@ -242,6 +242,122 @@ impl std::fmt::Display for ImageMarkup {
     }
 }
 
+/// 窓の地（v2.4.0 R-05。Fluent Design の透明感）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowMaterial {
+    /// Mica 風（壁紙をぼかして敷く。Windows だけ）
+    #[default]
+    Mica,
+    /// 不透明（いままでどおり）
+    Opaque,
+}
+
+impl WindowMaterial {
+    pub const ALL: [WindowMaterial; 2] = [Self::Mica, Self::Opaque];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mica => "mica",
+            Self::Opaque => "opaque",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "opaque" => Self::Opaque,
+            _ => Self::Mica,
+        }
+    }
+}
+
+impl std::fmt::Display for WindowMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Mica => "Mica 風（壁紙をぼかした地）",
+            Self::Opaque => "不透明",
+        })
+    }
+}
+
+/// スライドを書き出すときの既定の形式（v2.4.0 R-07 7e）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SlideExport {
+    #[default]
+    Pdf,
+    Html,
+    Pptx,
+}
+
+impl SlideExport {
+    pub const ALL: [SlideExport; 3] = [Self::Pdf, Self::Html, Self::Pptx];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pdf => "pdf",
+            Self::Html => "html",
+            Self::Pptx => "pptx",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.trim().trim_matches('"').to_ascii_lowercase().as_str() {
+            "html" => Self::Html,
+            "pptx" => Self::Pptx,
+            _ => Self::Pdf,
+        }
+    }
+}
+
+impl std::fmt::Display for SlideExport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Pdf => "PDF（1 枚 1 ページ）",
+            Self::Html => "HTML（1 枚 1 区画）",
+            Self::Pptx => "PPTX（1 枚 1 画像）",
+        })
+    }
+}
+
+/// プレビューを押して編集画面の行へ飛ぶ押し方（v2.4.0 R-03）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JumpClick {
+    /// ダブルクリック（押して引くのは文字の選択のまま）
+    #[default]
+    Double,
+    Alt,
+    Ctrl,
+}
+
+impl JumpClick {
+    pub const ALL: [JumpClick; 3] = [Self::Double, Self::Alt, Self::Ctrl];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Double => "double",
+            Self::Alt => "alt",
+            Self::Ctrl => "ctrl",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "alt" => Self::Alt,
+            "ctrl" => Self::Ctrl,
+            _ => Self::Double,
+        }
+    }
+}
+
+impl std::fmt::Display for JumpClick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Double => "ダブルクリック",
+            Self::Alt => "Alt + クリック",
+            Self::Ctrl => "Ctrl + クリック",
+        })
+    }
+}
+
 /// 2 つの文書の差分の出し方（v2.3.0 R-02）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiffLayout {
@@ -475,6 +591,43 @@ pub struct Settings {
     /// 明るい時間と暗い時間の配色（**「日の出・日の入りに合わせる」は選べない**）
     pub sun_day_theme: ThemePreference,
     pub sun_night_theme: ThemePreference,
+    /// 背景画像（v2.4.0 R-01）
+    pub backdrop: super::backdrop::Backdrop,
+    /// コマンドパレットで最近使った操作（v2.4.0 R-02。新しい順。メニューの道筋の名前）
+    pub command_recent: Vec<String>,
+    /// プレビューを押して編集画面の行へ飛ぶか・その押し方（v2.4.0 R-03）
+    pub preview_jump: bool,
+    pub preview_jump_click: JumpClick,
+    /// キャレットを追ってプレビューを送るか（v2.4.0 R-03。スクロール同期を入れているとき）
+    pub preview_follow_caret: bool,
+    /// 図を拡大して見るか・図の上にボタンを出すか・写す PNG の倍率（v2.4.0 R-04）
+    pub figure_zoom: bool,
+    pub figure_button: bool,
+    pub figure_png_scale: u8,
+    /// コードブロックにコピーのボタンを出すか（v2.4.0 R-04 b）
+    pub code_copy_button: bool,
+    /// 窓の地（v2.4.0 R-05）と、本文の地を残すか
+    pub window_material: WindowMaterial,
+    pub window_body_tint: bool,
+    /// MCP サーバー（v2.4.0 R-06 6c）。使うか・窓が無いときも受けるか・操作ごとの扱い（既定と違うものだけ）
+    pub mcp_enabled: bool,
+    pub mcp_headless: bool,
+    pub mcp_permissions: std::collections::BTreeMap<String, super::mcp_access::Permission>,
+    /// 手元の HTTP で受けるか・その口（v2.4.0 R-06 6d。127.0.0.1 だけ）
+    pub mcp_http: bool,
+    pub mcp_http_port: u16,
+    /// Marp の文書をスライドに分けて見せる（v2.4.0 R-07 7a）
+    pub marp_slides: bool,
+    /// Marp の指示を補う（候補と検査。v2.4.0 R-07 7b）
+    pub marp_assist: bool,
+    /// 発表の画面にページ番号と経過時間を出す（v2.4.0 R-07 7c）
+    pub marp_present_info: bool,
+    /// 「スライドを書き出す」の既定の形式（v2.4.0 R-07 7e）
+    pub marp_export_format: SlideExport,
+    /// URL を開く（v2.4.0 R-09）。最近開いた URL を覚えるか・その一覧（新しい順）・画像も URL から取るか
+    pub remember_urls: bool,
+    pub recent_urls: Vec<String>,
+    pub remote_images: bool,
     /// 差分の出し方（v2.3.0 R-02）
     pub diff_layout: DiffLayout,
     /// 差分で空白の違いをどう扱うか（R-02 d）
@@ -549,9 +702,15 @@ pub const LINE_SPACING_MAX: f32 = 3.0;
 /// ミニマップの幅の範囲（px）
 pub const MINIMAP_MIN: f32 = 24.0;
 pub const MINIMAP_MAX: f32 = 240.0;
+/// 写す PNG の倍率の上限（v2.4.0 R-04）
+pub const FIGURE_SCALE_MAX: u8 = 4;
 /// 自動保存の間隔の範囲（秒）
 pub const AUTOSAVE_MIN: u32 = 2;
 pub const AUTOSAVE_MAX: u32 = 3600;
+/// 手元の HTTP の既定の口と、選べる範囲（v2.4.0 R-06 6d。**よく使われる口と、OS が配る口を避ける**）
+pub const MCP_HTTP_PORT: u16 = 39217;
+pub const MCP_HTTP_PORT_MIN: u16 = 1024;
+pub const MCP_HTTP_PORT_MAX: u16 = 49151;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -621,6 +780,29 @@ impl Default for Settings {
             sun_set_offset: 0,
             sun_day_theme: ThemePreference::Light,
             sun_night_theme: ThemePreference::Dark,
+            backdrop: super::backdrop::Backdrop::default(),
+            command_recent: Vec::new(),
+            preview_jump: true,
+            preview_jump_click: JumpClick::Double,
+            preview_follow_caret: true,
+            figure_zoom: true,
+            figure_button: true,
+            figure_png_scale: 2,
+            code_copy_button: true,
+            window_material: WindowMaterial::Mica,
+            window_body_tint: true,
+            mcp_enabled: true,
+            mcp_headless: true,
+            mcp_permissions: std::collections::BTreeMap::new(),
+            mcp_http: false,
+            mcp_http_port: MCP_HTTP_PORT,
+            marp_slides: true,
+            marp_assist: true,
+            marp_present_info: false,
+            marp_export_format: SlideExport::Pdf,
+            remember_urls: true,
+            recent_urls: Vec::new(),
+            remote_images: false,
             diff_layout: DiffLayout::SideBySide,
             diff_whitespace: DiffWhitespace::Exact,
             diff_ignore_case: false,
@@ -856,6 +1038,60 @@ impl Settings {
             }
             out.push_str(&format!("recent_{index} = \"{text}\"\n"));
         }
+        // 背景画像（v2.4.0 R-01）
+        out.push_str(&self.backdrop.to_toml());
+        // コマンドパレットで最近使った操作（v2.4.0 R-02）。**`|` で区切る**（名前に `|` は無い）
+        let recent: Vec<&str> = self
+            .command_recent
+            .iter()
+            .map(String::as_str)
+            .filter(|name| quotable(name) && !name.contains('|'))
+            .collect();
+        out.push_str(&format!("command_recent = \"{}\"\n", recent.join("|")));
+        // プレビューから編集の行へ（v2.4.0 R-03）
+        out.push_str(&format!(
+            "preview_jump = {}\npreview_jump_click = \"{}\"\npreview_follow_caret = {}\n",
+            self.preview_jump,
+            self.preview_jump_click.as_str(),
+            self.preview_follow_caret,
+        ));
+        // 図の拡大（v2.4.0 R-04）
+        out.push_str(&format!(
+            "figure_zoom = {}\nfigure_button = {}\nfigure_png_scale = {}\n",
+            self.figure_zoom, self.figure_button, self.figure_png_scale,
+        ));
+        out.push_str(&format!("code_copy_button = {}\n", self.code_copy_button));
+        // 窓の地（v2.4.0 R-05）
+        out.push_str(&format!(
+            "window_material = \"{}\"\nwindow_body_tint = {}\n",
+            self.window_material.as_str(),
+            self.window_body_tint,
+        ));
+        // MCP サーバー（v2.4.0 R-06 6c）。操作ごとの扱いは既定と違うものだけ
+        out.push_str(&format!(
+            "mcp_enabled = {}\nmcp_headless = {}\nmcp_http = {}\nmcp_http_port = {}\n",
+            self.mcp_enabled, self.mcp_headless, self.mcp_http, self.mcp_http_port,
+        ));
+        out.push_str(&super::mcp_access::to_toml(&self.mcp_permissions));
+        // スライド（v2.4.0 R-07）
+        out.push_str(&format!(
+            "marp_slides = {}\nmarp_assist = {}\nmarp_present_info = {}\nmarp_export_format = \"{}\"\n",
+            self.marp_slides,
+            self.marp_assist,
+            self.marp_present_info,
+            self.marp_export_format.as_str()
+        ));
+        // URL を開く（v2.4.0 R-09）。**URL は空白で区切る**（URL に空白は入らない。" は %22 にする）
+        out.push_str(&format!(
+            "remember_urls = {}\nremote_images = {}\nrecent_urls = \"{}\"\n",
+            self.remember_urls,
+            self.remote_images,
+            self.recent_urls
+                .iter()
+                .map(|url| url.replace('"', "%22").replace('\\', "%5C"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
         out
     }
 
@@ -901,7 +1137,7 @@ impl Settings {
     /// 外部クレートを使わない。読むのは平らな数項目だけで、
     /// TOML の全機能は要らない。
     pub fn from_toml(text: &str) -> Self {
-        const BOOL_KEYS: [&str; 22] = [
+        const BOOL_KEYS: [&str; 38] = [
             "toc_visible",
             "scroll_sync",
             "show_invisibles",
@@ -924,6 +1160,30 @@ impl Settings {
             "editor_ruler",
             "editor_guides",
             "lint_enabled",
+            // 背景画像（v2.4.0 R-01）
+            "bg_enabled",
+            "bg_scroll",
+            // プレビューから編集の行へ（v2.4.0 R-03）
+            "preview_jump",
+            "preview_follow_caret",
+            // 図の拡大（v2.4.0 R-04）
+            "figure_zoom",
+            "figure_button",
+            // コードブロックのコピー（v2.4.0 R-04 b）
+            "code_copy_button",
+            // 窓の地（v2.4.0 R-05）
+            "window_body_tint",
+            // MCP サーバー（v2.4.0 R-06 6c）
+            "mcp_enabled",
+            "mcp_headless",
+            "mcp_http",
+            // スライド（v2.4.0 R-07 7a）
+            "marp_slides",
+            "marp_assist",
+            "marp_present_info",
+            // URL を開く（v2.4.0 R-09）
+            "remember_urls",
+            "remote_images",
         ];
 
         let mut settings = Self::default();
@@ -1041,6 +1301,64 @@ impl Settings {
                     if !value.is_empty() && !value.contains("..") {
                         settings.image_folder = value.to_owned();
                     }
+                }
+                "preview_jump" => settings.preview_jump = flag,
+                "preview_jump_click" => settings.preview_jump_click = JumpClick::parse(value),
+                "preview_follow_caret" => settings.preview_follow_caret = flag,
+                "figure_zoom" => settings.figure_zoom = flag,
+                "code_copy_button" => settings.code_copy_button = flag,
+                "window_material" => settings.window_material = WindowMaterial::parse(value),
+                "window_body_tint" => settings.window_body_tint = flag,
+                "mcp_enabled" => settings.mcp_enabled = flag,
+                "mcp_headless" => settings.mcp_headless = flag,
+                "mcp_http" => settings.mcp_http = flag,
+                "marp_slides" => settings.marp_slides = flag,
+                "marp_assist" => settings.marp_assist = flag,
+                "marp_present_info" => settings.marp_present_info = flag,
+                "marp_export_format" => settings.marp_export_format = SlideExport::parse(value),
+                "remember_urls" => settings.remember_urls = flag,
+                "remote_images" => settings.remote_images = flag,
+                "recent_urls" => {
+                    settings.recent_urls = value
+                        .trim()
+                        .trim_matches('"')
+                        .split_whitespace()
+                        .filter(|url| crate::io::remote::is_url(url))
+                        .take(10)
+                        .map(str::to_owned)
+                        .collect();
+                }
+                "mcp_http_port" => {
+                    if let Some(port) = ranged(value, MCP_HTTP_PORT_MIN..=MCP_HTTP_PORT_MAX) {
+                        settings.mcp_http_port = port;
+                    }
+                }
+                _ if key.starts_with(super::mcp_access::KEY_PREFIX) => {
+                    let tool = &key[super::mcp_access::KEY_PREFIX.len()..];
+                    if let Some(permission) = super::mcp_access::Permission::parse(value) {
+                        if !tool.is_empty() {
+                            settings.mcp_permissions.insert(tool.to_owned(), permission);
+                        }
+                    }
+                }
+                "figure_button" => settings.figure_button = flag,
+                "figure_png_scale" => {
+                    if let Some(scale) = ranged(value, 1..=FIGURE_SCALE_MAX) {
+                        settings.figure_png_scale = scale;
+                    }
+                }
+                "command_recent" => {
+                    settings.command_recent = value
+                        .split('|')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .take(crate::app::COMMAND_RECENT_MAX)
+                        .map(str::to_owned)
+                        .collect();
+                }
+                // 背景画像（v2.4.0 R-01）
+                _ if key.starts_with("bg_") => {
+                    settings.backdrop.set(key, value);
                 }
                 _ if key.starts_with("key.") => {
                     let command = key["key.".len()..].trim();
@@ -1447,6 +1765,42 @@ mod tests {
             sun_set_offset: 45,
             sun_day_theme: ThemePreference::Named("Nord".to_owned()),
             sun_night_theme: ThemePreference::Custom("夜用".to_owned()),
+            backdrop: super::super::backdrop::Backdrop {
+                enabled: true,
+                area: super::super::backdrop::Area::Window,
+                scroll: true,
+                ..Default::default()
+            },
+            command_recent: vec![
+                "編集 › 書式 › 太字".to_owned(),
+                "ファイル › 新規".to_owned(),
+            ],
+            preview_jump: false,
+            preview_jump_click: JumpClick::Alt,
+            preview_follow_caret: false,
+            figure_zoom: false,
+            figure_button: false,
+            figure_png_scale: 3,
+            code_copy_button: false,
+            window_material: WindowMaterial::Opaque,
+            window_body_tint: false,
+            mcp_enabled: false,
+            mcp_headless: false,
+            mcp_permissions: [(
+                "read_document".to_owned(),
+                super::super::mcp_access::Permission::Deny,
+            )]
+            .into_iter()
+            .collect(),
+            mcp_http: true,
+            mcp_http_port: 40000,
+            marp_slides: false,
+            marp_assist: false,
+            marp_present_info: true,
+            marp_export_format: SlideExport::Pptx,
+            remember_urls: false,
+            recent_urls: vec!["https://example.com/a.md".to_owned()],
+            remote_images: true,
             diff_layout: DiffLayout::Unified,
             diff_whitespace: DiffWhitespace::IgnoreChanges,
             diff_ignore_case: true,

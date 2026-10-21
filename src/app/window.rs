@@ -113,7 +113,12 @@ fn work_area() -> Option<(f32, f32, f32, f32)> {
     }
     #[link(name = "user32")]
     extern "system" {
-        fn SystemParametersInfoW(action: u32, param: u32, value: *mut Rect, ini: u32) -> i32;
+        fn SystemParametersInfoW(
+            action: u32,
+            param: u32,
+            value: *mut std::ffi::c_void,
+            ini: u32,
+        ) -> i32;
     }
     const SPI_GETWORKAREA: u32 = 0x0030;
     let mut rect = Rect {
@@ -123,7 +128,7 @@ fn work_area() -> Option<(f32, f32, f32, f32)> {
         bottom: 0,
     };
     // SAFETY: 書き込み先は自分の持つ構造体で、大きさも OS の定義と同じ
-    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut rect, 0) };
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut rect).cast(), 0) };
     (ok != 0 && rect.right > rect.left && rect.bottom > rect.top).then(|| {
         (
             rect.left as f32,
@@ -263,6 +268,8 @@ pub struct Launch {
     pub read_only: bool,
     /// `-t` / `--always-on-top`: 常に最前面で開く（設定より優先する）
     pub on_top: bool,
+    /// `--url <URL>`: URL から開く（v2.4.0 R-09。読み取り専用）
+    pub url: Option<String>,
     /// 読めなかった指定（窓に知らせる。端末が無いことがあるので黙って捨てない）
     pub problems: Vec<String>,
 }
@@ -286,6 +293,19 @@ pub fn parse_launch(args: &[String]) -> Launch {
         };
         match flag {
             "-r" | "--readonly" => launch.read_only = true,
+            "--url" => {
+                let value = inline.map(str::to_owned).or_else(|| {
+                    let value = args.get(index).cloned();
+                    index += 1;
+                    value
+                });
+                match value {
+                    Some(url) if crate::io::remote::is_url(&url) => launch.url = Some(url),
+                    _ => launch.problems.push(
+                        "--url には http:// か https:// で始まる URL を指定してください".to_owned(),
+                    ),
+                }
+            }
             "-t" | "--always-on-top" => launch.on_top = true,
             "-g" | "--goto" => {
                 let value = inline.map(str::to_owned).or_else(|| {
@@ -410,6 +430,8 @@ impl App {
             && self.encoding_dialog.is_none()
             && self.heading_picker.is_none()
             && self.snippet_picker.is_none()
+            && self.command_palette.is_none()
+            && self.figure.is_none()
             && self.diff_screen.is_none()
             && self.draft.is_none()
             && !self.confirming

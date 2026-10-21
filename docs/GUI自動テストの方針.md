@@ -34,6 +34,7 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 - 標準入力が閉じたら（試験の道具が落ちたら）、確認なしで終わる
 - OS のファイルダイアログは試験から操作できないので、この方式では**自前のファイル選択**を出す
 - 設定の置き場は環境変数 `MDVIEW_CONFIG_DIR`、退避ファイルの置き場は `MDVIEW_DRAFT_DIR` で差し替えられる（利用者の設定・退避を汚さない）
+- `MDVIEW_MICA=off` で Mica 風の窓の地（v2.4.0）を止める。壁紙は裏で読むので、画面を比べる試験の前後で地が変わってしまう。`spec_test.py` は止めて動かす
 - **他のアプリは立ち上げない。** URL・その他のファイル・OS の設定画面を開く操作は、開かずに開こうとした先を覚える（状態の `external_opens`）
 
 実装は `src/app/automation.rs`。試験の道具は `tools/automation/`（Python の標準ライブラリだけで動く）。
@@ -88,7 +89,7 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 |`mode`|`edit` / `preview` / `split`|
 |`encoding` `bom` `line_ending`|文字コード・BOM・改行コード|
 |`caret` `selection` `top_line` `line_count` `bytes`|キャレット（0 始まり）・選択（文字も）・先頭行・行数・大きさ|
-|`overlay`|本文を覆っているもの: `settings` `about` `browser` `draft` `confirm` `encoding` `export` `diff`（v2.3.0）、無ければ空|
+|`overlay`|本文を覆っているもの: `settings` `about` `browser` `draft` `confirm` `encoding` `export` `diff`（v2.3.0） `mcp_confirm`（MCP の確認） `present`（発表） `url_dialog`（URL を開く） `figure`（図の拡大）（v2.4.0）、無ければ空|
 |`settings_page` `open_menu`|開いている設定の分類・メニュー|
 |`notice`|知らせの帯の文字|
 |`search`|`open` `query` `matches` `searching`|
@@ -102,6 +103,12 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 |`visible_line_count`|畳んだ行を除いた行の数（スクロールの量とミニマップはこれで数える）|
 |`spawned`|この窓が起こした窓のプロセス番号（新しいウィンドウ・別の窓で開く・落とす）|
 |`external_opens`|開かずに覚えた外の先（URL・ファイル・OS の設定画面）|
+|`backdrop`（v2.4.0）|背景画像: 読めた画像の大きさ `size`・読めない理由 `error`・送り量 `offset`|
+|`preview_top_block`（v2.4.0）|プレビューの先頭のブロック（キャレットを追って送ったかを見る）|
+|`figure`（v2.4.0）|図を拡大して見る画面: 描いた大きさ `size`・`error`・`status`・倍率 `scale`。出していなければ null|
+|`lint`（v2.4.0）|検査の指摘（`rule` と `line`）。Marp の指示の検査（MP001〜MP007）もここで見る|
+|`url` `url_dialog` `recent_urls`（v2.4.0）|URL から開いたならその URL・「URL を開く」の窓（`input` `busy` `error`）・最近開いた URL|
+|`presenting` `completion` `slides`（v2.4.0）|発表中のスライド（`slide`）・打っている所の候補（`items` `selected`）・Marp のスライド（`count` `size` と 1 枚ごとの `theme` `classes` `paginate` `header` `footer` `backgrounds` `notes` など）。無ければ null|
 
 ---
 
@@ -124,8 +131,9 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 |外での変更の帯|`external.reload` `external.ignore`|—|
 |一覧（参照・リンク切れ）|`results.title` `results.item.<番号>` `results.close`|—|
 |出力の進み具合|`export.progress` `export.cancel`|—|
-|設定画面|`settings.page.<window\|editor\|preview\|appearance\|file\|assist\|snippets\|compare\|keys>` `settings.close`（`snippets` `compare` は v2.3.0）|button（`checked` は表示中）|
+|設定画面|`settings.page.<window\|editor\|preview\|appearance\|file\|assist\|snippets\|compare\|slides\|mcp\|keys>` `settings.close`（`snippets` `compare` は v2.3.0、`slides` `mcp` は v2.4.0）|button（`checked` は表示中）|
 |設定画面（自分の配色・スニペット。v2.3.0）|`settings.palette.new` `settings.palette.select`（配色を選ぶ）`settings.palette.color.<鍵>`（`#rrggbb`）`settings.snippet.<番号>` `settings.snippet.add`|button / combobox / textbox|
+|設定画面（背景画像・MCP。v2.4.0）|`settings.backdrop.pick.light` `settings.backdrop.pick.dark`（画像を選ぶ）`settings.mcp.<道具の名前>`（`allow` / `confirm` / `deny`）`settings.mcp.reset_all`|button / combobox|
 |設定画面（キー割り当て）|`settings.key.<操作名>`（`value` は打鍵）`settings.key.<操作名>.change` `settings.key.<操作名>.reset`|—|
 |未保存の確認|`confirm.save` `confirm.discard` `confirm.cancel`|button|
 |異常終了後の復元|`draft.restore` `draft.discard`|button|
@@ -135,6 +143,12 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 |About|`about.seek_note` `about.close`|text / button|
 |設定画面の項目|`settings.item.<設定の鍵>`（値を入れられる）`settings.reset.<設定の鍵>`（既定。既定と同じなら押せない）`settings.use_current_window` `settings.clear_recent` `settings.default_apps` `settings.keys.reset_all` `settings.key.<操作名>.clear`|setting / button|
 |プレビューのリンク|`preview.link.<番号>`（name はリンクの文字）|link|
+|プレビューのブロック（v2.4.0）|`preview.block.<番号>`（編集画面のこの行へ）`preview.figure.<番号>`（拡大して見る）`preview.code.<番号>`（コードを写す）。番号はブロックの番号。設定で切っていれば出ない|button|
+|コマンドパレット（v2.4.0）|`palette.query` `palette.submit` `palette.close` `palette.item.<番号>`（`value` は打鍵。いま使えない操作は押せない）|textbox / button / listitem|
+|図を拡大して見る（v2.4.0）|`figure.fit` `figure.actual` `figure.copy` `figure.save` `figure.close`（描き終わるまで閉じる以外は押せない）|button|
+|URL を開く（v2.4.0）|`url.input` `url.open` `url.close` `url.recent.<番号>`|textbox / button|
+|指示の候補（Marp。v2.4.0）|`completion.<番号>`（押すと画面で押したのと同じ道で入れる）|button|
+|MCP からの確認（v2.4.0）|`mcp.message` `mcp.allow` `mcp.deny`（これが出ている間は、ほかの要素は出ない）|text / button|
 
 - `invoke` / `set_value` の `target` に **name**（画面の文字）を渡すと、**押せる要素の
   うち最初のもの**を使う。メニューの項目は名前で指すのが読みやすい（`"新規"` `"プレビュー"`）
@@ -240,6 +254,7 @@ xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --
 `spec_test.py` の網羅の表に `手動` として理由つきで出る。マウスの出来事（ミニマップのつまみ・押す位置の当たり判定）、OS のキーの出来事（JIS 配列の記号）、IME、OS のファイルダイアログ、色の作り方の判定、Windows 以外・macOS の実機。
 ミニマップのつまみを掴む・溝を押して飛ぶは、部品の処理（`press_bar` / `drag_bar`）を単体試験で直に呼んで確かめ、`spec_test.py` は単体試験があることを見る（CI で `cargo test` を回す）。
 他のアプリが立ち上がるもの（`http(s)` のリンク・既定のアプリの設定）は、開かずに覚えた先（`external_opens`）で確かめる。
+v2.4.0 では、Mica 風の窓の地と背景画像の見た目・発表の全画面・PowerPoint で開いた PPTX・候補の一覧をマウスで押す・会社の中継（プロキシ）の向こうの HTTPS の URL・MCP クライアントから呼んだときの確認のダイアログは、人が見る。
 
 ---
 
@@ -253,7 +268,7 @@ xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --
 |OS のファイルダイアログ|この方式では出さない（自前のファイル選択を出す）|
 |見た目の判定|`screenshot` で撮り、人が見るか画像の比較で判定する|
 |マウスのドラッグ（範囲選択・つまみ・分割の幅）|要素にしていない。`caret` の `select` と `set_setting` で代える|
-|プレビューの押した場所の当たり判定|`preview.link.<番号>` はリンクを押したときと同じ知らせを流すが、座標の当たり判定は通らない|
+|プレビューの押した場所の当たり判定|`preview.link.<番号>` はリンクを押したときと同じ知らせを流すが、座標の当たり判定は通らない。`preview.block` `preview.figure` `preview.code`（v2.4.0）も同じで、ダブルクリック・Alt + クリックの見分けは通らない|
 
 ---
 
@@ -268,3 +283,4 @@ xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --
 |2026-10-09|v2.1.1: §6 に OS ごとの動かし方（Linux は Xvfb と `libxkbcommon-x11-0`）と、出力の UTF-8 固定・起動中に終わったときの知らせを足した|
 |2026-10-13|v2.1.3: 状態に `read_only` を足した|
 |2026-10-19|v2.3.0: 状態に `focus_mode`、`overlay` に `diff`、設定画面の分類 `snippets` `compare` と自分の配色・スニペットの要素を足した。`Esc` は開いたものを先に閉じ、何も無ければ集中モードを出る|
+|2026-10-21|v2.4.0: `overlay` に `mcp_confirm` `present` `url_dialog` `figure`、状態に `backdrop` `preview_top_block` `figure` `lint` `url` `url_dialog` `recent_urls` `presenting` `completion` `slides`、設定画面の分類 `slides` `mcp` と、コマンドパレット・図の拡大・URL を開く・指示の候補・MCP の確認・プレビューのブロックの要素を足した。`Esc` は MCP の確認・発表・URL を開くを先に閉じる。`MDVIEW_MICA=off`|

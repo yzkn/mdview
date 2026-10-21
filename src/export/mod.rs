@@ -9,6 +9,11 @@ mod front;
 pub mod pdf;
 // 出力範囲（§17.11）
 pub mod range;
+// Marp の文書をスライドとして（v2.4.0 R-07 7d）
+pub mod slides;
+// PPTX とその入れ物（v2.4.0 R-07 7e）
+mod pptx;
+mod zip;
 
 pub use html::export as export_html;
 pub use pdf::export as export_pdf;

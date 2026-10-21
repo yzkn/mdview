@@ -83,9 +83,9 @@ pub(super) fn retry_clipboard<T>(
     let mut tries = 0;
     loop {
         match action() {
-            Err(arboard::Error::ClipboardOccupied) if tries < 10 => {
+            Err(arboard::Error::ClipboardOccupied) if tries < 20 => {
                 tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
             other => return other,
         }

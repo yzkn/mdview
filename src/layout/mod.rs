@@ -19,8 +19,8 @@ pub use cache::{BlockKey, LayoutCache};
 // LineBox は LaidOutBlock の中身。描画側は反復するだけなので直接は名指ししない
 #[allow(unused_imports)]
 pub use block::{
-    embed_source, is_embed_block, layout_block, EmbedLookup, EmbedPlacement, LaidOutBlock,
-    LayoutContext, LineBox, RunDecoration, TextRun,
+    code_body, embed_source, is_embed_block, layout_block, EmbedLookup, EmbedPlacement,
+    LaidOutBlock, LayoutContext, LineBox, RunDecoration, TextRun,
 };
 // 字句の役割は解析層が決め、描画層がテーマで色に変える（§16.10）
 pub use crate::parse::highlight::TokenRole;

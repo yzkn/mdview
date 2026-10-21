@@ -8,7 +8,9 @@
 //! [`RenderEmbed`] として外から挿す。
 
 pub mod diagram;
-mod image;
+// 拡大して見る・PNG で写すための大きい画素（v2.4.0 R-04）
+pub mod figure;
+pub mod image;
 mod math;
 mod pool;
 

@@ -69,8 +69,29 @@ mod palette_view;
 mod eyegrep;
 // Fluent Design を考えた光と影（v2.3.0 R-12）
 pub(crate) mod fluent;
+// 背景画像（v2.4.0 R-01）
+mod backdrop_view;
+// Mica 風の地（v2.4.0 R-05）
+mod mica_view;
+// MCP サーバーからの頼みに答える（v2.4.0 R-06 6b）
+mod ipc_view;
+// 設定画面の「MCP」（v2.4.0 R-06 6c）
+mod mcp_settings;
+pub(crate) use ipc_view::position_of;
+// コマンドパレット（v2.4.0 R-02）
+mod command_palette;
+// プレビューから編集の行へ・キャレットを追う（v2.4.0 R-03）
+mod preview_jump;
+// 図を拡大して見る・PNG で写す（v2.4.0 R-04）
+mod figure_view;
+pub(crate) use command_palette::RECENT_MAX as COMMAND_RECENT_MAX;
+pub use figure_view::FigureMessage;
 // コードスニペット（v2.3.0 R-08 / R-09）
+mod marp_assist;
+mod present;
+mod slides;
 mod snippets;
+mod url_open;
 // 目次を作る・見出しに番号を振る（v2.3.0 R-10）
 mod doc_toc;
 pub use doc_toc::TocCommand;
@@ -292,14 +313,40 @@ pub struct App {
     diff_screen: Option<diff::DiffScreen>,
     /// 外（ほかの窓・試験の口）から比べ方が変わったか（v2.3.0 R-02）。**`update` の出口で比べ直す**
     diff_resync: bool,
+    /// Marp の文書のスライド（v2.4.0 R-07 7a）。**本文の版が変わったら作り直す**（`sync_deck`）
+    deck: Option<crate::marp::Deck>,
+    /// `deck` を作ったときの本文の版と設定（作り直すかの目印）
+    deck_stamp: Option<(u64, bool)>,
+    /// 1 枚の高さと枠の間（プレビューが測った値。見えていないスライドの見積もりに使う）
+    slide_pitch: f32,
+    /// 打っている所の候補（v2.4.0 R-07 7b）と、決め直すかの目印・Esc で閉じたときの目印
+    completion: Option<marp_assist::Completion>,
+    completion_key: Option<marp_assist::CompletionKey>,
+    completion_dismissed: Option<marp_assist::CompletionKey>,
+    /// 発表している最中（v2.4.0 R-07 7c）
+    presenting: Option<present::Presenting>,
+    /// 「URL を開く」の窓（v2.4.0 R-09）と、URL から開いたので読み取り専用にしたか
+    url_dialog: Option<url_open::UrlDialog>,
+    read_only_by_url: bool,
     /// 目 grep の探すもの（v2.3.0 R-05）。**`update` の出口で、一覧が変わったときだけ作り直す**
     eye: eyegrep::EyeCompiled,
+    /// 背景画像の読み込みの様子（v2.4.0 R-01）
+    backdrop: backdrop_view::BackdropImage,
+    /// Mica 風の地（v2.4.0 R-05）
+    mica: mica_view::MicaState,
     /// Markdown の検査の結果と一覧の窓（v2.3.0 R-11）
     lint: lint_view::LintState,
     /// スニペットの入力位置を移っている最中（v2.3.0 R-08）
     snippet_session: Option<snippets::Session>,
     /// スニペットの一覧の欄（絞り込みの文字。出していなければ `None`）
     snippet_picker: Option<String>,
+    /// コマンドパレットの絞り込みの文字（開いているときだけ。v2.4.0 R-02）
+    command_palette: Option<String>,
+    /// MCP から頼まれた確認（v2.4.0 R-06 6c）
+    mcp_confirm: Option<ipc_view::McpConfirm>,
+    /// 図を拡大して見る画面（v2.4.0 R-04）と、描く依頼の番号
+    figure: Option<figure_view::FigureScreen>,
+    figure_generation: u64,
     /// 設定画面で直しているスニペットの中身（`text_editor` の状態。複製できないので画面の状態とは別に持つ）
     snippet_body: Option<iced::widget::text_editor::Content>,
     /// どのファイルの部分を当てるか選んでもらっている最中のパッチ（v2.3.0 R-04 D-6）
@@ -644,6 +691,10 @@ fn closes_menu(message: &Message) -> bool {
             | Message::WindowMoved(_)
             | Message::WindowSized(_)
             | Message::ExternalStamp(..)
+            | Message::BackdropLoaded(..)
+            | Message::MicaWindow(_)
+            | Message::Ipc(_)
+            | Message::MicaLoaded(..)
             | Message::ClipboardImage(_)
             | Message::PlaceWindow { .. }
             | Message::Noop
@@ -798,6 +849,10 @@ impl App {
     pub fn new() -> (Self, Task<Message>) {
         // **読み込みに失敗しても既定値で起動する**（§13.5）
         let settings = Settings::load();
+        // **手元の HTTP で受けるなら、受け持ちを起こす**（v2.4.0 R-06 6d。既定は受けない）
+        if !cfg!(test) {
+            crate::mcp::http::want(&settings);
+        }
         // **倍率は設定から来る。** 推定の寸法を先に作っておく（§4.13）
         let zoom_metrics = Metrics::scaled(preview_factor(&settings));
         // **ファイルは何個でも受ける**（R-08）。1 つ目はこの窓、
@@ -951,12 +1006,27 @@ impl App {
                 settings_screen: None,
                 diff_screen: None,
                 diff_resync: false,
+                deck: None,
+                deck_stamp: None,
+                slide_pitch: 0.0,
+                completion: None,
+                completion_key: None,
+                completion_dismissed: None,
+                presenting: None,
+                url_dialog: None,
+                read_only_by_url: false,
                 patch_choice: None,
                 snippet_session: None,
                 lint: Default::default(),
                 snippet_picker: None,
+                command_palette: None,
+                figure: None,
+                figure_generation: 0,
+                mcp_confirm: None,
                 snippet_body: None,
                 eye: Default::default(),
+                backdrop: Default::default(),
+                mica: Default::default(),
                 diff_own: false,
                 encoding_dialog: None,
                 browser_choice: None,
@@ -1017,8 +1087,19 @@ impl App {
                 app.0.open_at_line(number);
             }
         }
+        // `--url` なら URL から開く（v2.4.0 R-09）
+        let from_url = match launch.url.clone() {
+            Some(url) if !cfg!(test) => app.0.fetch_url(url),
+            _ => Task::none(),
+        };
         // **窓が出てから左半分・右半分へ寄せる**（R-05）。アイコンも窓が出てから当てる
-        app.1 = Task::batch([app.0.begin_placement(), app.0.apply_window_icon()]);
+        app.1 = Task::batch([
+            from_url,
+            app.0.begin_placement(),
+            app.0.apply_window_icon(),
+            // Mica 風の地の位置合わせに、窓のハンドルを聞く（v2.4.0 R-05）
+            app.0.ask_mica_window(),
+        ]);
         // **起動時の最前面も、窓が出てから当てる**（R-02）。窓を作るときの指定だけでは、
         // OS から見て最前面にならないことがあった（GUI の要件試験で見つかった）
         if app.0.on_top {
@@ -1551,6 +1632,7 @@ impl App {
             table_format: self.settings.table_format && self.markdown_assist(),
             on_top: self.on_top,
             focus_mode: self.focus_mode,
+            slides: self.deck.is_some(),
             read_only: self.read_only,
             has_folds: !self.folded.is_empty(),
         }
@@ -1600,6 +1682,7 @@ impl App {
     fn status(&self) -> status::Status {
         status::Status {
             path: self.meta.path.clone(),
+            url: self.meta.url.clone(),
             saved: !self.meta.dirty,
             line: self.editor.cursor_line + 1,
             column: self.editor.cursor_column + 1,
@@ -1827,7 +1910,11 @@ impl App {
         self.refresh_eye();
         // 書き換えていたら検査し直す（v2.3.0 R-11）
         self.refresh_lint();
-        task
+        // 要る背景画像が変わっていたら読む（v2.4.0 R-01。設定・配色の明暗が変わったとき）
+        let backdrop = self.refresh_backdrop();
+        // Mica 風の地（v2.4.0 R-05）。窓の位置を聞き直し、壁紙が変わっていれば読む
+        let mica = self.refresh_mica();
+        Task::batch([task, backdrop, mica])
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
@@ -1857,6 +1944,11 @@ impl App {
 
         // 折り返しの表を合わせる（v2.2.0）
         self.sync_wrap();
+
+        // Marp の文書ならスライドに分ける（v2.4.0 R-07 7a）。出口の 1 か所で見る
+        self.sync_deck();
+        // Marp の指示の候補（v2.4.0 R-07 7b）
+        self.sync_completion();
 
         // **畳んだ中へキャレットが入ったら開く**（R-20）。入口は検索・行へ
         // ジャンプ・取り消しなどいくつもあるので、出口の 1 か所で見る
@@ -2021,6 +2113,14 @@ impl App {
                 self.flush_draft();
                 // **他の窓が変えた設定を取り込む**（v2.1.0）
                 self.poll_settings();
+                // 設定画面「MCP」を出していれば、手元の HTTP の受け手を見直す（6d。受け始めは少し遅れる）
+                if let Some(screen) = self
+                    .settings_screen
+                    .as_mut()
+                    .filter(|screen| screen.page == settings_view::SettingsPage::Mcp)
+                {
+                    screen.mcp_host = crate::mcp::http::current();
+                }
                 // 外の変更（R-21）と自動保存（R-22）も同じ刻みで見る
                 let watch = self.poll_external();
                 let save = self.flush_autosave();
@@ -2042,6 +2142,15 @@ impl App {
             Message::EyeMarkSelection => self.add_selection_to_eye(),
             Message::Toc(command) => self.toc_command(command),
             Message::Lint(message) => self.lint_message(message),
+            Message::OpenCommandPalette => return self.open_command_palette(),
+            Message::CommandPaletteInput(query) => {
+                if let Some(palette) = self.command_palette.as_mut() {
+                    *palette = query;
+                }
+            }
+            Message::CommandPaletteSubmit => return self.run_palette(None),
+            Message::CommandPalettePick(index) => return self.run_palette(Some(index)),
+            Message::CloseCommandPalette => return self.close_command_palette(),
             Message::OpenSnippetPicker => {
                 if self.editing_blocked() {
                     return Task::none();
@@ -2059,6 +2168,24 @@ impl App {
                 self.snippet_picker = None;
                 return self.focus_editor_now();
             }
+            Message::CloseCompletion => self.close_completion(),
+            // URL を開く（v2.4.0 R-09）
+            Message::OpenUrlDialog => return self.open_url_dialog(),
+            Message::UrlInput(text) => {
+                if let Some(dialog) = self.url_dialog.as_mut() {
+                    dialog.input = text;
+                    dialog.error = None;
+                }
+            }
+            Message::UrlSubmit(chosen) => return self.submit_url(chosen),
+            Message::CloseUrlDialog => {
+                self.url_dialog = None;
+                return self.focus_editor_now();
+            }
+            Message::UrlFetched(fetched) => self.open_fetched(&fetched),
+            Message::TogglePresentation => return self.toggle_presentation(),
+            Message::PresentStep(step) => self.step_presentation(step),
+            Message::PresentTo(slide) => self.present_to(slide),
             Message::Editor(action) => {
                 // **本文を触ったら焦点を戻す**（§10.40）。
                 // 巻き上げだけでは戻さない——読みながら検索語を直すことがある
@@ -2083,6 +2210,14 @@ impl App {
             Message::Preview(PreviewAction::LinkClicked { block, text }) => {
                 return self.preview_link(block, &text)
             }
+            Message::Preview(PreviewAction::JumpToSource { block, line }) => {
+                return self.jump_from_preview(block, line)
+            }
+            Message::Preview(PreviewAction::CopyCode { block }) => return self.copy_code(block),
+            Message::Preview(PreviewAction::OpenFigure { block }) => {
+                return self.open_figure(block)
+            }
+            Message::Figure(message) => return self.figure_message(message),
             Message::Preview(action) => self.apply_preview(action),
             Message::SetMode(mode) => {
                 self.mode = mode;
@@ -2283,8 +2418,11 @@ impl App {
                 let Some(path) = path else {
                     return Task::none();
                 };
-                let estimate =
-                    crate::export::range::estimate_pages(self.document.text().len_lines());
+                // スライドとして書き出すなら、枚数がそのままページ数（v2.4.0 R-07 7d）
+                let estimate = match &self.deck {
+                    Some(deck) => deck.slides.len(),
+                    None => crate::export::range::estimate_pages(self.document.text().len_lines()),
+                };
                 self.export_dialog = Some(export_dialog::ExportDialog::new(path, estimate, format));
             }
             Message::PickedExportAgain(path) => {
@@ -2383,6 +2521,11 @@ impl App {
                 if let Some(screen) = self.settings_screen.as_mut() {
                     screen.page = page;
                     screen.capturing = None;
+                    // **MCP の呼ばれた記録は、分類を開いたときに読む**（描くたびには読まない）
+                    if page == settings_view::SettingsPage::Mcp {
+                        screen.mcp_log = crate::io::mcp_access::recent(100);
+                        screen.mcp_host = crate::mcp::http::current();
+                    }
                 }
             }
             Message::Setting(change) => return self.apply_setting(change),
@@ -2485,6 +2628,13 @@ impl App {
             Message::ExternalStamp(generation, stamp) => {
                 return self.external_checked(generation, stamp)
             }
+            Message::BackdropLoaded(wanted, loaded) => self.backdrop_loaded(wanted, loaded),
+            Message::MicaWindow(hwnd) => self.mica_window(hwnd),
+            Message::Ipc(incoming) => return self.ipc_request(incoming),
+            Message::McpAnswer(allowed) => return self.answer_mcp_confirm(allowed),
+            Message::MicaLoaded(path, stamp, monitor, loaded) => {
+                self.mica_loaded(path, stamp, monitor, loaded)
+            }
             Message::ReloadExternal => {
                 // **編集中の内容は捨てる。** 帯の文言で断っている
                 self.meta.dirty = false;
@@ -2504,6 +2654,11 @@ impl App {
             || self.goto.is_some()
             || self.heading_picker.is_some()
             || self.snippet_picker.is_some()
+            || self.command_palette.is_some()
+            || self.figure.is_some()
+            || self.mcp_confirm.is_some()
+            || self.presenting.is_some()
+            || self.url_dialog.is_some()
             || self.settings_screen.is_some()
             || self.encoding_dialog.is_some()
             || self.browser.is_some()
@@ -2556,6 +2711,10 @@ impl App {
     /// 終わる（設定を書いてから）。
     fn exit_now(&mut self) -> Task<Message> {
         self.remember_window();
+        // **MCP サーバーへの居場所を消す**（v2.4.0 R-06 6b）
+        crate::ipc::unregister(std::process::id());
+        // 手元の HTTP を受けていたら、口と合言葉のファイルを消す（6d）
+        crate::mcp::http::release();
         // **終了前に設定を書く。** デバウンスの途中で終わると消える
         self.settings_touched = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
         self.flush_settings();
@@ -2567,6 +2726,10 @@ impl App {
     /// **仕事を返すものがある**（クリップボードは別の糸へ行く）ので、
     /// `Task` を返す。触らないものは `Task::none()` になる
     fn apply(&mut self, action: Action) -> Task<Message> {
+        // **候補を出している間の ↑↓・Enter・Tab は候補へ**（v2.4.0 R-07 7b）
+        if self.completion_key_action(&action) {
+            return Task::none();
+        }
         match action {
             Action::Move { movement, select } => {
                 // **普通の移動で矩形は解ける**（§4.13）
@@ -2717,6 +2880,13 @@ impl App {
                 self.editor.place_caret(line, column);
                 return self.open_link_at(line, column);
             }
+            // 候補の一覧を押した（v2.4.0 R-07 7b）
+            Action::PickCompletion(index) => {
+                if let Some(completion) = self.completion.as_mut() {
+                    completion.selected = index;
+                }
+                self.accept_completion();
+            }
         }
         Task::none()
     }
@@ -2728,6 +2898,8 @@ impl App {
             PreviewAction::LinkClicked { .. } => {}
             // 写すのは `Ctrl + C`・編集 → コピーのとき（v2.2.0）
             PreviewAction::Selected(text) => self.preview_selection = text,
+            // 発表の画面で次・前へ（v2.4.0 R-07 7c）
+            PreviewAction::PresentStep(step) => self.step_presentation(step),
             PreviewAction::Scrolled(delta) => {
                 // ここでだけアンカーを作り直す
                 let viewport = 600.0;
@@ -2737,11 +2909,23 @@ impl App {
                         .scrolled(delta, self.document.heights(), viewport);
                 self.sync_from_preview();
             }
+            // キャレットを追って送る（v2.4.0 R-03）。**編集画面は合わせて動かさない**
+            PreviewAction::Revealed(delta) => {
+                let viewport = 600.0;
+                self.preview.anchor =
+                    self.preview
+                        .anchor
+                        .scrolled(delta, self.document.heights(), viewport);
+            }
+            PreviewAction::JumpToSource { .. }
+            | PreviewAction::OpenFigure { .. }
+            | PreviewAction::CopyCode { .. } => {}
             PreviewAction::Measured {
                 embed_requests,
                 updates,
                 laid_out,
                 hit_rate,
+                slide_pitch,
             } => {
                 // **依頼はここで投げる。** まとめて渡す（1 件ずつではない）。
                 // こうしないと「もう要らなくなったもの」が分からず、
@@ -2755,6 +2939,13 @@ impl App {
                 self.preview.laid_out = laid_out;
                 self.preview.hit_rate = hit_rate;
                 self.document.set_heights(&updates);
+                // スライドの 1 枚の高さが分かったら、見えていないスライドの見積もりも合わせる
+                if let Some(pitch) = slide_pitch {
+                    if (pitch - self.slide_pitch).abs() > 0.5 {
+                        self.slide_pitch = pitch;
+                        self.estimate_slides();
+                    }
+                }
 
                 // **ここが「反映が終わった」時点である**（OPEN-201）。
                 // 可視範囲のレイアウトが済み、高さが索引へ戻ったところ
@@ -3787,6 +3978,16 @@ impl App {
         match command {
             FileCommand::ExportPdf => return self.open_export_dialog(Format::Pdf),
             FileCommand::ExportHtml => return self.open_export_dialog(Format::Html),
+            // スライド（v2.4.0 R-07 7e）
+            FileCommand::ExportPptx => return self.open_export_dialog(Format::Pptx),
+            FileCommand::ExportSlides => {
+                let format = match self.settings.marp_export_format {
+                    crate::io::settings::SlideExport::Pdf => Format::Pdf,
+                    crate::io::settings::SlideExport::Html => Format::Html,
+                    crate::io::settings::SlideExport::Pptx => Format::Pptx,
+                };
+                return self.open_export_dialog(format);
+            }
             FileCommand::Save => return self.save_now(needs_save_as(&self.meta), SaveAs::Keep),
             FileCommand::SaveAs => return self.save_now(true, SaveAs::Keep),
             FileCommand::SaveWithBom => {
@@ -3876,6 +4077,7 @@ impl App {
             }
             Pending::Open => self.ask(picker::Picker::open()).map(Message::PickedOpen),
             Pending::OpenPath(path) => self.load_path(path),
+            Pending::OpenUrl(url) => self.fetch_url(url),
             Pending::Reopen(path, encoding) => self.load_path_as(path, Some(encoding)),
             Pending::Exit => {
                 // **正常に終わるので控えは要らない**（§18.3）。
@@ -4025,6 +4227,12 @@ impl App {
         self.results = None;
         self.reset_watch();
         self.autosave_touched = None;
+        // URL から開いたので読み取り専用にしていたら、ほかの文書では戻す（v2.4.0 R-09）
+        if self.meta.url.is_none() && self.read_only_by_url {
+            self.read_only = false;
+            self.read_only_by_url = false;
+        }
+        self.sync_remote_images();
     }
 
     /// 保存する。`ask` なら保存先を聞く。
@@ -4203,6 +4411,13 @@ impl App {
         if self.export.is_some() {
             return Task::none();
         }
+        // **PPTX はスライドにしか無い**（v2.4.0 R-07 7e）
+        if format == Format::Pptx && self.deck.is_none() {
+            self.notice = Some(notice::Notice::plain(
+                "PPTX に出力できるのは、Marp の文書をスライドに分けて見せているときです".to_owned(),
+            ));
+            return Task::none();
+        }
         self.ask(export_picker(&self.meta, format))
             .map(move |path| Message::PickedExport(path, format))
     }
@@ -4258,6 +4473,8 @@ impl App {
         let base_dir = self.meta.base_dir().map(std::path::Path::to_path_buf);
         let destination = path.clone();
         let selection = chosen;
+        // **Marp の文書はスライドとして書き出す**（v2.4.0 R-07 7d。スライドに分けて見せているときだけ）
+        let deck = self.deck.clone();
 
         let (sender, receiver) = iced::futures::channel::oneshot::channel();
         std::thread::spawn(move || {
@@ -4266,8 +4483,39 @@ impl App {
             let outcome = crate::worker::catch("出力", move || {
                 // **画面と同じ測り方をする**（§17.3）。書体も大きさも同じ規則で選ぶ
                 let measurer = crate::render::PdfMeasurer::new(crate::export::pdf::BODY_SIZE);
-                let result = match format {
-                    Format::Pdf => crate::export::export_pdf(
+                let result = match (format, deck) {
+                    (Format::Pdf, Some(deck)) => crate::export::slides::pdf(
+                        &|size| Box::new(crate::render::PdfMeasurer::new(size)),
+                        &document,
+                        &deck,
+                        &title,
+                        base_dir.as_deref(),
+                        &watcher,
+                        selection,
+                    )
+                    .map(|bytes| (bytes, 0)),
+                    (Format::Pptx, Some(deck)) => crate::export::slides::pptx(
+                        &|size| Box::new(crate::render::PdfMeasurer::new(size)),
+                        &document,
+                        &deck,
+                        &title,
+                        base_dir.as_deref(),
+                        &watcher,
+                        selection,
+                    )
+                    .map(|bytes| (bytes, 0)),
+                    (Format::Pptx, None) => Err(crate::export::pdf::ExportError::Write(
+                        "PPTX にできるのはスライドだけです".to_owned(),
+                    )),
+                    (Format::Html, Some(deck)) => crate::export::slides::html(
+                        &document,
+                        &deck,
+                        &title,
+                        base_dir.as_deref(),
+                        &watcher,
+                    )
+                    .map(|html| (html.text.into_bytes(), html.skipped_images)),
+                    (Format::Pdf, None) => crate::export::export_pdf(
                         &document,
                         &measurer,
                         &title,
@@ -4278,7 +4526,7 @@ impl App {
                     .map(|bytes| (bytes, 0)),
                     // **HTML は範囲を取らない。** ページという単位が無く、
                     // 1 ファイルで完結させるのが目的だからである（§17A.2）
-                    Format::Html => {
+                    (Format::Html, None) => {
                         crate::export::export_html(&document, &title, base_dir.as_deref(), &watcher)
                             .map(|html| (html.text.into_bytes(), html.skipped_images))
                     }
@@ -4383,6 +4631,14 @@ impl App {
     /// 新しい設定を使い始める。**効き目のあるものを作り直す**
     fn adopt_settings(&mut self, settings: Settings) {
         let previous = std::mem::replace(&mut self.settings, settings);
+        // 手元の HTTP（v2.4.0 R-06 6d）。受ける・口が変わったら受け持ちへ伝える
+        if !cfg!(test)
+            && (previous.mcp_enabled != self.settings.mcp_enabled
+                || previous.mcp_http != self.settings.mcp_http
+                || previous.mcp_http_port != self.settings.mcp_http_port)
+        {
+            crate::mcp::http::want(&self.settings);
+        }
         if previous.keys != self.settings.keys {
             self.keymap = keymap::Keymap::new(&self.settings.keys);
         }
@@ -4406,6 +4662,7 @@ impl App {
         // **打ちかけの欄は、値が外から変わったときだけ作り直す。**
         // いつも作り直すと、欄を空にして打ち直すことができない
         let outside = previous.window_custom != self.settings.window_custom
+            || previous.mcp_http_port != self.settings.mcp_http_port
             || previous.autosave_seconds != self.settings.autosave_seconds
             || previous.sun_latitude != self.settings.sun_latitude
             || previous.sun_longitude != self.settings.sun_longitude
@@ -4840,20 +5097,40 @@ impl App {
             } else {
                 iced::Subscription::none()
             },
+            // **MCP サーバーからの頼みを受ける**（v2.4.0 R-06 6b。手元だけの通り道）
+            if cfg!(test) {
+                iced::Subscription::none()
+            } else {
+                iced::Subscription::run(crate::ipc::serve).map(Message::Ipc)
+            },
+            // 発表の最中の打鍵（v2.4.0 R-07 7c）
+            if self.presenting.is_some() {
+                present::keys()
+            } else {
+                iced::Subscription::none()
+            },
             // 試験用の操作口（`--automation` のときだけ標準入力を読む）
             if self.automation {
                 iced::Subscription::run(automation::requests)
             } else {
                 iced::Subscription::none()
             },
-            // **v2.1.0 の画面も `Esc` で閉じる**（設定画面・ダイアログ・絞り込み）
-            if self
+            // **v2.1.0 の画面も `Esc` で閉じる**（設定画面・ダイアログ・絞り込み）。
+            // MCP から頼まれた確認（v2.4.0 R-06 6c）は、いちばん上に出しているので先に断る
+            if self.mcp_confirm.is_some() {
+                escape(|| Message::McpAnswer(false))
+            } else if self.presenting.is_some() {
+                // 発表は Esc で終わる（v2.4.0 R-07 7c）
+                escape(|| Message::TogglePresentation)
+            } else if self.url_dialog.is_some() && !self.confirming {
+                escape(|| Message::CloseUrlDialog)
+            } else if self
                 .settings_screen
                 .as_ref()
                 .is_some_and(|screen| screen.capturing.is_some())
             {
                 escape(|| Message::Setting(SettingChange::CancelCapture))
-            } else if self.settings_screen.is_some() {
+            } else if self.settings_screen.is_some() && self.browser.is_none() {
                 escape(|| Message::CloseSettings)
             } else if self.encoding_dialog.is_some() {
                 escape(|| Message::CloseEncodingDialog)
@@ -4861,8 +5138,15 @@ impl App {
                 escape(|| Message::CloseHeadingPicker)
             } else if self.snippet_picker.is_some() {
                 escape(|| Message::CloseSnippetPicker)
+            } else if self.command_palette.is_some() {
+                escape(|| Message::CloseCommandPalette)
+            } else if self.figure.is_some() && self.browser.is_none() {
+                escape(|| Message::Figure(FigureMessage::Close))
             } else if self.diff_screen.is_some() && self.browser.is_none() {
                 escape(|| Message::Diff(diff::DiffMessage::Close))
+            } else if self.completion.is_some() && self.nothing_on_top() {
+                // 打っている所の候補（v2.4.0 R-07 7b）
+                escape(|| Message::CloseCompletion)
             } else if self.focus_mode && self.nothing_on_top() {
                 // **集中モードは Esc でも出られる**（v2.3.0 R-13）。開いたものを先に閉じる
                 escape(|| Message::ToggleFocusMode)
@@ -4917,6 +5201,11 @@ impl App {
             bench.frames.set(bench.frames.get() + 1);
         }
 
+        // 発表の画面（v2.4.0 R-07 7c）。**窓いっぱいに 1 枚だけ**
+        if let Some(view) = self.present_view() {
+            return view;
+        }
+
         // **文字の大きさと行間は設定から**（R-11）。表示倍率を掛け合わせる
         let (editor_size, editor_line) = self.editor_sizes();
         let eye_marks = &self.eye.compiled;
@@ -4936,6 +5225,16 @@ impl App {
             .eye_marks(eye_marks.as_slice())
             // Markdown の検査の波線（v2.3.0 R-11）
             .lint_marks(&self.lint.results)
+            // Marp の指示の候補（v2.4.0 R-07 7b）
+            .completion(
+                self.completion
+                    .as_ref()
+                    .map(|completion| crate::render::CompletionView {
+                        items: &completion.suggestion.items,
+                        selected: completion.selected,
+                        background: self.theme().palette().background,
+                    }),
+            )
             // 指定した桁の縦線（v2.3.0 R-07）
             .guides(if self.settings.editor_guides {
                 self.settings.editor_guide_columns.as_slice()
@@ -4951,7 +5250,8 @@ impl App {
                     && self.goto.is_none()
                     && self.open_menu.is_none()
                     && self.heading_picker.is_none()
-                    && self.snippet_picker.is_none(),
+                    && self.snippet_picker.is_none()
+                    && self.command_palette.is_none(),
             )
             .display(
                 self.tab_width(),
@@ -4999,6 +5299,10 @@ impl App {
             editor.into()
         };
         let editor = container(editor).width(Length::Fill).height(Length::Fill);
+        // 背景画像を本文の下に敷く（v2.4.0 R-01）
+        let editor = container(self.with_backdrop(backdrop_view::Layer::Editor, editor))
+            .width(Length::Fill)
+            .height(Length::Fill);
         let preview = container(
             PreviewView::new(&self.document, &self.preview, Message::Preview)
                 .zoom(preview_factor(&self.settings))
@@ -5006,6 +5310,19 @@ impl App {
                 .colors(self.preview_colors())
                 .eye_marks(eye_marks.as_slice())
                 .embeds(&self.embeds)
+                // 押して編集画面の行へ飛ぶ・キャレットを追う（v2.4.0 R-03）
+                .jump(
+                    self.settings
+                        .preview_jump
+                        .then_some(self.settings.preview_jump_click),
+                )
+                .reveal(self.preview_reveal())
+                // 図を拡大して見る（v2.4.0 R-04）
+                .figures(self.settings.figure_zoom, self.settings.figure_button)
+                // コードブロックのコピー（v2.4.0 R-04 b）
+                .code_copy(self.settings.code_copy_button)
+                // Marp の文書はスライドの枠で（v2.4.0 R-07 7a）
+                .slides(self.deck.as_ref())
                 .base_dir(self.meta.base_dir())
                 .highlight(if self.search.open {
                     self.search.query.as_str()
@@ -5015,6 +5332,9 @@ impl App {
         )
         .width(Length::Fill)
         .height(Length::Fill);
+        let preview = container(self.with_backdrop(backdrop_view::Layer::Preview, preview))
+            .width(Length::Fill)
+            .height(Length::Fill);
 
         // 表示モード（§8）
         let main: Element<'_, Message> = match self.mode {
@@ -5024,26 +5344,36 @@ impl App {
                 // 設定の比率で分ける（§13.5）。つまみで変える口は次の段階
                 let left = (self.settings.split_ratio * 100.0).round().max(1.0) as u16;
                 let right = (100 - left.min(99)).max(1);
-                row![
-                    container(editor).width(Length::FillPortion(left)),
-                    // **掴んで動かせる**（受入条件 §23.1）
-                    Divider::new(Message::SplitRatio),
-                    container(preview).width(Length::FillPortion(right)),
-                ]
-                .into()
+                // 分割表示の 2 つにまたがって 1 枚（v2.4.0 R-01）
+                self.with_backdrop(
+                    backdrop_view::Layer::Span,
+                    row![
+                        container(editor).width(Length::FillPortion(left)),
+                        // **掴んで動かせる**（受入条件 §23.1）
+                        Divider::new(Message::SplitRatio),
+                        container(preview).width(Length::FillPortion(right)),
+                    ],
+                )
             }
         };
 
         // **確認中は本文を覆う**（§18.2 / SCR-004）。
         // 答えるまで編集させないことで、状態の食い違いを防ぐ
-        let main: Element<'_, Message> = if let Some(screen) = &self.settings_screen {
+        let main: Element<'_, Message> = if let Some(confirm) = &self.mcp_confirm {
+            // **MCP から頼まれた確認がいちばん先**（v2.4.0 R-06 6c。答えるまで AI が待っている）
+            self.mcp_confirm_view(confirm)
+        } else if let Some(browser) = &self.browser {
+            // **答えるまで本文を触らせない**（確認ダイアログと同じ扱い）。
+            // **設定画面より前に見る**（v2.4.0。設定画面の「選ぶ…」から開く）
+            self.browser_view(browser)
+        } else if let Some(screen) = &self.settings_screen {
             // **設定画面は本文を覆う**（R-03）。About と同じ扱い
             self.settings_view(screen)
         } else if self.about_open {
             self.about_view()
-        } else if let Some(browser) = &self.browser {
-            // **答えるまで本文を触らせない**（確認ダイアログと同じ扱い）
-            self.browser_view(browser)
+        } else if let Some(screen) = &self.figure {
+            // **図を拡大して見る画面は本文を覆う**（v2.4.0 R-04）
+            self.figure_view(screen)
         } else if let Some(screen) = &self.diff_screen {
             // **diff の画面は本文を覆う**（v2.3.0 R-02。設定画面と同じ扱い）
             self.diff_view(screen)
@@ -5054,6 +5384,11 @@ impl App {
             self.confirm_view()
         } else if let Some(dialog) = &self.encoding_dialog {
             self.encoding_dialog_view(dialog)
+        } else if let Some(dialog) = &self.url_dialog {
+            // 「URL を開く」（v2.4.0 R-09）
+            container(self.url_dialog_view(dialog))
+                .center(Length::Fill)
+                .into()
         } else if let Some(dialog) = &self.export_dialog {
             // **答えるまで本文を触らせない**（確認ダイアログと同じ扱い）
             self.export_dialog_view(dialog)
@@ -5107,6 +5442,10 @@ impl App {
         // スニペットの一覧（v2.3.0 R-08）
         if let Some(query) = &self.snippet_picker {
             body = body.push(fluent::float(self.snippet_picker_view(query)));
+        }
+        // コマンドパレット（v2.4.0 R-02）
+        if let Some(query) = &self.command_palette {
+            body = body.push(fluent::float(self.command_palette_view(query)));
         }
 
         // **外で書き換えられたことを帯で知らせる**（R-21）
@@ -5203,10 +5542,15 @@ impl App {
             body = body.push(container(status).padding(6));
         }
 
+        // 窓全体に敷く（v2.4.0 R-01）
+        let body = self.with_backdrop(backdrop_view::Layer::Window, body);
+        // Mica 風の地（v2.4.0 R-05）。**いちばん下に敷く**
+        let body = self.with_mica(body);
+
         // **開いたメニューは本文の上に重ねる。** 押し下げると画面が跳ねる
         match self.open_menu {
             Some(open) => iced::widget::stack![body, self.dropdown(open)].into(),
-            None => body.into(),
+            None => body,
         }
     }
 }

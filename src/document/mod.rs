@@ -178,6 +178,19 @@ impl Document {
     /// 実測した高さを索引へ反映する（§3.7 のステップ 3）。
     ///
     /// **アンカーはここでは触らない。** 触ると補正の意味が無くなる。
+    /// 高さを見積もり直す（v2.4.0 R-07。スライドの枠で見せるのをやめたとき）
+    pub fn reestimate(&mut self, width: f32, metrics: &Metrics) {
+        let heights = self
+            .blocks
+            .iter()
+            .map(|block| {
+                let source = self.text.byte_slice(block.bytes.clone()).to_string();
+                estimate_height(block, &source, width, metrics)
+            })
+            .collect();
+        self.heights.rebuild(heights);
+    }
+
     pub fn set_heights(&mut self, updates: &[(usize, f32)]) {
         for (index, height) in updates {
             self.heights.set(*index, *height);

@@ -18,15 +18,20 @@ use iced::advanced::renderer;
 use iced::advanced::text::{self, Text};
 use iced::advanced::widget::{self, Widget};
 use iced::advanced::{Clipboard, Shell};
-use iced::{mouse, window, Color, Element, Event, Length, Pixels, Point, Rectangle, Size};
+use iced::{
+    keyboard, mouse, window, Color, Element, Event, Length, Pixels, Point, Rectangle, Size,
+};
+
+use crate::io::settings::JumpClick;
 
 use super::fonts;
 use super::measure::IcedMeasurer;
+use super::slides::{Frame, Shown};
 use crate::document::Document;
 use crate::embed::{EmbedSource, JobState};
 use crate::layout::{
-    embed_source, is_embed_block, layout_block, BlockKey, EmbedLookup, LaidOutBlock, LayoutCache,
-    LayoutContext, RunDecoration, ScrollAnchor, TextMeasurer, TokenRole,
+    embed_source, is_embed_block, layout_block, BlockKey, EmbedLookup, LayoutCache, LayoutContext,
+    RunDecoration, ScrollAnchor, TextMeasurer, TokenRole,
 };
 
 /// 字句の役割を色に変える（DEC-211 / §16.10）。
@@ -132,7 +137,11 @@ pub enum PreviewAction {
         laid_out: usize,
         /// キャッシュの命中率（確認用）
         hit_rate: f32,
+        /// スライドの枠で見せているとき、1 枚の高さと枠の間（v2.4.0 R-07 7a）
+        slide_pitch: Option<f32>,
     },
+    /// 発表の画面で次・前へ（v2.4.0 R-07 7c。押下・ホイール）
+    PresentStep(i32),
     /// リンクを押した（v2.1.0 R-19）。**押した文字しか分からない**ので、
     /// アプリ側がブロックの原文から先を拾い直す
     LinkClicked { block: usize, text: String },
@@ -140,6 +149,164 @@ pub enum PreviewAction {
     ///
     /// 写すのはアプリ側（`Ctrl + C`・編集 → コピー）。どちらを写すかを決めるのがアプリだから
     Selected(Option<String>),
+    /// 編集画面のその行へ飛ぶ（v2.4.0 R-03）。`line` はブロックの中で描いた行の番号
+    /// （コードブロックでは原文の行に当たる）
+    JumpToSource { block: usize, line: usize },
+    /// 図（Mermaid・数式・画像）を拡大して見る（v2.4.0 R-04）
+    OpenFigure { block: usize },
+    /// コードブロックの中身をクリップボードへ写す（v2.4.0 R-04 b）
+    CopyCode { block: usize },
+    /// キャレットのあるブロックが見えるように送る（v2.4.0 R-03。文書 Y の増分）。
+    /// **編集画面は合わせて動かさない**（`Scrolled` と違う。キャレットを追っているのは編集画面のほう）
+    Revealed(f32),
+}
+
+/// コピーのボタン（**重ねた 2 枚の紙**。写した直後は ✓）
+fn draw_copy_button<Renderer: renderer::Renderer>(
+    renderer: &mut Renderer,
+    rect: Rectangle,
+    ink: Color,
+    copied: bool,
+) {
+    renderer.fill_quad(
+        renderer::Quad {
+            bounds: rect,
+            border: iced::Border {
+                radius: 5.0.into(),
+                width: 1.0,
+                color: Color { a: 0.5, ..ink },
+            },
+            ..renderer::Quad::default()
+        },
+        Color::from_rgba(1.0, 1.0, 1.0, 0.85),
+    );
+    let mark = Color::from_rgba(0.15, 0.15, 0.15, 0.9);
+    let line = |renderer: &mut Renderer, x: f32, y: f32, w: f32, h: f32, color: Color| {
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: Rectangle::new(Point::new(x, y), Size::new(w, h)),
+                ..renderer::Quad::default()
+            },
+            color,
+        );
+    };
+    let (x, y) = (rect.x, rect.y);
+    if copied {
+        // ✓（短い斜めの代わりに、段の付いた 2 本で描く）
+        let green = Color::from_rgb(0.1, 0.55, 0.25);
+        for step in 0..4 {
+            line(
+                renderer,
+                x + 7.0 + step as f32,
+                y + 13.0 + step as f32,
+                2.0,
+                2.0,
+                green,
+            );
+        }
+        for step in 0..8 {
+            line(
+                renderer,
+                x + 11.0 + step as f32,
+                y + 16.0 - step as f32,
+                2.0,
+                2.0,
+                green,
+            );
+        }
+        return;
+    }
+    // 後ろの紙（枠だけ）と前の紙（枠と白地）
+    let outline = |renderer: &mut Renderer, left: f32, top: f32| {
+        let (w, h) = (10.0, 12.0);
+        line(renderer, left, top, w, 1.5, mark);
+        line(renderer, left, top + h - 1.5, w, 1.5, mark);
+        line(renderer, left, top, 1.5, h, mark);
+        line(renderer, left + w - 1.5, top, 1.5, h, mark);
+    };
+    outline(renderer, x + 9.0, y + 5.0);
+    line(
+        renderer,
+        x + 6.0,
+        y + 9.0,
+        10.0,
+        12.0,
+        Color::from_rgba(1.0, 1.0, 1.0, 0.95),
+    );
+    outline(renderer, x + 6.0, y + 9.0);
+}
+
+/// 拡大のボタンの矩形（図の右上）
+fn figure_button_rect(figure: Rectangle) -> Rectangle {
+    const SIZE: f32 = 26.0;
+    Rectangle::new(
+        Point::new(
+            figure.x + figure.width.max(SIZE + 8.0) - SIZE - 4.0,
+            figure.y + 4.0,
+        ),
+        Size::new(SIZE, SIZE),
+    )
+}
+
+/// 拡大のボタン（**虫めがね**: 丸い枠の代わりに角の丸い枠と、＋の字）
+fn draw_figure_button<Renderer: renderer::Renderer>(
+    renderer: &mut Renderer,
+    rect: Rectangle,
+    ink: Color,
+) {
+    renderer.fill_quad(
+        renderer::Quad {
+            bounds: rect,
+            border: iced::Border {
+                radius: 5.0.into(),
+                width: 1.0,
+                color: Color { a: 0.5, ..ink },
+            },
+            ..renderer::Quad::default()
+        },
+        Color::from_rgba(1.0, 1.0, 1.0, 0.85),
+    );
+    let mark = Color::from_rgba(0.15, 0.15, 0.15, 0.9);
+    let center = rect.center();
+    for (w, h) in [(12.0, 2.0), (2.0, 12.0)] {
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: Rectangle::new(
+                    Point::new(center.x - w / 2.0, center.y - h / 2.0),
+                    Size::new(w, h),
+                ),
+                ..renderer::Quad::default()
+            },
+            mark,
+        );
+    }
+}
+
+/// ブロックを見えるようにする送り量（文書 Y の増分。見えていれば 0）。
+///
+/// 上に外れていれば上端に、下に外れていれば下端に合わせる（**少し余白を残す**）。
+/// 画面より高いブロックは上端に合わせる
+fn reveal_delta(
+    document: &Document,
+    anchor: &crate::layout::ScrollAnchor,
+    block: usize,
+    height: f32,
+) -> f32 {
+    const MARGIN: f32 = 24.0;
+    let heights = document.heights();
+    if block >= heights.len() {
+        return 0.0;
+    }
+    let top = heights.prefix_sum(block);
+    let bottom = top + heights.height(block);
+    let offset = anchor.to_doc_y(heights);
+    if top < offset {
+        (top - MARGIN).max(0.0) - offset
+    } else if bottom > offset + height {
+        ((bottom + MARGIN) - (offset + height)).min(top - offset)
+    } else {
+        0.0
+    }
 }
 
 /// プレビューの中の位置（v2.2.0）。`(ブロック, 行, 行の中の文字番号)` の順に比べる
@@ -201,10 +368,12 @@ fn byte_at(text: &str, chars: usize) -> usize {
 /// **レイアウトキャッシュはここに置く。** ウィジェットは毎フレーム作り直されるが、
 /// `widget::Tree` の状態はフレームをまたいで残るため。
 struct State {
-    /// 直近の描画対象。(ブロック添字, レイアウト結果)
-    visible: Vec<(usize, LaidOutBlock)>,
-    /// 先頭ブロックの描画開始 Y（画面上端からの相対。負になる）
-    start_y: f32,
+    /// 直近の描画対象。**置き場所も持つ**（描くのと当てるので同じものを使う。v2.4.0 R-07）
+    visible: Vec<Shown>,
+    /// スライドの枠（Marp の文書のとき。v2.4.0 R-07 7a）
+    frames: Vec<Frame>,
+    /// 1 枚の高さと枠の間（スライドで見せているときだけ）
+    pitch: Option<f32>,
     /// レイアウトキャッシュ（§3.8）
     cache: LayoutCache,
     /// スクロールバーを掴んでいるか（掴んだ場所と、その時点の文書 Y）
@@ -213,17 +382,36 @@ struct State {
     selection: Option<Selection>,
     /// 押したまま動かして選んでいる最中か
     selecting: bool,
+    /// 直前のクリック（ダブルクリックを見分ける。v2.4.0 R-03）
+    last_click: Option<iced::advanced::mouse::Click>,
+    /// 押している修飾キー（Alt + クリック・Ctrl + クリック）
+    modifiers: keyboard::Modifiers,
+    /// 最後に見えるように送ったブロック（**変わったときだけ送る**。利用者が送るのと食い合わない）
+    revealed: Option<usize>,
+    /// ポインタが上にある図のブロック（v2.4.0 R-04。拡大のボタンを出す）
+    hover_figure: Option<usize>,
+    /// ポインタが上にあるコードブロック（v2.4.0 R-04 b。コピーのボタンを出す）
+    hover_code: Option<usize>,
+    /// 写したコードブロックと時刻（**少しの間だけ印を出す**）
+    copied: Option<(usize, std::time::Instant)>,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             visible: Vec::new(),
-            start_y: 0.0,
+            frames: Vec::new(),
+            pitch: None,
             cache: LayoutCache::default(),
             bar: None,
             selection: None,
             selecting: false,
+            last_click: None,
+            modifiers: keyboard::Modifiers::empty(),
+            revealed: None,
+            hover_figure: None,
+            hover_code: None,
+            copied: None,
         }
     }
 }
@@ -260,9 +448,36 @@ pub struct PreviewView<'a> {
     colors: PreviewColors,
     /// 目 grep（v2.3.0 R-05 C-3）
     eye: &'a [(regex::Regex, Color)],
+    /// 編集画面の行へ飛ぶ押し方（v2.4.0 R-03。`None` なら飛ばない）
+    jump: Option<JumpClick>,
+    /// 見えるように送るブロック（v2.4.0 R-03。キャレットを追う）
+    reveal: Option<usize>,
+    /// 図を拡大して見る・図の上にボタンを出す（v2.4.0 R-04）
+    figure_zoom: bool,
+    figure_button: bool,
+    /// コードブロックにコピーのボタンを出す（v2.4.0 R-04 b）
+    code_copy: bool,
+    /// Marp の文書をスライドの枠で見せる（v2.4.0 R-07 7a。`None` なら普通に）
+    slides: Option<&'a crate::marp::Deck>,
+    /// 発表の画面（v2.4.0 R-07 7c）。何枚目を出すか（`slides` があるときだけ効く）
+    present: Option<usize>,
+    /// 発表の画面の右下に出す文字（ページ番号と経過時間。出さなければ `None`）
+    present_info: Option<String>,
 }
 
 impl<'a> PreviewView<'a> {
+    /// 押して編集画面の行へ飛ぶ（v2.4.0 R-03）
+    pub fn jump(mut self, jump: Option<JumpClick>) -> Self {
+        self.jump = jump;
+        self
+    }
+
+    /// このブロックが見えるように送る（v2.4.0 R-03）
+    pub fn reveal(mut self, block: Option<usize>) -> Self {
+        self.reveal = block;
+        self
+    }
+
     pub fn new(
         document: &'a Document,
         state: &'a PreviewState,
@@ -278,7 +493,41 @@ impl<'a> PreviewView<'a> {
             query: "",
             colors: PreviewColors::default(),
             eye: &[],
+            jump: None,
+            reveal: None,
+            figure_zoom: false,
+            figure_button: false,
+            code_copy: false,
+            slides: None,
+            present: None,
+            present_info: None,
         }
+    }
+
+    /// 発表の画面にする（v2.4.0 R-07 7c）。`info` は右下に出す文字
+    pub fn present(mut self, number: Option<usize>, info: Option<String>) -> Self {
+        self.present = number;
+        self.present_info = info;
+        self
+    }
+
+    /// スライドの枠で見せる（v2.4.0 R-07 7a）
+    pub fn slides(mut self, deck: Option<&'a crate::marp::Deck>) -> Self {
+        self.slides = deck;
+        self
+    }
+
+    /// コードブロックにコピーのボタンを出す（v2.4.0 R-04 b）
+    pub fn code_copy(mut self, on: bool) -> Self {
+        self.code_copy = on;
+        self
+    }
+
+    /// 図を拡大して見る（ダブルクリック）・図の上にボタンを出す（v2.4.0 R-04）
+    pub fn figures(mut self, zoom: bool, button: bool) -> Self {
+        self.figure_zoom = zoom;
+        self.figure_button = zoom && button;
+        self
     }
 
     /// 目 grep の印を塗る（v2.3.0 R-05 C-3）
@@ -340,27 +589,76 @@ impl<'a> PreviewView<'a> {
         point: Point,
     ) -> Option<(usize, String)> {
         let state = tree.state.downcast_ref::<State>();
-        let mut y = bounds.y + state.start_y;
-        for (index, laid_out) in &state.visible {
-            if point.y >= y && point.y < y + laid_out.height {
-                for line in &laid_out.lines {
+        for shown in &state.visible {
+            let y = bounds.y + shown.y;
+            if point.y >= y && point.y < y + shown.laid.height {
+                for line in &shown.laid.lines {
                     let top = y + line.top;
                     if point.y < top || point.y >= top + line.height {
                         continue;
                     }
                     for run in &line.runs {
-                        let x = bounds.x + PADDING + line.left + run.x;
+                        let x = bounds.x + shown.x + line.left + run.x;
                         if run.decoration == RunDecoration::Link
                             && point.x >= x
                             && point.x <= x + run.width
                         {
-                            return Some((*index, run.text.clone()));
+                            return Some((shown.index, run.text.clone()));
                         }
                     }
                 }
                 return None;
             }
-            y += laid_out.height;
+        }
+        None
+    }
+
+    /// ポインタの下の図（ブロック番号, 図の矩形）。**描いたときと同じ並べ方で当てる**（v2.4.0 R-04）
+    fn figure_under(
+        &self,
+        state: &State,
+        bounds: Rectangle,
+        point: Point,
+    ) -> Option<(usize, Rectangle)> {
+        for shown in &state.visible {
+            if let Some(placement) = shown.laid.embed {
+                let rect = Rectangle::new(
+                    Point::new(bounds.x + shown.x, bounds.y + shown.y + placement.top),
+                    Size::new(placement.width, placement.height),
+                );
+                if rect.contains(point) {
+                    return Some((shown.index, rect));
+                }
+            }
+        }
+        None
+    }
+
+    /// ポインタの下のコードブロック（ブロック番号, ブロックの矩形）。**図として描くものは除く**（v2.4.0 R-04 b）
+    fn code_under(
+        &self,
+        state: &State,
+        bounds: Rectangle,
+        point: Point,
+    ) -> Option<(usize, Rectangle)> {
+        for shown in &state.visible {
+            let is_code = shown.laid.embed.is_none()
+                && self
+                    .document
+                    .blocks()
+                    .get(shown.index)
+                    .is_some_and(|block| {
+                        matches!(block.kind, crate::parse::BlockKind::Code { .. })
+                    });
+            if is_code {
+                let rect = Rectangle::new(
+                    Point::new(bounds.x + shown.x, bounds.y + shown.y),
+                    Size::new(shown.width.max(0.0), shown.laid.height),
+                );
+                if rect.contains(point) {
+                    return Some((shown.index, rect));
+                }
+            }
         }
         None
     }
@@ -373,12 +671,12 @@ impl<'a> PreviewView<'a> {
     where
         Renderer: text::Renderer<Font = iced::Font>,
     {
-        let measurer = IcedMeasurer::<Renderer>::new(self.text_size);
-        let mut y = bounds.y + state.start_y;
         let mut last = None;
-        for (index, laid_out) in &state.visible {
-            let bottom = y + laid_out.height;
-            let lines = &laid_out.lines;
+        for shown in &state.visible {
+            let index = &shown.index;
+            let y = bounds.y + shown.y;
+            let bottom = y + shown.laid.height;
+            let lines = &shown.laid.lines;
             if point.y < y {
                 // ブロックの間の隙間（または画面の上）。この塊の頭へ寄せる
                 return Some(Spot {
@@ -394,7 +692,6 @@ impl<'a> PreviewView<'a> {
                         line: 0,
                         offset: 0,
                     });
-                    y = bottom;
                     continue;
                 }
                 // 行の高さの中、無ければその上で最後の行
@@ -403,7 +700,8 @@ impl<'a> PreviewView<'a> {
                     .rposition(|line| point.y >= y + line.top)
                     .unwrap_or(0);
                 let found = &lines[line];
-                let x = point.x - (bounds.x + PADDING + found.left);
+                let x = point.x - (bounds.x + shown.x + found.left);
+                let measurer = IcedMeasurer::<Renderer>::new(shown.size);
                 return Some(Spot {
                     block: *index,
                     line,
@@ -416,7 +714,6 @@ impl<'a> PreviewView<'a> {
                 line,
                 offset: lines[line].text().chars().count(),
             });
-            y = bottom;
         }
         last
     }
@@ -429,8 +726,9 @@ impl<'a> PreviewView<'a> {
         let selection = state.selection?;
         let mut out = String::new();
         let mut previous: Option<(usize, bool)> = None;
-        for (index, laid_out) in &state.visible {
-            for (number, line) in laid_out.lines.iter().enumerate() {
+        for shown in &state.visible {
+            let index = &shown.index;
+            for (number, line) in shown.laid.lines.iter().enumerate() {
                 let text = line.text();
                 let length = text.chars().count();
                 let Some((from, to)) = selection.on_line(*index, number, length) else {
@@ -501,10 +799,46 @@ impl<'a> PreviewView<'a> {
     {
         let heights = self.document.heights();
         state.visible.clear();
+        state.frames.clear();
+        state.pitch = None;
         let mut updates = Vec::new();
         let mut requests = Vec::new();
         if heights.is_empty() || bounds.width <= PADDING * 2.0 {
             return (updates, requests);
+        }
+        // **発表の画面は 1 枚だけを画面いっぱいに**（v2.4.0 R-07 7c）。高さ索引は触らない
+        if let (Some(deck), Some(number)) = (self.slides, self.present) {
+            let laid = super::slides::present(
+                &|size| Box::new(IcedMeasurer::<Renderer>::new(size)),
+                deck,
+                number,
+                self.document,
+                &mut state.cache,
+                bounds,
+                self.base_dir,
+                self.embeds,
+            );
+            state.visible = laid.shown;
+            state.frames = laid.frames;
+            return (Vec::new(), laid.requests);
+        }
+        // **Marp の文書はスライドの枠で組む**（v2.4.0 R-07 7a）
+        if let Some(deck) = self.slides {
+            let laid = super::slides::relayout(
+                &|size| Box::new(IcedMeasurer::<Renderer>::new(size)),
+                deck,
+                self.document,
+                &self.state.anchor,
+                &mut state.cache,
+                bounds,
+                PADDING,
+                self.base_dir,
+                self.embeds,
+            );
+            state.visible = laid.shown;
+            state.frames = laid.frames;
+            state.pitch = Some(laid.pitch);
+            return (laid.updates, laid.requests);
         }
 
         let measurer = IcedMeasurer::<Renderer>::new(self.text_size);
@@ -520,9 +854,8 @@ impl<'a> PreviewView<'a> {
 
         let doc_y = self.state.anchor.to_doc_y(heights);
         let (first, offset_in_block) = heights.find(doc_y);
-        state.start_y = -offset_in_block;
 
-        let mut y = state.start_y;
+        let mut y = -offset_in_block;
         let mut index = first;
         while index < self.document.blocks().len() && y < bounds.height {
             let block = &self.document.blocks()[index];
@@ -562,8 +895,17 @@ impl<'a> PreviewView<'a> {
                 updates.push((index, laid_out.height));
             }
 
-            y += laid_out.height;
-            state.visible.push((index, laid_out));
+            let height = laid_out.height;
+            state.visible.push(Shown {
+                index,
+                laid: laid_out,
+                x: PADDING,
+                y,
+                width: cx.width,
+                size: self.text_size,
+                frame: None,
+            });
+            y += height;
             index += 1;
         }
 
@@ -644,9 +986,52 @@ where
                 };
                 let track = self.track(bounds);
                 if !track.contains(point) {
+                    // **コードブロックのコピーのボタン**（v2.4.0 R-04 b）
+                    if self.code_copy {
+                        let state = tree.state.downcast_mut::<State>();
+                        if let Some((block, rect)) = self.code_under(state, bounds, point) {
+                            if figure_button_rect(rect).contains(point) {
+                                state.copied = Some((block, std::time::Instant::now()));
+                                shell.publish((self.on_action)(PreviewAction::CopyCode { block }));
+                                shell.request_redraw();
+                                shell.capture_event();
+                                return;
+                            }
+                        }
+                    }
+                    // **図の上のボタン・図のダブルクリックで拡大して見る**（v2.4.0 R-04）。
+                    // ダブルクリックは行へ飛ぶ（R-03）より先
+                    if self.figure_zoom {
+                        let state = tree.state.downcast_mut::<State>();
+                        if let Some((block, rect)) = self.figure_under(state, bounds, point) {
+                            let on_button =
+                                self.figure_button && figure_button_rect(rect).contains(point);
+                            let click = iced::advanced::mouse::Click::new(
+                                point,
+                                mouse::Button::Left,
+                                state.last_click,
+                            );
+                            let double = click.kind() == iced::advanced::mouse::click::Kind::Double;
+                            if on_button || double {
+                                state.last_click = None;
+                                state.selection = None;
+                                state.selecting = false;
+                                shell
+                                    .publish((self.on_action)(PreviewAction::OpenFigure { block }));
+                                shell.capture_event();
+                                return;
+                            }
+                        }
+                    }
                     // **リンクの上なら開く**（R-19）
                     if let Some((block, text)) = self.link_under(tree, bounds, point) {
                         shell.publish((self.on_action)(PreviewAction::LinkClicked { block, text }));
+                        shell.capture_event();
+                        return;
+                    }
+                    // **発表の画面では、押すと次へ**（v2.4.0 R-07 7c）
+                    if self.present.is_some() && bounds.contains(point) {
+                        shell.publish((self.on_action)(PreviewAction::PresentStep(1)));
                         shell.capture_event();
                         return;
                     }
@@ -655,6 +1040,33 @@ where
                         let version = self.document.version();
                         let state = tree.state.downcast_mut::<State>();
                         let spot = self.spot_at::<Renderer>(state, bounds, point);
+                        // **決めた押し方なら、編集画面のその行へ飛ぶ**（v2.4.0 R-03）。
+                        // リンクの上は上で開いている（リンクを開くほうが先）
+                        let click = iced::advanced::mouse::Click::new(
+                            point,
+                            mouse::Button::Left,
+                            state.last_click,
+                        );
+                        state.last_click = Some(click);
+                        let jump = match self.jump {
+                            Some(JumpClick::Double) => {
+                                click.kind() == iced::advanced::mouse::click::Kind::Double
+                            }
+                            Some(JumpClick::Alt) => state.modifiers.alt(),
+                            Some(JumpClick::Ctrl) => state.modifiers.control(),
+                            None => false,
+                        };
+                        if let (true, Some(spot)) = (jump, spot) {
+                            state.selection = None;
+                            state.selecting = false;
+                            shell.publish((self.on_action)(PreviewAction::JumpToSource {
+                                block: spot.block,
+                                line: spot.line,
+                            }));
+                            shell.request_redraw();
+                            shell.capture_event();
+                            return;
+                        }
                         state.selection = spot.map(|spot| Selection {
                             anchor: spot,
                             focus: spot,
@@ -716,6 +1128,30 @@ where
             }
 
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                // **図の上にいる間だけ、拡大のボタンを出す**（v2.4.0 R-04）
+                if self.figure_button {
+                    let state = tree.state.downcast_mut::<State>();
+                    let hover = cursor
+                        .position()
+                        .and_then(|point| self.figure_under(state, bounds, point))
+                        .map(|(block, _)| block);
+                    if hover != state.hover_figure {
+                        state.hover_figure = hover;
+                        shell.request_redraw();
+                    }
+                }
+                // コードブロックの上にいる間だけ、コピーのボタンを出す（v2.4.0 R-04 b）
+                if self.code_copy {
+                    let state = tree.state.downcast_mut::<State>();
+                    let hover = cursor
+                        .position()
+                        .and_then(|point| self.code_under(state, bounds, point))
+                        .map(|(block, _)| block);
+                    if hover != state.hover_code {
+                        state.hover_code = hover;
+                        shell.request_redraw();
+                    }
+                }
                 let Some((from, start)) = tree.state.downcast_ref::<State>().bar else {
                     return;
                 };
@@ -753,18 +1189,56 @@ where
                 let laid_out = state.visible.len();
                 let hit_rate = state.cache.hit_rate();
 
+                // **キャレットのあるブロックが見えていなければ送る**（v2.4.0 R-03）。
+                // ブロックが変わったときだけ（同じブロックの中で打っている間は送らない）
+                if self.reveal != state.revealed {
+                    state.revealed = self.reveal;
+                    if let Some(block) = self.reveal {
+                        let delta =
+                            reveal_delta(self.document, &self.state.anchor, block, bounds.height);
+                        if delta != 0.0 {
+                            shell.publish((self.on_action)(PreviewAction::Revealed(delta)));
+                        }
+                    }
+                }
+
                 if !updates.is_empty() || !embed_requests.is_empty() {
                     shell.publish((self.on_action)(PreviewAction::Measured {
                         embed_requests,
                         updates,
                         laid_out,
                         hit_rate,
+                        slide_pitch: state.pitch,
                     }));
                 }
             }
 
+            // 修飾キー（v2.4.0 R-03。Alt + クリック・Ctrl + クリック）
+            Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                tree.state.downcast_mut::<State>().modifiers = *modifiers;
+            }
+
+            // 発表の画面では、右の押下で前へ（v2.4.0 R-07 7c）
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
+                if self.present.is_some() && cursor.is_over(bounds) =>
+            {
+                shell.publish((self.on_action)(PreviewAction::PresentStep(-1)));
+                shell.capture_event();
+            }
+
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 if !cursor.is_over(bounds) {
+                    return;
+                }
+                // **発表の画面では、ホイールの 1 ノッチで 1 枚**（細かく送るタッチパッドは使わない）
+                if self.present.is_some() {
+                    if let mouse::ScrollDelta::Lines { y, .. } = delta {
+                        if *y != 0.0 {
+                            let step = if *y < 0.0 { 1 } else { -1 };
+                            shell.publish((self.on_action)(PreviewAction::PresentStep(step)));
+                        }
+                    }
+                    shell.capture_event();
                     return;
                 }
                 // **エディタと同じ距離だけ動かす。** 1 ノッチ = 本文 3 行ぶん。
@@ -832,10 +1306,6 @@ where
         let bounds = layout.bounds();
 
         let text_color = style.text_color;
-        let muted = Color {
-            a: 0.6,
-            ..text_color
-        };
 
         // 強調とリンクの色分け（DD-OPEN-09）。
         //
@@ -872,217 +1342,316 @@ where
                 *slot = color;
             }
         }
-        // 強調の位置を測るのに使う。**レイアウトと同じ規則で測る**
-        let search_measurer = IcedMeasurer::<Renderer>::new(self.text_size);
 
         // **自分の領域の外へ描かない**（v2.2.0。エディタと同じ）。上へ送ったブロックは
         // 領域の上へはみ出して始まるので、切り抜かないとメニューバーや検索バーへ描き込む
         let clip = bounds.intersection(viewport).unwrap_or(bounds);
+        // 発表の画面の地は黒（v2.4.0 R-07 7c）
+        if self.present.is_some() {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds,
+                    ..Default::default()
+                },
+                Color::BLACK,
+            );
+        }
         renderer.with_layer(clip, |renderer| {
-            let mut y = bounds.y + state.start_y;
+            // スライドの枠（地・背景・頭書きと足書き。v2.4.0 R-07 7a）。中身はこの上に描く
+            for frame in &state.frames {
+                super::slides::draw_frame(renderer, frame, bounds.position(), clip, self.embeds);
+            }
 
             // **描画で原文を切り出さない。** 表示する文字はレイアウト結果が持っている。
             // 毎フレーム可視ブロックを文字列化するのは無駄である
-            for (block_index, laid_out) in &state.visible {
-                // 引用の縦線
-                if laid_out.quote_bar {
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle::new(
-                                Point::new(bounds.x + PADDING, y),
-                                Size::new(3.0, (laid_out.height - 12.0).max(0.0)),
-                            ),
-                            ..Default::default()
-                        },
-                        over.quote_rule.unwrap_or(muted),
+            for shown in &state.visible {
+                let block_index = &shown.index;
+                let laid_out = &shown.laid;
+                let y = bounds.y + shown.y;
+                let left = bounds.x + shown.x;
+                // **スライドの中身は、その枠の色で描き、枠の外へ出さない**
+                let frame = shown.frame.and_then(|index| state.frames.get(index));
+                let text_color =
+                    frame.map_or(text_color, |frame| super::slides::color(frame.look.text));
+                let muted = Color {
+                    a: 0.6,
+                    ..text_color
+                };
+                let own_palette = frame.map(|_| Palette::new(text_color));
+                let palette = own_palette.as_ref().unwrap_or(&palette);
+                let link = frame.map_or(link, |frame| super::slides::color(frame.look.link));
+                let heading = frame.map_or(over.heading, |frame| {
+                    Some(super::slides::color(frame.look.heading))
+                });
+                let search_measurer = IcedMeasurer::<Renderer>::new(shown.size);
+                let block_clip = frame.map_or(clip, |frame| {
+                    let rect = Rectangle::new(
+                        Point::new(bounds.x + frame.rect.x, bounds.y + frame.rect.y),
+                        frame.rect.size(),
                     );
-                }
-
-                // 表の罫線（§3.3）
-                for rule in &laid_out.rules {
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle::new(
-                                Point::new(bounds.x + PADDING, y + rule),
-                                Size::new((bounds.width - PADDING * 2.0).max(0.0), 1.0),
-                            ),
-                            ..Default::default()
-                        },
-                        over.table_rule.unwrap_or(Color { a: 0.25, ..muted }),
-                    );
-                }
-
-                // 届いた図を描く（§16.5）。
-                //
-                // **画素はレイアウト結果に持たせない。** ワーカーの結果をここで引く
-                if let Some(placement) = laid_out.embed {
-                    if let Some(JobState::Done(embed)) =
-                        self.embeds.and_then(|l| l.state(&placement.key))
-                    {
-                        if embed.width > 0 && embed.height > 0 {
-                            let handle = image::Handle::from_rgba(
-                                embed.width,
-                                embed.height,
-                                embed.pixels.as_ref().clone(),
-                            );
-                            let drawn = embed.display_height(placement.width);
-                            let scale = if embed.height > 0 {
-                                drawn / embed.height as f32
-                            } else {
-                                1.0
-                            };
-                            let target = Rectangle::new(
-                                Point::new(bounds.x + PADDING, y + placement.top),
-                                Size::new(embed.width as f32 * scale, drawn),
-                            );
-                            // **切り抜き範囲はウィジェットの矩形。** 図がプレビューの
-                            // 外へはみ出すと、エディタ側へ描き込んでしまう
-                            renderer.draw_image(image::Image::new(handle), target, bounds);
-                        }
-                    }
-                }
-
-                for (line_index, line) in laid_out.lines.iter().enumerate() {
-                    let line_y = y + line.top;
-                    if line_y + line.height < bounds.y {
-                        continue;
-                    }
-                    if line_y > bounds.y + bounds.height {
-                        break;
-                    }
-                    // 選んでいる範囲（v2.2.0）。**文字の下へ敷く**
-                    let chosen = state.selection.and_then(|selection| {
-                        let length = line.runs.iter().map(|run| run.text.chars().count()).sum();
-                        selection.on_line(*block_index, line_index, length)
-                    });
-                    let mut run_start = 0usize;
-                    for run in &line.runs {
-                        let run_length = run.text.chars().count();
-                        let x = bounds.x + PADDING + line.left + run.x;
-                        if let Some((from, to)) = chosen {
-                            let from = from.max(run_start);
-                            let to = to.min(run_start + run_length);
-                            if from < to {
-                                let a = byte_at(&run.text, from - run_start);
-                                let b = byte_at(&run.text, to - run_start);
-                                let before = search_measurer.width(&run.text[..a], run.style);
-                                let width = search_measurer.width(&run.text[a..b], run.style);
-                                renderer.fill_quad(
-                                    renderer::Quad {
-                                        bounds: Rectangle::new(
-                                            Point::new(x + before, line_y),
-                                            Size::new(width.max(1.0), line.height),
-                                        ),
-                                        ..Default::default()
-                                    },
-                                    Color {
-                                        a: 0.28,
-                                        ..text_color
-                                    },
-                                );
-                            }
-                        }
-                        run_start += run_length;
-                        if run.text.trim().is_empty() {
-                            continue;
-                        }
-
-                        // インラインコードは地を敷いて本文と区別する
-                        if run.decoration == RunDecoration::Code {
-                            renderer.fill_quad(
-                                renderer::Quad {
-                                    bounds: Rectangle::new(
-                                        Point::new(x - 2.0, line_y),
-                                        Size::new(run.width + 4.0, line.height),
-                                    ),
-                                    border: iced::Border {
-                                        radius: 3.0.into(),
-                                        ..Default::default()
-                                    },
-                                    ..Default::default()
-                                },
-                                over.code_background.unwrap_or(Color { a: 0.10, ..muted }),
-                            );
-                        }
-
-                        // 目 grep（v2.3.0 R-05）。**ランの中だけを探す**（検索と同じ）
-                        for (range, color) in crate::io::marks::find_in(&run.text, self.eye) {
-                            let before = search_measurer.width(&run.text[..range.start], run.style);
-                            let width = search_measurer.width(&run.text[range.clone()], run.style);
-                            renderer.fill_quad(
-                                renderer::Quad {
-                                    bounds: Rectangle::new(
-                                        Point::new(x + before, line_y),
-                                        Size::new(width.max(1.0), line.height),
-                                    ),
-                                    border: iced::Border {
-                                        radius: 2.0.into(),
-                                        ..Default::default()
-                                    },
-                                    ..Default::default()
-                                },
-                                color,
-                            );
-                        }
-
-                        // 検索の一致を敷く（§8.2）。
-                        //
-                        // **ラン（同じ体裁の連なり）の中だけを探す。** ランをまたぐ
-                        // 一致は強調しない。体裁が変わる境目に語が跨がるのは稀である
-                        if !self.query.is_empty() {
-                            for found in crate::search::find_in_text(&run.text, self.query) {
-                                let before =
-                                    search_measurer.width(&run.text[..found.start], run.style);
-                                let width = search_measurer
-                                    .width(&run.text[found.start..found.end], run.style);
-                                renderer.fill_quad(
-                                    renderer::Quad {
-                                        bounds: Rectangle::new(
-                                            Point::new(x + before, line_y),
-                                            Size::new(width.max(1.0), line.height),
-                                        ),
-                                        ..Default::default()
-                                    },
-                                    Color {
-                                        a: 0.30,
-                                        ..text_color
-                                    },
-                                );
-                            }
-                        }
-
-                        // **色は役割から決める**（§16.10）。
-                        // レイアウト層は色を持たず、ここでテーマに当てはめる
-                        let color = match (run.decoration, run.style, over.heading) {
-                            (RunDecoration::Emphasis, ..) => emphasis,
-                            (RunDecoration::Link, ..) => link,
-                            (_, crate::layout::TextStyle::Heading(_), Some(heading)) => heading,
-                            _ => palette.of(run.role, text_color),
-                        };
-
-                        let (font, size) = fonts::for_style(run.style, self.text_size);
-                        renderer.fill_text(
-                            Text {
-                                content: run.text.clone(),
-                                bounds: Size::new(f32::INFINITY, line.height),
-                                size: Pixels(size),
-                                line_height: text::LineHeight::Absolute(Pixels(line.height)),
-                                font,
-                                align_x: text::Alignment::Left,
-                                align_y: iced::alignment::Vertical::Top,
-                                shaping: text::Shaping::Advanced,
-                                wrapping: text::Wrapping::None,
+                    rect.intersection(&clip)
+                        .unwrap_or(Rectangle::new(rect.position(), Size::ZERO))
+                });
+                renderer.with_layer(block_clip, |renderer| {
+                    // 引用の縦線
+                    if laid_out.quote_bar {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(left, y),
+                                    Size::new(3.0, (laid_out.height - 12.0).max(0.0)),
+                                ),
+                                ..Default::default()
                             },
-                            Point::new(x, line_y),
-                            color,
-                            *viewport,
+                            over.quote_rule.unwrap_or(muted),
                         );
                     }
-                }
 
-                y += laid_out.height;
+                    // 表の罫線（§3.3）
+                    for rule in &laid_out.rules {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(left, y + rule),
+                                    Size::new(shown.width.max(0.0), 1.0),
+                                ),
+                                ..Default::default()
+                            },
+                            over.table_rule.unwrap_or(Color { a: 0.25, ..muted }),
+                        );
+                    }
+
+                    // 届いた図を描く（§16.5）。
+                    //
+                    // **画素はレイアウト結果に持たせない。** ワーカーの結果をここで引く
+                    if let Some(placement) = laid_out.embed {
+                        if let Some(JobState::Done(embed)) =
+                            self.embeds.and_then(|l| l.state(&placement.key))
+                        {
+                            if embed.width > 0 && embed.height > 0 {
+                                let handle = image::Handle::from_rgba(
+                                    embed.width,
+                                    embed.height,
+                                    embed.pixels.as_ref().clone(),
+                                );
+                                let drawn = embed.display_height(placement.width);
+                                let scale = if embed.height > 0 {
+                                    drawn / embed.height as f32
+                                } else {
+                                    1.0
+                                };
+                                let target = Rectangle::new(
+                                    Point::new(left, y + placement.top),
+                                    Size::new(embed.width as f32 * scale, drawn),
+                                );
+                                // **切り抜き範囲はウィジェットの矩形。** 図がプレビューの
+                                // 外へはみ出すと、エディタ側へ描き込んでしまう
+                                renderer.draw_image(image::Image::new(handle), target, block_clip);
+                                // 拡大のボタン（v2.4.0 R-04。ポインタが図の上にあるときだけ）
+                                if self.figure_button && state.hover_figure == Some(*block_index) {
+                                    let rect = Rectangle::new(
+                                        Point::new(left, y + placement.top),
+                                        Size::new(placement.width, placement.height),
+                                    );
+                                    draw_figure_button(
+                                        renderer,
+                                        figure_button_rect(rect),
+                                        text_color,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    for (line_index, line) in laid_out.lines.iter().enumerate() {
+                        let line_y = y + line.top;
+                        if line_y + line.height < bounds.y {
+                            continue;
+                        }
+                        if line_y > bounds.y + bounds.height {
+                            break;
+                        }
+                        // 選んでいる範囲（v2.2.0）。**文字の下へ敷く**
+                        let chosen = state.selection.and_then(|selection| {
+                            let length = line.runs.iter().map(|run| run.text.chars().count()).sum();
+                            selection.on_line(*block_index, line_index, length)
+                        });
+                        let mut run_start = 0usize;
+                        for run in &line.runs {
+                            let run_length = run.text.chars().count();
+                            let x = left + line.left + run.x;
+                            if let Some((from, to)) = chosen {
+                                let from = from.max(run_start);
+                                let to = to.min(run_start + run_length);
+                                if from < to {
+                                    let a = byte_at(&run.text, from - run_start);
+                                    let b = byte_at(&run.text, to - run_start);
+                                    let before = search_measurer.width(&run.text[..a], run.style);
+                                    let width = search_measurer.width(&run.text[a..b], run.style);
+                                    renderer.fill_quad(
+                                        renderer::Quad {
+                                            bounds: Rectangle::new(
+                                                Point::new(x + before, line_y),
+                                                Size::new(width.max(1.0), line.height),
+                                            ),
+                                            ..Default::default()
+                                        },
+                                        Color {
+                                            a: 0.28,
+                                            ..text_color
+                                        },
+                                    );
+                                }
+                            }
+                            run_start += run_length;
+                            if run.text.trim().is_empty() {
+                                continue;
+                            }
+
+                            // インラインコードは地を敷いて本文と区別する
+                            if run.decoration == RunDecoration::Code {
+                                renderer.fill_quad(
+                                    renderer::Quad {
+                                        bounds: Rectangle::new(
+                                            Point::new(x - 2.0, line_y),
+                                            Size::new(run.width + 4.0, line.height),
+                                        ),
+                                        border: iced::Border {
+                                            radius: 3.0.into(),
+                                            ..Default::default()
+                                        },
+                                        ..Default::default()
+                                    },
+                                    over.code_background.unwrap_or(Color { a: 0.10, ..muted }),
+                                );
+                            }
+
+                            // 目 grep（v2.3.0 R-05）。**ランの中だけを探す**（検索と同じ）
+                            for (range, color) in crate::io::marks::find_in(&run.text, self.eye) {
+                                let before =
+                                    search_measurer.width(&run.text[..range.start], run.style);
+                                let width =
+                                    search_measurer.width(&run.text[range.clone()], run.style);
+                                renderer.fill_quad(
+                                    renderer::Quad {
+                                        bounds: Rectangle::new(
+                                            Point::new(x + before, line_y),
+                                            Size::new(width.max(1.0), line.height),
+                                        ),
+                                        border: iced::Border {
+                                            radius: 2.0.into(),
+                                            ..Default::default()
+                                        },
+                                        ..Default::default()
+                                    },
+                                    color,
+                                );
+                            }
+
+                            // 検索の一致を敷く（§8.2）。
+                            //
+                            // **ラン（同じ体裁の連なり）の中だけを探す。** ランをまたぐ
+                            // 一致は強調しない。体裁が変わる境目に語が跨がるのは稀である
+                            if !self.query.is_empty() {
+                                for found in crate::search::find_in_text(&run.text, self.query) {
+                                    let before =
+                                        search_measurer.width(&run.text[..found.start], run.style);
+                                    let width = search_measurer
+                                        .width(&run.text[found.start..found.end], run.style);
+                                    renderer.fill_quad(
+                                        renderer::Quad {
+                                            bounds: Rectangle::new(
+                                                Point::new(x + before, line_y),
+                                                Size::new(width.max(1.0), line.height),
+                                            ),
+                                            ..Default::default()
+                                        },
+                                        Color {
+                                            a: 0.30,
+                                            ..text_color
+                                        },
+                                    );
+                                }
+                            }
+
+                            // **色は役割から決める**（§16.10）。
+                            // レイアウト層は色を持たず、ここでテーマに当てはめる
+                            let color = match (run.decoration, run.style, heading) {
+                                (RunDecoration::Emphasis, ..) => emphasis,
+                                (RunDecoration::Link, ..) => link,
+                                (_, crate::layout::TextStyle::Heading(_), Some(heading)) => heading,
+                                _ => palette.of(run.role, text_color),
+                            };
+
+                            let (font, size) = fonts::for_style(run.style, shown.size);
+                            renderer.fill_text(
+                                Text {
+                                    content: run.text.clone(),
+                                    bounds: Size::new(f32::INFINITY, line.height),
+                                    size: Pixels(size),
+                                    line_height: text::LineHeight::Absolute(Pixels(line.height)),
+                                    font,
+                                    align_x: text::Alignment::Left,
+                                    align_y: iced::alignment::Vertical::Top,
+                                    shaping: text::Shaping::Advanced,
+                                    wrapping: text::Wrapping::None,
+                                },
+                                Point::new(x, line_y),
+                                color,
+                                *viewport,
+                            );
+                        }
+                    }
+
+                    // コードブロックのコピーのボタン（v2.4.0 R-04 b）。**ポインタが上にあるか、写した直後だけ**
+                    if self.code_copy && laid_out.embed.is_none() {
+                        let just_copied = state.copied.is_some_and(|(block, at)| {
+                            block == *block_index
+                                && at.elapsed() < std::time::Duration::from_millis(1500)
+                        });
+                        if just_copied || state.hover_code == Some(*block_index) {
+                            let rect = Rectangle::new(
+                                Point::new(left, y),
+                                Size::new(shown.width.max(0.0), laid_out.height),
+                            );
+                            draw_copy_button(
+                                renderer,
+                                figure_button_rect(rect),
+                                text_color,
+                                just_copied,
+                            );
+                        }
+                    }
+                });
             }
         });
+
+        // 発表の画面: 右下にページ番号と経過時間（出すときだけ）。スクロールバーは出さない
+        if self.present.is_some() {
+            if let Some(info) = &self.present_info {
+                let size = (bounds.height / 40.0).clamp(12.0, 28.0);
+                renderer.fill_text(
+                    Text {
+                        content: info.clone(),
+                        bounds: Size::new(bounds.width, size * 1.6),
+                        size: Pixels(size),
+                        line_height: text::LineHeight::Absolute(Pixels(size * 1.6)),
+                        font: fonts::for_style(crate::layout::TextStyle::Body, size).0,
+                        align_x: text::Alignment::Right,
+                        align_y: iced::alignment::Vertical::Top,
+                        shaping: text::Shaping::Advanced,
+                        wrapping: text::Wrapping::None,
+                    },
+                    Point::new(
+                        bounds.x + bounds.width - size,
+                        bounds.y + bounds.height - size * 2.2,
+                    ),
+                    Color::from_rgba(0.6, 0.6, 0.6, 0.9),
+                    clip,
+                );
+            }
+            return;
+        }
 
         // --- スクロールバー（§3.7） ---
         //

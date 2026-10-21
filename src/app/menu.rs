@@ -220,6 +220,8 @@ pub struct Context<'a> {
     pub on_top: bool,
     /// 集中モードか（v2.3.0 R-13）
     pub focus_mode: bool,
+    /// Marp の文書をスライドに分けて見せているか（v2.4.0 R-07 7c。発表できるか）
+    pub slides: bool,
     /// 読み取り専用か（v2.1.3）
     pub read_only: bool,
     /// 畳んでいる見出しがあるか（R-20）
@@ -251,6 +253,10 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
             Item::action("開く…", c(Command::Open), Message::File(FileCommand::Open))
                 .enabled(!context.busy)
                 .access('O'),
+            // URL から開く（v2.4.0 R-09。読み取り専用で開く）
+            Item::action("URL を開く…", c(Command::OpenUrl), Message::OpenUrlDialog)
+                .enabled(!context.busy)
+                .access('K'),
             Item::action(
                 "新しいウィンドウで開く…",
                 c(Command::OpenInNewWindow),
@@ -352,6 +358,19 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
             )
             .enabled(!context.busy)
             .access('H'),
+            // スライド（v2.4.0 R-07 7e）。**Marp の文書をスライドに分けて見せているときだけ**
+            Item::action(
+                "PPTX に出力（スライド）…",
+                c(Command::ExportPptx),
+                Message::File(FileCommand::ExportPptx),
+            )
+            .enabled(!context.busy && context.slides),
+            Item::action(
+                "スライドを書き出す…",
+                c(Command::ExportSlides),
+                Message::File(FileCommand::ExportSlides),
+            )
+            .enabled(!context.busy && context.slides),
             Item::Separator,
             // **頻繁に切り替えないものは設定画面へ移した**（R-03）
             Item::action("設定…", c(Command::Settings), Message::OpenSettings).access('T'),
@@ -484,6 +503,13 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
         }
 
         Menu::View => vec![
+            // **メニューにある操作を名前で探して実行する**（v2.4.0 R-02）
+            Item::action(
+                "コマンドパレット…",
+                c(Command::Palette),
+                Message::OpenCommandPalette,
+            )
+            .access('C'),
             // **Markdown の検査の一覧**（v2.3.0 R-11）
             Item::action(
                 "Markdown の検査の一覧",
@@ -567,6 +593,13 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
             )
             .checked(context.focus_mode)
             .access('U'),
+            // **Marp の文書を 1 枚ずつ全画面で見せる**（v2.4.0 R-07 7c）。Esc で終わる
+            Item::action(
+                "発表（スライド）",
+                c(Command::Present),
+                Message::TogglePresentation,
+            )
+            .enabled(context.slides),
             // **見るだけに使う**（v2.1.3）。起動引数 `-r` / `--readonly` でも入る
             Item::action(
                 "読み取り専用",
@@ -694,7 +727,7 @@ fn save_choices() -> Vec<(&'static str, crate::io::Encoding, bool)> {
 }
 
 /// 折りたたみの中身（§19.6）。
-fn submenu_items(which: Submenu, context: Context<'_>) -> Vec<Item> {
+pub(super) fn submenu_items(which: Submenu, context: Context<'_>) -> Vec<Item> {
     match which {
         Submenu::ReopenAs => crate::io::Encoding::ALL
             .iter()
@@ -882,6 +915,7 @@ pub fn format_of(command: FileCommand) -> Option<Format> {
     match command {
         FileCommand::ExportPdf => Some(Format::Pdf),
         FileCommand::ExportHtml => Some(Format::Html),
+        FileCommand::ExportPptx => Some(Format::Pptx),
         _ => None,
     }
 }
@@ -920,6 +954,7 @@ mod tests {
             table_format: true,
             on_top: false,
             focus_mode: false,
+            slides: false,
             read_only: false,
             has_folds: true,
         }

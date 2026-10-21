@@ -34,7 +34,10 @@ pub fn description(rule: &str) -> &'static str {
     RULES
         .iter()
         .find(|(id, _)| *id == rule)
-        .map_or("", |(_, text)| text)
+        .map(|(_, text)| *text)
+        // Marp の指示の検査（v2.4.0 R-07 7b）も同じ形で出す
+        .or_else(|| crate::marp::check::description(rule))
+        .unwrap_or("")
 }
 
 /// 直し方（文書のバイト範囲を置き換える）。

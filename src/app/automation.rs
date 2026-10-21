@@ -213,6 +213,8 @@ fn page_key(page: SettingsPage) -> &'static str {
         SettingsPage::Assist => "assist",
         SettingsPage::Snippets => "snippets",
         SettingsPage::Compare => "compare",
+        SettingsPage::Slides => "slides",
+        SettingsPage::Mcp => "mcp",
         SettingsPage::Keys => "keys",
     }
 }
@@ -268,6 +270,22 @@ fn editor_action(chord: &Chord) -> Option<Action> {
 impl App {
     /// `Esc` を押したときに閉じるもの（購読の `Esc` と同じ順）。
     pub(super) fn escape_message(&self) -> Option<Message> {
+        // MCP から頼まれた確認（v2.4.0 R-06 6c）は Esc で断る
+        if self.mcp_confirm.is_some() {
+            return Some(Message::McpAnswer(false));
+        }
+        // 発表は Esc で終わる（v2.4.0 R-07 7c）
+        if self.presenting.is_some() {
+            return Some(Message::TogglePresentation);
+        }
+        // 「URL を開く」（v2.4.0 R-09）
+        if self.url_dialog.is_some() && !self.confirming {
+            return Some(Message::CloseUrlDialog);
+        }
+        // **ファイル選択が先**（設定画面の「選ぶ…」から開いたときも、閉じるのはファイル選択。v2.4.0）
+        if self.browser.is_some() {
+            return Some(Message::BrowserCancel);
+        }
         if let Some(screen) = &self.settings_screen {
             return Some(if screen.capturing.is_some() {
                 Message::Setting(super::SettingChange::CancelCapture)
@@ -288,6 +306,14 @@ impl App {
         if self.snippet_picker.is_some() {
             return Some(Message::CloseSnippetPicker);
         }
+        // コマンドパレット（v2.4.0 R-02）
+        if self.command_palette.is_some() {
+            return Some(Message::CloseCommandPalette);
+        }
+        // 図を拡大して見る画面（v2.4.0 R-04）
+        if self.figure.is_some() {
+            return Some(Message::Figure(super::FigureMessage::Close));
+        }
         if self.goto.is_some() {
             return Some(Message::CloseGoto);
         }
@@ -300,6 +326,10 @@ impl App {
         }
         if self.search.open {
             return Some(Message::CloseSearch);
+        }
+        // 打っている所の候補（v2.4.0 R-07 7b）
+        if self.completion.is_some() && self.nothing_on_top() {
+            return Some(Message::CloseCompletion);
         }
         // 集中モード（v2.3.0 R-13）。**開いたものが無いときだけ**
         if self.focus_mode && self.nothing_on_top() {
@@ -374,7 +404,41 @@ impl App {
         }
 
         // --- 本文を覆うもの（`view` と同じ優先順） ---
-        if let Some(screen) = &self.settings_screen {
+        // MCP から頼まれた確認（v2.4.0 R-06 6c）が、いちばん上
+        if let Some(confirm) = &self.mcp_confirm {
+            out.push(Element::new(
+                "mcp.message",
+                "text",
+                confirm.message.as_str(),
+            ));
+            out.push(Element::button(
+                "mcp.allow",
+                "許可する",
+                Message::McpAnswer(true),
+            ));
+            out.push(Element::button(
+                "mcp.deny",
+                "拒否する",
+                Message::McpAnswer(false),
+            ));
+            return self.with_status(out);
+        }
+        // 打っている所の候補（v2.4.0 R-07 7b）。押すと、画面で押したのと同じ道で入れる
+        if let Some(completion) = &self.completion {
+            for (index, item) in completion.suggestion.items.iter().enumerate() {
+                out.push(Element::button(
+                    format!("completion.{index}"),
+                    item.label.as_str(),
+                    Message::Editor(crate::render::Action::PickCompletion(index)),
+                ));
+            }
+        }
+        // **ファイル選択は設定画面より先**（v2.4.0。設定画面の「選ぶ…」から開く）
+        if let Some(screen) = self
+            .settings_screen
+            .as_ref()
+            .filter(|_| self.browser.is_none())
+        {
             for page in SettingsPage::ALL {
                 out.push(
                     Element::button(
@@ -450,8 +514,57 @@ impl App {
                         Message::Setting(super::SettingChange::Snippet(SnippetChange::Add)),
                     ));
                 }
+                // MCP の操作ごとの扱い（v2.4.0 R-06 6c）
+                SettingsPage::Mcp => {
+                    for (tool, label, _) in crate::io::mcp_access::TOOLS {
+                        let mut item =
+                            Element::new(format!("settings.mcp.{tool}"), "combobox", *label);
+                        item.value = Some(
+                            crate::io::mcp_access::permission_of(
+                                &self.settings.mcp_permissions,
+                                tool,
+                            )
+                            .key()
+                            .to_owned(),
+                        );
+                        item.options = Some(
+                            crate::io::mcp_access::Permission::ALL
+                                .iter()
+                                .map(|p| p.key().to_owned())
+                                .collect(),
+                        );
+                        let name: &'static str = tool;
+                        item.set = Some(Box::new(move |value: &str| {
+                            Some(Message::Setting(super::SettingChange::McpPermission(
+                                name.to_owned(),
+                                crate::io::mcp_access::Permission::parse(value),
+                            )))
+                        }));
+                        out.push(item);
+                    }
+                    out.push(Element::button(
+                        "settings.mcp.reset_all",
+                        "すべて既定に戻す",
+                        Message::Setting(super::SettingChange::McpResetAll),
+                    ));
+                }
                 // 自分の配色（v2.3.0 R-05）。作る・選ぶ・色を書く
                 SettingsPage::Appearance => {
+                    // 背景画像を選ぶ（v2.4.0 R-01。OS のダイアログが出せなければアプリ内のもの）
+                    for (id, label, dark) in [
+                        (
+                            "settings.backdrop.pick.light",
+                            "明るい配色の画像を選ぶ",
+                            false,
+                        ),
+                        ("settings.backdrop.pick.dark", "暗い配色の画像を選ぶ", true),
+                    ] {
+                        out.push(Element::button(
+                            id,
+                            label,
+                            Message::Setting(super::SettingChange::BackdropPick(dark)),
+                        ));
+                    }
                     use super::palette_view::PaletteChange;
                     out.push(Element::button(
                         "settings.palette.new",
@@ -648,6 +761,24 @@ impl App {
             }
             return self.with_status(out);
         }
+        // 図を拡大して見る画面（v2.4.0 R-04。`view` と同じく、ファイル選択の次）
+        if let Some(screen) = &self.figure {
+            let ready = screen.rendered.is_some();
+            for (id, label, message) in [
+                ("figure.fit", "全体を収める", super::FigureMessage::Fit),
+                ("figure.actual", "等倍", super::FigureMessage::Actual),
+                ("figure.copy", "PNG をコピー", super::FigureMessage::CopyPng),
+                ("figure.save", "PNG で保存…", super::FigureMessage::SavePng),
+            ] {
+                out.push(Element::button(id, label, Message::Figure(message)).enabled(ready));
+            }
+            out.push(Element::button(
+                "figure.close",
+                "閉じる",
+                Message::Figure(super::FigureMessage::Close),
+            ));
+            return self.with_status(out);
+        }
         if self.draft.is_some() {
             out.push(Element::button(
                 "draft.restore",
@@ -677,6 +808,34 @@ impl App {
                 "中止",
                 Message::Answer(Answer::Cancel),
             ));
+            return self.with_status(out);
+        }
+        // 「URL を開く」（v2.4.0 R-09）
+        if let (Some(dialog), false) = (&self.url_dialog, self.confirming) {
+            out.push(Element::textbox(
+                "url.input",
+                "URL",
+                &dialog.input,
+                |value| Some(Message::UrlInput(value.to_owned())),
+            ));
+            out.push(
+                Element::button("url.open", "開く", Message::UrlSubmit(None)).enabled(!dialog.busy),
+            );
+            out.push(Element::button(
+                "url.close",
+                "閉じる",
+                Message::CloseUrlDialog,
+            ));
+            for (index, url) in self.settings.recent_urls.iter().enumerate() {
+                out.push(
+                    Element::button(
+                        format!("url.recent.{index}"),
+                        url.as_str(),
+                        Message::UrlSubmit(Some(index)),
+                    )
+                    .enabled(!dialog.busy),
+                );
+            }
             return self.with_status(out);
         }
         if let Some(dialog) = &self.encoding_dialog {
@@ -871,6 +1030,35 @@ impl App {
                 }
             }
         }
+        // コマンドパレット（v2.4.0 R-02）。**押せない項目は押せない要素として出す**
+        if let Some(query) = &self.command_palette {
+            out.push(Element::textbox(
+                "palette.query",
+                "操作の名前で絞り込む",
+                query,
+                |v| Some(Message::CommandPaletteInput(v.to_owned())),
+            ));
+            out.push(Element::button(
+                "palette.submit",
+                "実行",
+                Message::CommandPaletteSubmit,
+            ));
+            out.push(Element::button(
+                "palette.close",
+                "閉じる",
+                Message::CloseCommandPalette,
+            ));
+            for (index, entry) in self.palette_shown(query).into_iter().enumerate() {
+                let mut element =
+                    Element::new(format!("palette.item.{index}"), "listitem", entry.title)
+                        .invoke(Message::CommandPalettePick(index))
+                        .enabled(entry.enabled);
+                if !entry.accel.is_empty() {
+                    element.value = Some(entry.accel);
+                }
+                out.push(element);
+            }
+        }
         if self.watch.changed {
             out.push(Element::button(
                 "external.reload",
@@ -929,6 +1117,59 @@ impl App {
         }
         if self.mode != ViewMode::Edit {
             out.push(Element::new("preview", "document", "プレビュー"));
+            // **プレビューの図を拡大して見る**（v2.4.0 R-04。ダブルクリック・ボタンと同じ知らせ）
+            if self.settings.figure_zoom {
+                for (block, found) in self.document.blocks().iter().enumerate().take(2000) {
+                    let source = self
+                        .document
+                        .text()
+                        .byte_slice(found.bytes.clone())
+                        .to_string();
+                    if crate::layout::embed_source(found, &source, 800.0, self.meta.base_dir())
+                        .is_some()
+                    {
+                        out.push(
+                            Element::new(
+                                format!("preview.figure.{block}"),
+                                "button",
+                                "拡大して見る",
+                            )
+                            .invoke(Message::Preview(
+                                crate::render::PreviewAction::OpenFigure { block },
+                            )),
+                        );
+                    }
+                }
+            }
+            // **プレビューのコードブロックを写す**（v2.4.0 R-04 b。ボタンと同じ知らせ）
+            if self.settings.code_copy_button {
+                for block in 0..self.document.blocks().len().min(2000) {
+                    if self.code_text_of(block).is_some() {
+                        out.push(
+                            Element::new(format!("preview.code.{block}"), "button", "コピー")
+                                .invoke(Message::Preview(crate::render::PreviewAction::CopyCode {
+                                    block,
+                                })),
+                        );
+                    }
+                }
+            }
+            // **プレビューのブロックから編集画面の行へ**（v2.4.0 R-03。押し方の見分けは部品の中なので、
+            // 見分けたあとに流す知らせと同じものを流す）。多い文書でも試験に要る分だけ出す
+            if self.settings.preview_jump {
+                for block in 0..self.document.blocks().len().min(500) {
+                    out.push(
+                        Element::new(
+                            format!("preview.block.{block}"),
+                            "button",
+                            "編集画面のこの行へ",
+                        )
+                        .invoke(Message::Preview(
+                            crate::render::PreviewAction::JumpToSource { block, line: 0 },
+                        )),
+                    );
+                }
+            }
             // **プレビューのリンク**（押すとプレビューで押したのと同じ知らせを流す）
             let mut count = 0;
             for (block, found) in self.document.blocks().iter().enumerate() {
@@ -998,12 +1239,30 @@ impl App {
 
     /// いまの状態（試験が「待つ」「確かめる」ための材料）。
     fn automation_state(&self) -> Value {
-        let overlay = if self.settings_screen.is_some() {
+        // 図を拡大して見る画面（v2.4.0 R-04）。**大きい `json!` の外で作る**（マクロの深さの上限）
+        let figure_state = self.figure.as_ref().map(|f| {
+            json!({
+                "size": f.rendered.as_ref().map(|(_, r)| [r.width, r.height]),
+                "error": f.error,
+                "status": f.status,
+                "scale": f.scale,
+            })
+        });
+        let overlay = if self.mcp_confirm.is_some() {
+            "mcp_confirm"
+        } else if self.presenting.is_some() {
+            "present"
+        } else if self.url_dialog.is_some() && !self.confirming {
+            "url_dialog"
+        } else if self.browser.is_some() {
+            // 設定画面より先（`view` と同じ。v2.4.0）
+            "browser"
+        } else if self.settings_screen.is_some() {
             "settings"
         } else if self.about_open {
             "about"
-        } else if self.browser.is_some() {
-            "browser"
+        } else if self.figure.is_some() {
+            "figure"
         } else if self.diff_screen.is_some() {
             "diff"
         } else if self.draft.is_some() {
@@ -1026,7 +1285,7 @@ impl App {
                 "text": self.document.text().byte_slice(range).to_string(),
             })
         });
-        json!({
+        let mut state = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "title": self.title(),
             "path": self.meta.path.as_ref().map(|p| p.display().to_string()),
@@ -1088,7 +1347,63 @@ impl App {
                     (k, json!(v))
                 })
                 .collect::<serde_json::Map<_, _>>(),
-        })
+        });
+        // **v2.4.0 から足したものは後から入れる**（1 つの `json!` ではマクロの深さの上限に届く）
+        // 背景画像（R-01）。読めた画像の大きさ・読めない理由・送り量
+        state["backdrop"] = json!({
+            "size": self.backdrop.drawn.as_ref().map(|(_, size)| [size.0, size.1]),
+            "error": self.backdrop.error,
+            "offset": self.backdrop_offset_for_automation(),
+        });
+        // プレビューの先頭のブロック（R-03。キャレットを追って送ったかを見る）
+        state["preview_top_block"] = json!(self.preview.anchor.block_id);
+        // 図を拡大して見る画面（R-04）
+        state["figure"] = json!(figure_state);
+        // 検査の指摘（規則と行。Marp の指示の検査を確かめる。R-07 7b）
+        state["lint"] = json!(self
+            .lint
+            .results
+            .iter()
+            .map(|d| json!({ "rule": d.rule, "line": d.line }))
+            .collect::<Vec<_>>());
+        // URL から開いたなら、その URL（R-09）。「URL を開く」の窓の様子
+        state["url"] = json!(self.meta.url);
+        state["url_dialog"] = self.url_dialog.as_ref().map_or(
+            Value::Null,
+            |dialog| json!({ "input": dialog.input, "busy": dialog.busy, "error": dialog.error }),
+        );
+        state["recent_urls"] = json!(self.settings.recent_urls);
+        // 発表（R-07 7c。していなければ null）
+        state["presenting"] = self.presenting.as_ref().map_or(
+            Value::Null,
+            |presenting| json!({ "slide": presenting.slide }),
+        );
+        // 打っている所の候補（R-07 7b。出していなければ null）
+        state["completion"] = self.completion.as_ref().map_or(Value::Null, |completion| {
+            json!({
+                "items": completion.suggestion.items.iter().map(|item| item.label.clone()).collect::<Vec<_>>(),
+                "selected": completion.selected,
+            })
+        });
+        // Marp のスライド（R-07。分けていなければ null）
+        state["slides"] = self.deck.as_ref().map_or(Value::Null, |deck| {
+            json!({
+                "count": deck.slides.len(),
+                "size": format!("{:?}", deck.size),
+                "slides": deck.slides.iter().map(|slide| json!({
+                    "number": slide.number,
+                    "theme": slide.style.theme,
+                    "classes": slide.style.classes,
+                    "paginate": slide.style.paginate,
+                    "header": slide.style.header,
+                    "footer": slide.style.footer,
+                    "content": slide.content.len(),
+                    "backgrounds": slide.backgrounds.len(),
+                    "notes": slide.notes,
+                })).collect::<Vec<_>>(),
+            })
+        });
+        state
     }
 
     /// 要求 1 行を受けた。
@@ -1183,6 +1498,14 @@ impl App {
                     };
                     reply_ok(&id, Value::Null);
                     return task;
+                }
+                // 発表の最中の打鍵（v2.4.0 R-07 7c）。画面の購読と同じ対応で送る
+                if let (Some(_), ChordKey::Named(key)) = (&self.presenting, chord.key) {
+                    if let Some(message) = super::present::message_for(key) {
+                        let task = self.update(message);
+                        reply_ok(&id, Value::Null);
+                        return task;
+                    }
                 }
                 // メニューを開いている間の文字は、割り当て文字として扱う
                 if let (Some(_), ChordKey::Char(key)) = (self.open_menu, chord.key) {

@@ -1,6 +1,6 @@
 [package]
 name = "mdview"
-version = "2.3.0"
+version = "2.4.0"
 description = "Markdown viewer and editor"
 authors = []
 edition = "2021"
@@ -46,6 +46,25 @@ merman = "0.9.0"
 resvg = "0.45"
 # merman のサイト設定（htmlLabels の一括無効化）を JSON で渡すため
 serde_json = "1"
+# MCP サーバー（v2.4.0 R-06）。公式の Rust SDK。stdio と、手元の HTTP（6d。Streamable HTTP）
+rmcp = { version = "3.6", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+# 手元の HTTP の受け口（6d）。**127.0.0.1 だけで待つ**
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+tower-service = "0.3"
+# URL から読む（v2.4.0 R-09。利用者が URL を指したときだけ）。証明書は OS の確かめ方に任せる。
+# **組み込みの証明書の一覧（webpki-roots）は入れない**（使わない。`rustls` の代わりに、その中身から一覧を除いて選ぶ）。
+# 中継は環境変数と、Windows のプロキシの設定（win-system-proxy）。`_ring` は ureq の `rustls` が使う暗号の部品
+ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier", "gzip", "win-system-proxy"] }
+# 手元の HTTP の合言葉（6d。起動ごとに作る）
+getrandom = "0.3"
+# MCP の道具の引数を読む（rmcp の道具の引数は serde で受ける）
+serde = { version = "1", features = ["derive"] }
+# MCP サーバーを回す（`mdview --mcp` は窓を出さないので、iced の代わりに自分で回す）
+# 窓と MCP サーバーの通り道（6b。名前付きパイプ・UNIX ソケット）にも使う
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "net", "time", "macros"] }
 # LaTeX 数式（DEC-210）。出力はすべて <path> で、描画に外部フォントが要らない
 latex-rust = "2.1"
 # 画像のデコード（§16.12）。**ネットワーク機能は使わない**

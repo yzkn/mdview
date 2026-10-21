@@ -37,7 +37,7 @@ pub enum LintMessage {
 #[derive(Debug, Default)]
 pub(super) struct LintState {
     /// 検査したときの鍵（文書の版・見ていた範囲の頭・規則）。**同じなら検査し直さない**
-    key: Option<(u64, usize, Vec<String>, bool)>,
+    key: Option<(u64, usize, Vec<String>, bool, bool)>,
     pub results: Vec<Diagnostic>,
     pub panel: bool,
 }
@@ -53,11 +53,17 @@ impl App {
         } else {
             0
         };
+        // Marp の指示の検査（v2.4.0 R-07 7b）。**Markdown の検査を切っていても、指示を補うなら見る**
+        let marp = self.settings.marp_assist
+            && !self.document.is_plain()
+            && !large
+            && super::marp_assist::is_marp(&self.document);
         let key = (
             self.document.version(),
             from,
             self.settings.lint_disabled.clone(),
             enabled,
+            marp,
         );
         if self.lint.key.as_ref() == Some(&key) {
             return;
@@ -88,6 +94,11 @@ impl App {
         } else {
             lint::lint(&rope.to_string(), &self.settings.lint_disabled)
         };
+        if marp {
+            let mut found = crate::marp::check::check(&rope.to_string(), self.meta.base_dir());
+            self.lint.results.append(&mut found);
+            self.lint.results.sort_by_key(|d| (d.line, d.columns.start));
+        }
         self.lint.key = Some(key);
     }
 

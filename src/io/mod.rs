@@ -15,12 +15,20 @@ pub mod recover;
 // OS の既定のアプリで開く
 pub mod launch;
 pub mod settings;
+// URL から読む（v2.4.0 R-09）
+pub mod remote;
 // 自分の配色（v2.3.0 R-05）
 pub mod palette;
 // 目 grep（v2.3.0 R-05）
 pub mod marks;
 // 日の出・日の入り（v2.3.0 R-06）
 pub mod sun;
+// 背景画像（v2.4.0 R-01）
+pub mod backdrop;
+// Mica 風の地の壁紙（v2.4.0 R-05）
+pub mod mica;
+// MCP の操作ごとの扱いと呼ばれた記録（v2.4.0 R-06 6c）
+pub mod mcp_access;
 
 pub use encoding::Encoding;
 
@@ -152,6 +160,12 @@ pub fn load(path: &Path) -> Result<LoadedFile, LoadError> {
 /// 自動判定は必ず何かを返すため、外れたときに直す手立てが要る。
 pub fn load_as(path: &Path, forced: Option<Encoding>) -> Result<LoadedFile, LoadError> {
     let bytes = std::fs::read(path).map_err(|error| LoadError::Io(format!("{error}")))?;
+    Ok(from_bytes(path.to_path_buf(), &bytes, forced))
+}
+
+/// 読んだバイト列を文書にする（文字コードを決め、改行をそろえる）。**URL から取ったものにも使う**（v2.4.0 R-09）
+pub fn from_bytes(path: std::path::PathBuf, bytes: &[u8], forced: Option<Encoding>) -> LoadedFile {
+    let bytes = bytes.to_vec();
     let oversized = bytes.len() as u64 > SIZE_WARNING;
 
     let found = encoding::detect(&bytes);
@@ -171,8 +185,8 @@ pub fn load_as(path: &Path, forced: Option<Encoding>) -> Result<LoadedFile, Load
         decoded.text
     };
 
-    Ok(LoadedFile {
-        path: path.to_path_buf(),
+    LoadedFile {
+        path,
         text,
         format: FileFormat {
             encoding: chosen,
@@ -181,7 +195,7 @@ pub fn load_as(path: &Path, forced: Option<Encoding>) -> Result<LoadedFile, Load
         },
         oversized,
         lossy: decoded.lossy,
-    })
+    }
 }
 
 /// ファイルへ書く。

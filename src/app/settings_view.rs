@@ -28,11 +28,15 @@ pub enum SettingsPage {
     Snippets,
     /// 2 つの文書を比べる（v2.3.0 R-02）
     Compare,
+    /// スライド（v2.4.0 R-07）
+    Slides,
+    /// MCP サーバー（v2.4.0 R-06 6c）
+    Mcp,
     Keys,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 9] = [
+    pub const ALL: [SettingsPage; 11] = [
         Self::Window,
         Self::Editor,
         Self::Preview,
@@ -41,6 +45,8 @@ impl SettingsPage {
         Self::Assist,
         Self::Snippets,
         Self::Compare,
+        Self::Slides,
+        Self::Mcp,
         Self::Keys,
     ];
 
@@ -54,6 +60,8 @@ impl SettingsPage {
             Self::Assist => "編集補助",
             Self::Snippets => "スニペット",
             Self::Compare => "比べる",
+            Self::Slides => "スライド",
+            Self::Mcp => "MCP",
             Self::Keys => "キー割り当て",
         }
     }
@@ -118,6 +126,49 @@ pub enum SettingChange {
     Snippet(super::snippets::SnippetChange),
     /// 日の出・日の入りの数の欄（v2.3.0 R-06。0: 緯度, 1: 経度, 2: 日の出のずらし, 3: 日の入りのずらし）
     SunField(usize, String),
+    /// プレビューから編集の行へ（v2.4.0 R-03）
+    PreviewJump(bool),
+    PreviewJumpClick(settings::JumpClick),
+    PreviewFollowCaret(bool),
+    /// 図の拡大（v2.4.0 R-04）
+    FigureZoom(bool),
+    FigureButton(bool),
+    FigurePngScale(u8),
+    /// コードブロックのコピーのボタン（v2.4.0 R-04 b）
+    CodeCopyButton(bool),
+    /// Marp の文書をスライドに分けて見せる（v2.4.0 R-07 7a）
+    MarpSlides(bool),
+    /// Marp の指示を補う（v2.4.0 R-07 7b）
+    MarpAssist(bool),
+    /// 発表の画面にページ番号と経過時間を出す（v2.4.0 R-07 7c）
+    MarpPresentInfo(bool),
+    /// URL を開く（v2.4.0 R-09）
+    RememberUrls(bool),
+    RemoteImages(bool),
+    ClearRecentUrls,
+    /// スライドを書き出すときの既定の形式（v2.4.0 R-07 7e）
+    MarpExportFormat(settings::SlideExport),
+    /// MCP（v2.4.0 R-06 6c）。操作ごとの扱いは `None` で既定へ
+    McpEnabled(bool),
+    McpHeadless(bool),
+    McpPermission(String, Option<crate::io::mcp_access::Permission>),
+    McpResetAll,
+    McpRefreshLog,
+    McpCopyExample,
+    /// 手元の HTTP（v2.4.0 R-06 6d）。受けるか・口（打ちかけの字）・合言葉と例を写す
+    McpHttp(bool),
+    McpHttpPort(String),
+    McpCopyToken,
+    McpCopyHttpExample,
+    /// 窓の地（v2.4.0 R-05）
+    WindowMaterial(settings::WindowMaterial),
+    WindowBodyTint(bool),
+    /// 背景画像の 1 項目（v2.4.0 R-01。鍵と値。鍵は `crate::io::backdrop::KEYS`）
+    Backdrop(String, String),
+    /// 背景画像を選ぶ（偽: 明るい配色、真: 暗い配色）
+    BackdropPick(bool),
+    /// 背景画像を選んだ結果
+    BackdropPicked(bool, Option<std::path::PathBuf>),
     SunDayTheme(ThemePreference),
     SunNightTheme(ThemePreference),
     /// 窓の題名の書式（v2.2.0）
@@ -154,6 +205,11 @@ pub struct SettingsScreen {
     pub guide_columns: String,
     /// 直しているスニペット（v2.3.0 R-09）
     pub snippet: Option<usize>,
+    /// MCP の呼ばれた記録（v2.4.0 R-06 6c。新しい順。分類を開いたときに読む）
+    pub mcp_log: Vec<serde_json::Value>,
+    /// 手元の HTTP の口の欄（打ちかけの字。6d）と、いま受けている窓
+    pub mcp_http_port: String,
+    pub mcp_host: Option<crate::mcp::http::HostInfo>,
 }
 
 impl SettingsScreen {
@@ -164,6 +220,7 @@ impl SettingsScreen {
         self.autosave_seconds = fresh.autosave_seconds;
         self.sun_fields = fresh.sun_fields;
         self.guide_columns = fresh.guide_columns;
+        self.mcp_http_port = fresh.mcp_http_port;
     }
 
     pub fn new(settings: &settings::Settings) -> Self {
@@ -189,6 +246,9 @@ impl SettingsScreen {
             ],
             guide_columns: settings::guide_columns_text(&settings.editor_guide_columns),
             snippet: None,
+            mcp_log: Vec::new(),
+            mcp_http_port: settings.mcp_http_port.to_string(),
+            mcp_host: None,
         }
     }
 }
@@ -243,11 +303,14 @@ fn open_default_apps(app: &mut App) -> std::io::Result<()> {
     }
 }
 
-fn heading(label: &str) -> Element<'_, Message> {
+pub(super) fn heading(label: &str) -> Element<'_, Message> {
     text(label).size(14).into()
 }
 
-fn line<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+pub(super) fn line<'a>(
+    label: &'a str,
+    control: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
     row![
         container(text(label).size(12)).width(Length::Fixed(200.0)),
         control.into(),
@@ -260,7 +323,7 @@ fn line<'a>(label: &'a str, control: impl Into<Element<'a, Message>>) -> Element
 /// 項目の右に「既定」のボタンを付ける（v2.1.0）。
 ///
 /// **既定と同じなら押せない。** 押せるのに何も変わらないほうが分かりにくい
-fn with_reset<'a>(
+pub(super) fn with_reset<'a>(
     item: impl Into<Element<'a, Message>>,
     reset: Option<SettingChange>,
 ) -> Element<'a, Message> {
@@ -302,17 +365,35 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "minimap",
             "minimap_width",
         ],
-        SettingsPage::Preview => vec!["preview_font_size"],
+        SettingsPage::Preview => vec![
+            "preview_font_size",
+            // プレビューから編集の行へ（v2.4.0 R-03）
+            "preview_jump",
+            "preview_jump_click",
+            "preview_follow_caret",
+            // 図の拡大（v2.4.0 R-04）
+            "figure_zoom",
+            "figure_button",
+            "figure_png_scale",
+            // コードブロックのコピー（v2.4.0 R-04 b）
+            "code_copy_button",
+        ],
         SettingsPage::Appearance => {
             let mut items = vec!["theme"];
             // 日の出・日の入りに合わせるときだけ出る（v2.3.0 R-06）
             if settings.theme == ThemePreference::Sun {
                 items.extend(SUN_KEYS);
             }
+            // 窓の地（v2.4.0 R-05）
+            items.extend(["window_material", "window_body_tint"]);
+            // 背景画像（v2.4.0 R-01）
+            items.extend(crate::io::backdrop::KEYS);
             items.extend(["title_format", "status_format"]);
             items
         }
         SettingsPage::File => vec![
+            "remember_urls",
+            "remote_images",
             "recent_limit",
             "autosave_draft",
             "autosave",
@@ -331,6 +412,12 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "lint_enabled",
         ],
         SettingsPage::Snippets => Vec::new(),
+        SettingsPage::Slides => vec![
+            "marp_slides",
+            "marp_assist",
+            "marp_present_info",
+            "marp_export_format",
+        ],
         SettingsPage::Compare => vec![
             "diff_layout",
             "diff_whitespace",
@@ -338,6 +425,8 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "diff_ignore_eol",
             "patch_format",
         ],
+        // MCP（v2.4.0 R-06 6c）。操作ごとの扱いは別の要素（`settings.mcp.<道具>`）
+        SettingsPage::Mcp => vec!["mcp_enabled", "mcp_headless", "mcp_http", "mcp_http_port"],
         SettingsPage::Keys => Vec::new(),
     }
 }
@@ -362,6 +451,31 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "editor_font_size" => SettingChange::EditorFontSize(number()?),
         "editor_line_spacing" => SettingChange::EditorLineSpacing(number()?),
         "preview_font_size" => SettingChange::PreviewFontSize(number()?),
+        "preview_jump" => SettingChange::PreviewJump(flag()?),
+        "preview_jump_click" => SettingChange::PreviewJumpClick(settings::JumpClick::parse(value)),
+        "preview_follow_caret" => SettingChange::PreviewFollowCaret(flag()?),
+        "figure_zoom" => SettingChange::FigureZoom(flag()?),
+        "code_copy_button" => SettingChange::CodeCopyButton(flag()?),
+        "marp_slides" => SettingChange::MarpSlides(flag()?),
+        "marp_assist" => SettingChange::MarpAssist(flag()?),
+        "marp_present_info" => SettingChange::MarpPresentInfo(flag()?),
+        "remember_urls" => SettingChange::RememberUrls(flag()?),
+        "remote_images" => SettingChange::RemoteImages(flag()?),
+        "marp_export_format" => {
+            SettingChange::MarpExportFormat(settings::SlideExport::parse(value))
+        }
+        "mcp_enabled" => SettingChange::McpEnabled(flag()?),
+        "mcp_headless" => SettingChange::McpHeadless(flag()?),
+        "mcp_http" => SettingChange::McpHttp(flag()?),
+        "mcp_http_port" => SettingChange::McpHttpPort(value.to_owned()),
+        _ if key.starts_with(crate::io::mcp_access::KEY_PREFIX) => SettingChange::McpPermission(
+            key[crate::io::mcp_access::KEY_PREFIX.len()..].to_owned(),
+            crate::io::mcp_access::Permission::parse(value),
+        ),
+        "window_material" => SettingChange::WindowMaterial(settings::WindowMaterial::parse(value)),
+        "window_body_tint" => SettingChange::WindowBodyTint(flag()?),
+        "figure_button" => SettingChange::FigureButton(flag()?),
+        "figure_png_scale" => SettingChange::FigurePngScale(value.trim().parse().ok()?),
         "minimap_width" => SettingChange::MinimapWidth(number()?),
         "tab_width" => SettingChange::TabWidth(value.trim().parse().ok()?),
         "recent_limit" => SettingChange::RecentLimit(value.trim().parse().ok()?),
@@ -390,6 +504,8 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "diff_ignore_case" => SettingChange::DiffIgnoreCase(flag()?),
         "diff_ignore_eol" => SettingChange::DiffIgnoreEol(flag()?),
         "patch_format" => SettingChange::PatchFormat(settings::PatchFormat::parse(value)),
+        // 背景画像（v2.4.0 R-01）
+        _ if key.starts_with("bg_") => SettingChange::Backdrop(key.to_owned(), value.to_owned()),
         "sun_latitude" => SettingChange::SunField(0, value.to_owned()),
         "sun_longitude" => SettingChange::SunField(1, value.to_owned()),
         "sun_rise_offset" => SettingChange::SunField(2, value.to_owned()),
@@ -410,7 +526,11 @@ pub(super) fn reset_change(key: &str, settings: &Settings) -> Option<SettingChan
     if now == default {
         return None;
     }
-    if key.starts_with("window_") && key != "window_position" {
+    // **座標を指定の 4 つだけ**（`window_material` などを巻き込まない。v2.4.0）
+    if matches!(
+        key,
+        "window_x" | "window_y" | "window_width" | "window_height"
+    ) {
         return Some(SettingChange::ResetCustom);
     }
     let value = default.unwrap_or_default();
@@ -427,11 +547,11 @@ fn differs<T: PartialEq>(now: &T, default: &T, change: SettingChange) -> Option<
     (now != default).then_some(change)
 }
 
-fn note(label: &str) -> Element<'_, Message> {
+pub(super) fn note(label: &str) -> Element<'_, Message> {
     text(label).size(11).into()
 }
 
-fn toggle<'a>(
+pub(super) fn toggle<'a>(
     label: &'a str,
     value: bool,
     change: fn(bool) -> SettingChange,
@@ -619,6 +739,98 @@ impl App {
             SettingChange::Palette(change) => self.apply_palette(change),
             SettingChange::Eye(change) => self.apply_eye(change),
             SettingChange::Snippet(change) => self.apply_snippet(change),
+            SettingChange::PreviewJump(on) => self.settings.preview_jump = on,
+            SettingChange::PreviewJumpClick(click) => self.settings.preview_jump_click = click,
+            SettingChange::PreviewFollowCaret(on) => self.settings.preview_follow_caret = on,
+            SettingChange::FigureZoom(on) => self.settings.figure_zoom = on,
+            SettingChange::CodeCopyButton(on) => self.settings.code_copy_button = on,
+            SettingChange::MarpSlides(on) => self.settings.marp_slides = on,
+            SettingChange::MarpAssist(on) => self.settings.marp_assist = on,
+            SettingChange::MarpPresentInfo(on) => self.settings.marp_present_info = on,
+            SettingChange::RememberUrls(on) => {
+                self.settings.remember_urls = on;
+                // 覚えないなら、覚えていたものも消す
+                if !on {
+                    self.settings.recent_urls.clear();
+                }
+            }
+            SettingChange::RemoteImages(on) => {
+                self.settings.remote_images = on;
+                self.sync_remote_images();
+            }
+            SettingChange::ClearRecentUrls => self.settings.recent_urls.clear(),
+            SettingChange::MarpExportFormat(format) => self.settings.marp_export_format = format,
+            SettingChange::McpEnabled(on) => self.settings.mcp_enabled = on,
+            SettingChange::McpHeadless(on) => self.settings.mcp_headless = on,
+            SettingChange::McpPermission(tool, permission) => {
+                // **既定と同じなら持たない**（設定ファイルには既定と違うものだけを書く）
+                match permission.filter(|p| *p != crate::io::mcp_access::default_for(&tool)) {
+                    Some(permission) => {
+                        self.settings.mcp_permissions.insert(tool, permission);
+                    }
+                    None => {
+                        self.settings.mcp_permissions.remove(&tool);
+                    }
+                }
+            }
+            SettingChange::McpResetAll => self.settings.mcp_permissions.clear(),
+            SettingChange::McpRefreshLog => {
+                if let Some(screen) = self.settings_screen.as_mut() {
+                    screen.mcp_log = crate::io::mcp_access::recent(100);
+                }
+            }
+            SettingChange::McpCopyExample => {
+                task = iced::clipboard::write(super::mcp_settings::client_config_example());
+            }
+            SettingChange::McpHttp(on) => self.settings.mcp_http = on,
+            SettingChange::McpHttpPort(value) => {
+                if let Some(screen) = self.settings_screen.as_mut() {
+                    screen.mcp_http_port.clone_from(&value);
+                }
+                if let Ok(port) = value.trim().parse::<u16>() {
+                    if (settings::MCP_HTTP_PORT_MIN..=settings::MCP_HTTP_PORT_MAX).contains(&port) {
+                        self.settings.mcp_http_port = port;
+                    }
+                }
+            }
+            SettingChange::McpCopyToken => {
+                if let Some(host) = crate::mcp::http::current() {
+                    task = iced::clipboard::write(host.token);
+                }
+            }
+            SettingChange::McpCopyHttpExample => {
+                if let Some(host) = crate::mcp::http::current() {
+                    task = iced::clipboard::write(super::mcp_settings::http_config_example(
+                        &host.url(),
+                        &host.token,
+                    ));
+                }
+            }
+            SettingChange::WindowMaterial(material) => self.settings.window_material = material,
+            SettingChange::WindowBodyTint(on) => self.settings.window_body_tint = on,
+            SettingChange::FigureButton(on) => self.settings.figure_button = on,
+            SettingChange::FigurePngScale(scale) => {
+                self.settings.figure_png_scale = scale.clamp(1, settings::FIGURE_SCALE_MAX);
+            }
+            SettingChange::Backdrop(key, value) => {
+                self.settings.backdrop.set(&key, &value);
+            }
+            SettingChange::BackdropPick(dark) => task = self.pick_backdrop(dark),
+            SettingChange::BackdropPicked(dark, path) => {
+                self.picking = false;
+                self.browser_choice = None;
+                let Some(path) = path else {
+                    return Task::none();
+                };
+                let key = if dark {
+                    "bg_dark_image"
+                } else {
+                    "bg_light_image"
+                };
+                // 選んだら使う（選んだのに出ないのは分かりにくい）
+                self.settings.backdrop.set(key, &path.to_string_lossy());
+                self.settings.backdrop.enabled = true;
+            }
             SettingChange::SunField(index, value) => {
                 if let Some(screen) = self.settings_screen.as_mut() {
                     if let Some(field) = screen.sun_fields.get_mut(index) {
@@ -754,6 +966,8 @@ impl App {
             SettingsPage::Assist => self.assist_page(),
             SettingsPage::Snippets => self.snippets_page(screen),
             SettingsPage::Compare => self.compare_page(),
+            SettingsPage::Slides => self.slides_page(),
+            SettingsPage::Mcp => self.mcp_page(screen),
             SettingsPage::Keys => self.keys_page(screen),
         };
 
@@ -1079,6 +1293,108 @@ impl App {
                 ),
             ),
             note("プレビューのフォントは変えられません。PDF 出力と同じ測り方を保つためです。"),
+            // プレビューから編集の行へ（v2.4.0 R-03）
+            heading("編集画面との行き来"),
+            with_reset(
+                toggle(
+                    "プレビューを押して、編集画面のその行へ飛ぶ",
+                    s.preview_jump,
+                    SettingChange::PreviewJump
+                ),
+                differs(
+                    &s.preview_jump,
+                    &d.preview_jump,
+                    SettingChange::PreviewJump(d.preview_jump)
+                ),
+            ),
+            with_reset(
+                line(
+                    "押し方",
+                    pick_list(
+                        settings::JumpClick::ALL.to_vec(),
+                        Some(s.preview_jump_click),
+                        |click| Message::Setting(SettingChange::PreviewJumpClick(click))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.preview_jump_click,
+                    &d.preview_jump_click,
+                    SettingChange::PreviewJumpClick(d.preview_jump_click)
+                ),
+            ),
+            note("押して引くのは今までどおり文字の選択です。リンクの上ではリンクを開きます。プレビューだけのときは編集画面に切り替えて飛びます。"),
+            with_reset(
+                toggle(
+                    "キャレットを追って、プレビューを送る",
+                    s.preview_follow_caret,
+                    SettingChange::PreviewFollowCaret
+                ),
+                differs(
+                    &s.preview_follow_caret,
+                    &d.preview_follow_caret,
+                    SettingChange::PreviewFollowCaret(d.preview_follow_caret)
+                ),
+            ),
+            note("分割表示でスクロール同期を入れているとき、キャレットのある段落がプレビューで見えるように送ります。"),
+            // 図の拡大（v2.4.0 R-04）
+            heading("図を拡大して見る"),
+            with_reset(
+                toggle(
+                    "図・数式・画像を拡大して見る（ダブルクリック）",
+                    s.figure_zoom,
+                    SettingChange::FigureZoom
+                ),
+                differs(
+                    &s.figure_zoom,
+                    &d.figure_zoom,
+                    SettingChange::FigureZoom(d.figure_zoom)
+                ),
+            ),
+            with_reset(
+                toggle(
+                    "図の上にポインタを置くと、拡大のボタンを出す",
+                    s.figure_button,
+                    SettingChange::FigureButton
+                ),
+                differs(
+                    &s.figure_button,
+                    &d.figure_button,
+                    SettingChange::FigureButton(d.figure_button)
+                ),
+            ),
+            with_reset(
+                line(
+                    "写す PNG の倍率（図・数式）",
+                    pick_list(
+                        (1..=settings::FIGURE_SCALE_MAX).collect::<Vec<u8>>(),
+                        Some(s.figure_png_scale),
+                        |scale| Message::Setting(SettingChange::FigurePngScale(scale))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.figure_png_scale,
+                    &d.figure_png_scale,
+                    SettingChange::FigurePngScale(d.figure_png_scale)
+                ),
+            ),
+            note("拡大の画面では、ホイールで拡大・縮小、引いて動かせます。PNG のコピー・保存は、図と数式はこの倍率で描き直し、画像は元の大きさのまま写します。"),
+            // コードブロックのコピー（v2.4.0 R-04 b）
+            heading("コードブロック"),
+            with_reset(
+                toggle(
+                    "コードブロックの上にポインタを置くと、コピーのボタンを出す",
+                    s.code_copy_button,
+                    SettingChange::CodeCopyButton
+                ),
+                differs(
+                    &s.code_copy_button,
+                    &d.code_copy_button,
+                    SettingChange::CodeCopyButton(d.code_copy_button)
+                ),
+            ),
+            note("押すと、前後の ``` の行を除いたコードを文字として写します。"),
         ]
         .spacing(10)
         .into()
@@ -1107,6 +1423,44 @@ impl App {
             note("本文・選択・検索の色は、配色の文字色から作ります。"),
             // 日の出・日の入りに合わせるとき（v2.3.0 R-06）
             self.sun_section(screen),
+            // 窓の地（v2.4.0 R-05。Fluent Design の透明感）
+            heading("窓の地（透明感）"),
+            with_reset(
+                line(
+                    "窓の地",
+                    pick_list(
+                        settings::WindowMaterial::ALL.to_vec(),
+                        Some(self.settings.window_material),
+                        |material| Message::Setting(SettingChange::WindowMaterial(material))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &self.settings.window_material,
+                    &d.window_material,
+                    SettingChange::WindowMaterial(d.window_material)
+                ),
+            ),
+            with_reset(
+                toggle(
+                    "本文の地を残す（編集画面とプレビューを読みやすく）",
+                    self.settings.window_body_tint,
+                    SettingChange::WindowBodyTint
+                ),
+                differs(
+                    &self.settings.window_body_tint,
+                    &d.window_body_tint,
+                    SettingChange::WindowBodyTint(d.window_body_tint)
+                ),
+            ),
+            note(if cfg!(windows) {
+                "Mica 風は、デスクトップの壁紙をぼかして窓の地に敷きます（後ろの窓は透けません）。背景画像を敷いた所は背景画像が先です。"
+            } else {
+                "Mica 風は Windows だけで効きます。この OS では不透明のままです。"
+            }),
+            self.mica_error_note(),
+            // 背景画像（v2.4.0 R-01）
+            self.backdrop_section(),
             heading("窓の題名とステータスバー"),
             with_reset(
                 line(
@@ -1218,6 +1572,44 @@ impl App {
                     SettingChange::AutosaveSeconds(d.autosave_seconds.to_string())
                 ),
             ),
+            // URL を開く（v2.4.0 R-09）
+            heading("URL を開く"),
+            with_reset(
+                toggle(
+                    "最近開いた URL を覚える",
+                    s.remember_urls,
+                    SettingChange::RememberUrls
+                ),
+                differs(
+                    &s.remember_urls,
+                    &d.remember_urls,
+                    SettingChange::RememberUrls(d.remember_urls)
+                ),
+            ),
+            row![
+                text(format!("覚えている URL: {} 件", s.recent_urls.len())).size(12),
+                button(text("消す").size(11))
+                    .padding([2, 10])
+                    .on_press_maybe(
+                        (!s.recent_urls.is_empty())
+                            .then_some(Message::Setting(SettingChange::ClearRecentUrls))
+                    ),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            with_reset(
+                toggle(
+                    "画像も URL から取る（URL から開いた文書の画像と、http:// https:// の画像）",
+                    s.remote_images,
+                    SettingChange::RemoteImages
+                ),
+                differs(
+                    &s.remote_images,
+                    &d.remote_images,
+                    SettingChange::RemoteImages(d.remote_images)
+                ),
+            ),
+            note("ファイル → URL を開く…（Ctrl+Shift+L）で、URL の Markdown を読み取り専用で開きます。GitHub・GitLab・gist の画面の URL は中身の URL に読み替えます。画像を URL から取るのを入れると、ローカルの文書でも http:// https:// の画像を取りに行きます（業務の文書では外へ通信が出ることに気をつけてください）。"),
             heading("外での変更"),
             with_reset(
                 toggle(
@@ -1342,6 +1734,76 @@ impl App {
                 "いまは暗い時間です。"
             }),
             text(shown).size(11),
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    /// スライド（v2.4.0 R-07）。Marp の文書（frontmatter に `marp: true`）の見せ方
+    fn slides_page(&self) -> Element<'_, Message> {
+        let s = &self.settings;
+        let d = Settings::default();
+        column![
+            heading("プレビュー"),
+            with_reset(
+                toggle(
+                    "Marp の文書をスライドに分けて見せる",
+                    s.marp_slides,
+                    SettingChange::MarpSlides
+                ),
+                differs(
+                    &s.marp_slides,
+                    &d.marp_slides,
+                    SettingChange::MarpSlides(d.marp_slides)
+                ),
+            ),
+            note("文書の頭の frontmatter（--- で挟んだ所）に marp: true があると、--- ごとに 1 枚のスライドの枠で見せます。テーマは default・gaia・uncover に近いもので描きます（Marp と同じ見た目にはなりません）。切ると、普通の Markdown として見せます。"),
+            heading("指示を補う"),
+            with_reset(
+                toggle(
+                    "Marp の指示を補う（候補を出す・検査する）",
+                    s.marp_assist,
+                    SettingChange::MarpAssist
+                ),
+                differs(
+                    &s.marp_assist,
+                    &d.marp_assist,
+                    SettingChange::MarpAssist(d.marp_assist)
+                ),
+            ),
+            heading("発表"),
+            with_reset(
+                toggle(
+                    "発表の画面にページ番号と経過時間を出す",
+                    s.marp_present_info,
+                    SettingChange::MarpPresentInfo
+                ),
+                differs(
+                    &s.marp_present_info,
+                    &d.marp_present_info,
+                    SettingChange::MarpPresentInfo(d.marp_present_info)
+                ),
+            ),
+            heading("書き出し"),
+            with_reset(
+                line(
+                    "スライドを書き出すときの既定の形式",
+                    pick_list(
+                        settings::SlideExport::ALL.to_vec(),
+                        Some(s.marp_export_format),
+                        |format| Message::Setting(SettingChange::MarpExportFormat(format))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.marp_export_format,
+                    &d.marp_export_format,
+                    SettingChange::MarpExportFormat(d.marp_export_format)
+                ),
+            ),
+            note("ファイル → スライドを書き出す… はこの形式で書き出します。PDF・HTML・PPTX に出力… でも、Marp の文書はスライドとして書き出します。PPTX は 1 枚を 1 枚の画像にして貼るので、PowerPoint で文字は直せません（発表者のメモはノートに入ります）。"),
+            note("表示 → 発表（F5）で、キャレットのあるスライドから全画面で 1 枚ずつ見せます。→ ↓ PageDown Space Enter・押す・ホイールで次へ、← ↑ PageUp BackSpace・右の押下で前へ、Home・End で最初と最後、Esc で終わります。"),
+            note("frontmatter の中と <!-- の後ろで打つと、指示の名前と値の候補を出します（↑↓ で選び、Enter か Tab で入れ、Esc で閉じる）。知らないテーマ・読めない値・名前の打ち間違い・見つからない背景の画像は、Markdown の検査と同じ所（波線と一覧）に出します。"),
         ]
         .spacing(10)
         .into()

@@ -19,6 +19,8 @@ use crate::io::{FileFormat, LineEnding};
 pub struct Status {
     /// 開いているファイル（無題なら無い）
     pub path: Option<PathBuf>,
+    /// URL から開いたなら、その URL（v2.4.0 R-09）
+    pub url: Option<String>,
     /// 保存状態
     pub saved: bool,
     /// 1 始まりの行・桁
@@ -40,6 +42,7 @@ impl Status {
     /// 書式へ差し込む値
     pub fn fields(&self) -> Fields<'_> {
         Fields {
+            url: self.url.as_deref(),
             path: self.path.as_deref(),
             dirty: !self.saved,
             read_only: self.read_only,
@@ -120,6 +123,7 @@ mod tests {
 
     fn status() -> Status {
         Status {
+            url: None,
             path: Some(PathBuf::from("C:/docs/報告書.md")),
             saved: true,
             line: 12,

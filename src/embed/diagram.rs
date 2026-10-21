@@ -155,6 +155,37 @@ pub(crate) fn rasterize(svg: &str) -> Result<RenderedEmbed, EmbedError> {
     rasterize_with(svg, svg_options())
 }
 
+/// SVG を `scale` 倍で画素へ落とす（v2.4.0 R-04。拡大して見る・PNG で写す）。
+/// **長い辺が `max_side` を超えるなら、収まる倍率まで下げる**
+pub(crate) fn rasterize_scaled(
+    svg: &str,
+    scale: f32,
+    max_side: u32,
+) -> Result<RenderedEmbed, EmbedError> {
+    let tree = usvg::Tree::from_str(svg, svg_options())
+        .map_err(|error| EmbedError::Failed(format!("SVG を読めない: {error}")))?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        return Err(EmbedError::Failed("寸法が 0 の図".to_owned()));
+    }
+    let longest = size.width().max(size.height());
+    let scale = scale.max(0.1).min(max_side as f32 / longest);
+    let width = (size.width() * scale).ceil() as u32;
+    let height = (size.height() * scale).ceil() as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width.max(1), height.max(1))
+        .ok_or_else(|| EmbedError::Failed("画素を確保できない".to_owned()))?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    Ok(RenderedEmbed {
+        width: pixmap.width(),
+        height: pixmap.height(),
+        pixels: std::sync::Arc::new(pixmap.take()),
+    })
+}
+
 fn rasterize_with(svg: &str, options: &usvg::Options) -> Result<RenderedEmbed, EmbedError> {
     let tree = usvg::Tree::from_str(svg, options)
         .map_err(|error| EmbedError::Failed(format!("SVG を読めない: {error}")))?;

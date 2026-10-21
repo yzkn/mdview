@@ -70,14 +70,30 @@ pub fn export(
     // 画面と PDF は自前の走査器を通すので `$$` を数式として扱えるが、
     // ここは comrak が解析するため、そのままでは段落になる。
     // **判定は走査器に聞く**（決める場所を増やさない）
-    let source = crate::parse::dollar::to_math_fences(&source);
+    let mut skipped_images = 0_usize;
+    let body = body_html(&source, base_dir, watch, &mut skipped_images)?;
+
+    watch.done(1);
+    Ok(Html {
+        text: wrap(title, &body),
+        skipped_images,
+    })
+}
+
+/// Markdown を本文の HTML にする（図・数式・画像は埋め込む）。**スライドの書き出しでも使う**（v2.4.0 R-07 7d）
+pub(super) fn body_html(
+    source: &str,
+    base_dir: Option<&Path>,
+    watch: &dyn ExportWatch,
+    skipped: &mut usize,
+) -> Result<String, ExportError> {
+    let source = crate::parse::dollar::to_math_fences(source);
     let arena = Arena::new();
     let options = options();
     let root = parse_document(&arena, &source, &options);
 
     // 目印と、その差し替え先
     let mut replacements: Vec<(String, String)> = Vec::new();
-    let mut skipped_images = 0_usize;
 
     let diagrams = DiagramRenderer::new();
     let math = MathRenderer::new();
@@ -110,19 +126,15 @@ pub fn export(
                     &image.title,
                     None,
                     base_dir,
-                    &mut skipped_images,
+                    skipped,
                 )),
                 // **`<img>` タグ 1 つだけのものも画像として埋め込む**（v2.1.0 R-17）。
                 // 生の HTML は出さない設定なので、扱わないと黙って消える
-                NodeValue::HtmlBlock(html) => {
-                    crate::parse::inline::img_tag(&html.literal).map(|tag| {
-                        image_html(&tag.src, &tag.alt, tag.width, base_dir, &mut skipped_images)
-                    })
-                }
+                NodeValue::HtmlBlock(html) => crate::parse::inline::img_tag(&html.literal)
+                    .map(|tag| image_html(&tag.src, &tag.alt, tag.width, base_dir, skipped)),
                 NodeValue::HtmlInline(html) if alone_in_paragraph(node) => {
-                    crate::parse::inline::img_tag(html).map(|tag| {
-                        image_html(&tag.src, &tag.alt, tag.width, base_dir, &mut skipped_images)
-                    })
+                    crate::parse::inline::img_tag(html)
+                        .map(|tag| image_html(&tag.src, &tag.alt, tag.width, base_dir, skipped))
                 }
                 _ => None,
             }
@@ -166,12 +178,7 @@ pub fn export(
     for (marker, html) in replacements {
         body = body.replace(&marker, &html);
     }
-
-    watch.done(1);
-    Ok(Html {
-        text: wrap(title, &body),
-        skipped_images,
-    })
+    Ok(body)
 }
 
 /// 画像 1 つを HTML にする（埋め込めなければ、その旨の段落）。
@@ -245,7 +252,17 @@ fn figure(svg: Result<String, EmbedError>) -> String {
 }
 
 /// ローカル画像を `data:` にする。取れないものは `None`。
-fn embed_image(url: &str, base_dir: Option<&Path>) -> Option<String> {
+pub(super) fn embed_image(url: &str, base_dir: Option<&Path>) -> Option<String> {
+    // 設定で入れていれば URL から取って埋める（v2.4.0 R-09。外部参照は持たないまま）
+    if let Some(remote) = crate::embed::image::remote_url(url) {
+        let (bytes, _) = crate::io::remote::fetch(&remote, MAX_IMAGE_BYTES).ok()?;
+        let name = crate::io::remote::file_name(&remote);
+        return Some(format!(
+            "data:{};base64,{}",
+            mime_of(Path::new(&name)),
+            base64(&bytes)
+        ));
+    }
     // **外部参照は持たない**（§17A.2）。取りにも行かない（§16.12）
     if crate::embed::is_remote(url) {
         return None;
@@ -279,7 +296,7 @@ fn mime_of(path: &Path) -> &'static str {
 }
 
 /// Base64（RFC 4648）。**依存を増やさない**ために自前で持つ。
-fn base64(bytes: &[u8]) -> String {
+pub(super) fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
 
@@ -303,7 +320,7 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 /// 属性へ入れる文字を安全にする。
-fn escape(text: &str) -> String {
+pub(super) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

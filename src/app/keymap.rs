@@ -299,6 +299,8 @@ pub enum Command {
     New,
     NewWindow,
     Open,
+    // URL を開く（v2.4.0 R-09）
+    OpenUrl,
     OpenInNewWindow,
     Save,
     SaveAs,
@@ -349,6 +351,9 @@ pub enum Command {
     SaveWithBom,
     ExportPdf,
     ExportHtml,
+    // スライドの書き出し（v2.4.0 R-07 7e）。既定の打鍵は無い
+    ExportPptx,
+    ExportSlides,
     // 2 つの文書を比べる（v2.3.0 R-02）。既定の打鍵は無い
     CompareFiles,
     CompareFilesInApp,
@@ -375,6 +380,10 @@ pub enum Command {
     LintPanel,
     // 集中モード（v2.3.0 R-13）
     FocusMode,
+    // コマンドパレット（v2.4.0 R-02）
+    Palette,
+    // 発表（v2.4.0 R-07 7c）
+    Present,
     TableAddRow,
     TableAddColumn,
     Transform(Transform),
@@ -389,10 +398,11 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 89] = [
+    pub const ALL: [Command; 94] = [
         Self::New,
         Self::NewWindow,
         Self::Open,
+        Self::OpenUrl,
         Self::OpenInNewWindow,
         Self::Save,
         Self::SaveAs,
@@ -441,6 +451,8 @@ impl Command {
         Self::SaveWithBom,
         Self::ExportPdf,
         Self::ExportHtml,
+        Self::ExportPptx,
+        Self::ExportSlides,
         Self::CompareFiles,
         Self::CompareFilesInApp,
         Self::CompareSaved,
@@ -459,6 +471,8 @@ impl Command {
         Self::UnnumberHeadings,
         Self::LintPanel,
         Self::FocusMode,
+        Self::Palette,
+        Self::Present,
         Self::TableAddRow,
         Self::TableAddColumn,
         Self::Transform(Transform::Upper),
@@ -487,6 +501,7 @@ impl Command {
             Self::New => "new",
             Self::NewWindow => "new_window",
             Self::Open => "open",
+            Self::OpenUrl => "open_url",
             Self::OpenInNewWindow => "open_in_new_window",
             Self::Save => "save",
             Self::SaveAs => "save_as",
@@ -535,6 +550,8 @@ impl Command {
             Self::SaveWithBom => "save_with_bom",
             Self::ExportPdf => "export_pdf",
             Self::ExportHtml => "export_html",
+            Self::ExportPptx => "export_pptx",
+            Self::ExportSlides => "export_slides",
             Self::CompareFiles => "compare_files",
             Self::CompareFilesInApp => "compare_files_in_app",
             Self::CompareSaved => "compare_saved",
@@ -553,6 +570,8 @@ impl Command {
             Self::UnnumberHeadings => "unnumber_headings",
             Self::LintPanel => "lint_panel",
             Self::FocusMode => "focus_mode",
+            Self::Palette => "command_palette",
+            Self::Present => "present",
             Self::TableAddRow => "table_add_row",
             Self::TableAddColumn => "table_add_column",
             Self::Transform(which) => match which {
@@ -586,6 +605,7 @@ impl Command {
             Self::New => "新規",
             Self::NewWindow => "新しいウィンドウ",
             Self::Open => "開く",
+            Self::OpenUrl => "URL を開く",
             Self::OpenInNewWindow => "新しいウィンドウで開く",
             Self::Save => "上書き保存",
             Self::SaveAs => "名前を付けて保存",
@@ -635,6 +655,8 @@ impl Command {
             Self::SaveWithBom => "BOM を付けて保存",
             Self::ExportPdf => "PDF に出力",
             Self::ExportHtml => "HTML に出力",
+            Self::ExportPptx => "PPTX に出力（スライド）",
+            Self::ExportSlides => "スライドを書き出す",
             Self::CompareFiles => "ファイルを比べる",
             Self::CompareFilesInApp => "アプリ内で選んで比べる",
             Self::CompareSaved => "保存してある元と比べる",
@@ -653,6 +675,8 @@ impl Command {
             Self::UnnumberHeadings => "見出しの番号を外す",
             Self::LintPanel => "Markdown の検査の一覧",
             Self::FocusMode => "集中モード",
+            Self::Palette => "コマンドパレット",
+            Self::Present => "発表（スライド）",
             Self::TableAddRow => "表に行を足す",
             Self::TableAddColumn => "表に列を足す",
             Self::Transform(which) => which.label(),
@@ -674,6 +698,7 @@ impl Command {
             Self::New => &["Ctrl+N"],
             Self::NewWindow => &["Ctrl+Shift+N"],
             Self::Open => &["Ctrl+O"],
+            Self::OpenUrl => &["Ctrl+Shift+L"],
             Self::OpenInNewWindow => &["Ctrl+Alt+O"],
             Self::Save => &["Ctrl+S"],
             Self::SaveAs => &["Ctrl+Shift+S"],
@@ -725,11 +750,17 @@ impl Command {
             Self::AlwaysOnTop => &[],
             // **よくある全画面の打鍵**（ブラウザー・エディタと同じ）
             Self::FocusMode => &["F11"],
+            // VS Code と同じ
+            Self::Palette => &["Ctrl+Shift+P"],
+            // プレゼンテーションの道具と同じ
+            Self::Present => &["F5"],
             Self::ReadOnly => &[],
             Self::OpenInApp
             | Self::SaveWithBom
             | Self::ExportPdf
             | Self::ExportHtml
+            | Self::ExportPptx
+            | Self::ExportSlides
             | Self::CompareFiles
             | Self::CompareFilesInApp
             | Self::CompareSaved
@@ -780,11 +811,14 @@ impl Command {
                 | Self::ZoomReset
                 | Self::AlwaysOnTop
                 | Self::FocusMode
+                | Self::Palette
                 | Self::ReadOnly
                 | Self::OpenInApp
                 | Self::SaveWithBom
                 | Self::ExportPdf
                 | Self::ExportHtml
+                | Self::ExportPptx
+                | Self::ExportSlides
                 | Self::CompareFiles
                 | Self::CompareFilesInApp
                 | Self::CompareSaved
@@ -805,6 +839,7 @@ impl Command {
             Self::New => Message::File(FileCommand::New),
             Self::NewWindow => Message::NewWindow,
             Self::Open => Message::File(FileCommand::Open),
+            Self::OpenUrl => Message::OpenUrlDialog,
             Self::OpenInNewWindow => Message::OpenInNewWindow,
             Self::Save => Message::File(FileCommand::Save),
             Self::SaveAs => Message::File(FileCommand::SaveAs),
@@ -853,6 +888,8 @@ impl Command {
             Self::SaveWithBom => Message::File(FileCommand::SaveWithBom),
             Self::ExportPdf => Message::File(FileCommand::ExportPdf),
             Self::ExportHtml => Message::File(FileCommand::ExportHtml),
+            Self::ExportPptx => Message::File(FileCommand::ExportPptx),
+            Self::ExportSlides => Message::File(FileCommand::ExportSlides),
             Self::CompareFiles => Message::Diff(DiffMessage::OpenFiles { in_app: false }),
             Self::CompareFilesInApp => Message::Diff(DiffMessage::OpenFiles { in_app: true }),
             Self::CompareSaved => Message::Diff(DiffMessage::OpenSaved),
@@ -871,6 +908,8 @@ impl Command {
             Self::UnnumberHeadings => Message::Toc(crate::app::TocCommand::Unnumber),
             Self::LintPanel => Message::Lint(crate::app::LintMessage::TogglePanel),
             Self::FocusMode => Message::ToggleFocusMode,
+            Self::Palette => Message::OpenCommandPalette,
+            Self::Present => Message::TogglePresentation,
             Self::TableAddRow => Message::TableAddRow,
             Self::TableAddColumn => Message::TableAddColumn,
             Self::Transform(which) => Message::Transform(which),

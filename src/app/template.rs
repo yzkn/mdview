@@ -53,6 +53,8 @@ pub const HELP: &str =
 #[derive(Debug, Clone, Default)]
 pub struct Fields<'a> {
     pub path: Option<&'a Path>,
+    /// URL から開いたなら、その URL（v2.4.0 R-09）
+    pub url: Option<&'a str>,
     pub dirty: bool,
     pub read_only: bool,
     pub line: usize,
@@ -78,6 +80,7 @@ impl Fields<'_> {
         self.path
             .and_then(Path::file_name)
             .map(|name| name.to_string_lossy().into_owned())
+            .or_else(|| self.url.map(crate::io::remote::file_name))
             .unwrap_or_else(|| "無題".to_owned())
     }
 
@@ -304,6 +307,7 @@ mod tests {
 
     fn fields(path: &Path) -> Fields<'_> {
         Fields {
+            url: None,
             path: Some(path),
             dirty: false,
             read_only: false,
@@ -330,6 +334,7 @@ mod tests {
             "［読み取り専用］ a.md * — mdview"
         );
         let untitled = Fields {
+            url: None,
             path: None,
             ..fields(&path)
         };

@@ -1,7 +1,8 @@
 //! 画像を読み込む（§16.12）。
 //!
-//! **ネットワークからは取得しない。** 業務の文書を開いただけで外部へ通信が出るのは
+//! **既定ではネットワークから取得しない。** 業務の文書を開いただけで外部へ通信が出るのは
 //! 受け入れられない。`http://` などを指していたら、その旨を画面に出して終わる。
+//! 設定「画像も URL から取る」を入れたときだけ取りに行く（v2.4.0 R-09。`allow_remote`）。
 //!
 //! **原寸のまま持たない。** 表示上の最大幅を超える画像は縮小して保持する。
 //! 4000x3000 の写真を原寸で持つと 1 枚 48MB になる。
@@ -43,6 +44,30 @@ pub fn is_remote(reference: &str) -> bool {
         || lower.starts_with("//")
 }
 
+/// 画像を URL から取るか（v2.4.0 R-09）。`Some` なら取る。中身は URL から開いた文書の URL（相対の画像の基準）
+static REMOTE: std::sync::RwLock<Option<Option<String>>> = std::sync::RwLock::new(None);
+
+/// 画像を URL から取るかを決める（窓が、文書を替えたときと設定を変えたときに呼ぶ）
+pub fn allow_remote(allowed: bool, base: Option<String>) {
+    if let Ok(mut slot) = REMOTE.write() {
+        *slot = allowed.then_some(base);
+    }
+}
+
+/// 取りに行く画像の URL（**取らない設定なら `None`**）。絶対の URL と、URL から開いた文書の相対の参照
+pub fn remote_url(reference: &str) -> Option<String> {
+    let slot = REMOTE.read().ok()?;
+    let base = slot.as_ref()?;
+    let reference = reference.trim();
+    if crate::io::remote::is_url(reference) {
+        return Some(reference.to_owned());
+    }
+    if reference.starts_with("data:") || Path::new(reference).is_absolute() {
+        return None;
+    }
+    crate::io::remote::join(base.as_deref()?, reference)
+}
+
 /// 文書の位置を基準にパスを解決する。
 ///
 /// 絶対パスはそのまま。相対パスは `base` からの相対として扱う。
@@ -72,8 +97,15 @@ impl RenderEmbed for ImageRenderer {
     fn render(&self, source: &EmbedSource) -> Result<RenderedEmbed, EmbedError> {
         let path = Path::new(&source.text);
 
-        let bytes = std::fs::read(path)
-            .map_err(|error| EmbedError::Failed(format!("{}: {error}", path.display())))?;
+        // URL なら取りに行く（設定で入れたときだけ、ここまで来る。v2.4.0 R-09）
+        let bytes = if crate::io::remote::is_url(&source.text) {
+            crate::io::remote::fetch(&source.text, crate::io::remote::IMAGE_LIMIT)
+                .map(|(bytes, _)| bytes)
+                .map_err(|error| EmbedError::Failed(format!("{}: {error}", source.text)))?
+        } else {
+            std::fs::read(path)
+                .map_err(|error| EmbedError::Failed(format!("{}: {error}", path.display())))?
+        };
 
         let decoded = image::load_from_memory(&bytes)
             .map_err(|error| EmbedError::Failed(format!("読めない画像: {error}")))?;

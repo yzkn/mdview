@@ -305,6 +305,8 @@ pub enum Action {
         line: usize,
         column: usize,
     },
+    /// 候補の一覧の何番目かを押した（v2.4.0 R-07 7b）
+    PickCompletion(usize),
 }
 
 /// IME から届く出来事（§4.5 の状態遷移）。
@@ -355,7 +357,21 @@ pub enum LineMark {
 }
 
 /// 等幅・固定行高のエディタ。
+/// 打っている所の候補（v2.4.0 R-07 7b）。**キャレットの下に出す**（下に入らなければ上）
+#[derive(Debug, Clone, Copy)]
+pub struct CompletionView<'a> {
+    pub items: &'a [crate::marp::assist::Candidate],
+    pub selected: usize,
+    /// 一覧の地の色（画面の地と同じ）
+    pub background: Color,
+}
+
+/// 候補を一度に出す数
+const COMPLETION_ROWS: usize = 8;
+
 pub struct EditorView<'a> {
+    /// 打っている所の候補（v2.4.0 R-07 7b）
+    completion: Option<CompletionView<'a>>,
     document: &'a Document,
     state: &'a EditorState,
     font: iced::Font,
@@ -439,6 +455,173 @@ impl<'a> EditorView<'a> {
             eye: &[],
             guides: &[],
             lint: &[],
+            completion: None,
+        }
+    }
+
+    /// 打っている所の候補を出す（v2.4.0 R-07 7b）
+    pub fn completion(mut self, view: Option<CompletionView<'a>>) -> Self {
+        self.completion = view;
+        self
+    }
+
+    /// 候補の一覧の置き場所（一覧の矩形・頭に出す候補・出す数・字の大きさ・名前の幅）。
+    /// **描くのと押すので同じものを使う**
+    fn completion_card<Renderer>(
+        &self,
+        bounds: Rectangle,
+        view: CompletionView<'_>,
+    ) -> Option<(Rectangle, usize, usize, f32, f32)>
+    where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        if view.items.is_empty() {
+            return None;
+        }
+        let (x, y) = self.caret_position::<Renderer>(bounds);
+        let row = self.line_height;
+        let shown = view.items.len().min(COMPLETION_ROWS);
+        let first = (view.selected + 1).saturating_sub(shown);
+        let size = self.text_size * 0.92;
+        let width_of = |content: &str| {
+            content
+                .chars()
+                .map(|c| if c.is_ascii() { 0.6 } else { 1.0 })
+                .sum::<f32>()
+                * size
+        };
+        let label_w = view
+            .items
+            .iter()
+            .map(|item| width_of(&item.label))
+            .fold(0.0_f32, f32::max);
+        let detail_w = view
+            .items
+            .iter()
+            .map(|item| width_of(item.detail))
+            .fold(0.0_f32, f32::max);
+        let width = (label_w + detail_w + 40.0).min((bounds.width - 8.0).max(40.0));
+        let height = shown as f32 * row + 8.0;
+        let mut top = y + row;
+        if top + height > bounds.y + bounds.height {
+            top = (y - height).max(bounds.y);
+        }
+        let left = x.min(bounds.x + bounds.width - width - 4.0).max(bounds.x);
+        let card = Rectangle::new(Point::new(left, top), Size::new(width, height));
+        Some((card, first, shown, size, label_w))
+    }
+
+    /// 押した所の候補（v2.4.0 R-07 7b）。一覧の外なら `None`
+    fn completion_at<Renderer>(&self, bounds: Rectangle, point: Point) -> Option<usize>
+    where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let view = self.completion?;
+        let (card, first, shown, _, _) = self.completion_card::<Renderer>(bounds, view)?;
+        if !card.contains(point) {
+            return None;
+        }
+        let offset = ((point.y - card.y - 4.0) / self.line_height)
+            .floor()
+            .max(0.0) as usize;
+        (offset < shown).then_some(first + offset)
+    }
+
+    /// 候補の一覧を描く（v2.4.0 R-07 7b）
+    fn draw_completion<Renderer>(
+        &self,
+        renderer: &mut Renderer,
+        bounds: Rectangle,
+        view: CompletionView<'_>,
+        text_color: Color,
+        viewport: &Rectangle,
+    ) where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let Some((card, first, shown, size, label_w)) =
+            self.completion_card::<Renderer>(bounds, view)
+        else {
+            return;
+        };
+        let (left, top, width) = (card.x, card.y, card.width);
+        let row = self.line_height;
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: Rectangle::new(Point::new(left + 2.0, top + 3.0), card.size()),
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Color::from_rgba(0.0, 0.0, 0.0, 0.18),
+        );
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: card,
+                border: iced::Border {
+                    radius: 6.0.into(),
+                    width: 1.0,
+                    color: Color {
+                        a: 0.25,
+                        ..text_color
+                    },
+                },
+                ..Default::default()
+            },
+            view.background,
+        );
+        let muted = Color {
+            a: 0.6,
+            ..text_color
+        };
+        for offset in 0..shown {
+            let index = first + offset;
+            let Some(item) = view.items.get(index) else {
+                break;
+            };
+            let row_y = top + 4.0 + offset as f32 * row;
+            if index == view.selected {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle::new(
+                            Point::new(left + 4.0, row_y),
+                            Size::new(width - 8.0, row),
+                        ),
+                        border: iced::Border {
+                            radius: 4.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    Color {
+                        a: 0.14,
+                        ..text_color
+                    },
+                );
+            }
+            draw_text(
+                renderer,
+                &item.label,
+                Point::new(left + 10.0, row_y),
+                self.font,
+                size,
+                row,
+                text_color,
+                text::Alignment::Left,
+                viewport,
+            );
+            draw_text(
+                renderer,
+                item.detail,
+                Point::new(left + 10.0 + label_w + 18.0, row_y),
+                self.font,
+                size,
+                row,
+                muted,
+                text::Alignment::Left,
+                viewport,
+            );
         }
     }
 
@@ -2412,6 +2595,15 @@ where
 
             // --- クリックでキャレットを置く ---
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                // **候補の一覧を押したら、その候補を入れる**（v2.4.0 R-07 7b）。本文より手前に重ねてある
+                if let Some(index) = cursor
+                    .position()
+                    .and_then(|point| self.completion_at::<Renderer>(bounds, point))
+                {
+                    shell.publish((self.on_action)(Action::PickCompletion(index)));
+                    shell.capture_event();
+                    return;
+                }
                 let Some(point) = cursor.position_in(bounds) else {
                     return;
                 };
@@ -2939,6 +3131,13 @@ where
                 );
             }
         });
+
+        // 打っている所の候補（v2.4.0 R-07 7b）。**本文とバーの上に重ねる**
+        if let Some(view) = self.completion {
+            renderer.with_layer(own_clip, |renderer| {
+                self.draw_completion::<Renderer>(renderer, bounds, view, text_color, viewport);
+            });
+        }
     }
 
     /// テキストの上では I ビームを出す。

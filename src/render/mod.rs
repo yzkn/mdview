@@ -12,6 +12,11 @@ pub mod diffmap;
 pub mod fonts;
 mod measure;
 mod preview;
+pub mod slides;
+// 背景画像（v2.4.0 R-01）
+pub mod backdrop;
+// 図を拡大して見る（v2.4.0 R-04）
+pub mod figure;
 // 桁の目盛り（v2.3.0 R-07）
 pub mod ruler;
 pub mod scrollbar;
@@ -29,12 +34,15 @@ pub use divider::{Divider, WIDTH as DIVIDER_WIDTH};
 /// 描画器そのものは要らないためである
 pub type PdfMeasurer = measure::IcedMeasurer<iced::Renderer>;
 pub use editor::{
-    advance_scroll_x, cells_before, take_whole_lines, text_left, Action, CursorMove, DiffMarks,
-    EditorState, EditorView, ImeAction, LineMark, RectSelection,
+    advance_scroll_x, cells_before, take_whole_lines, text_left, Action, CompletionView,
+    CursorMove, DiffMarks, EditorState, EditorView, ImeAction, LineMark, RectSelection,
 };
 pub use preview::{
     PreviewAction, PreviewColors, PreviewState, PreviewView, BASE_SIZE as PREVIEW_BASE_SIZE,
 };
+
+/// URL から取った結果（v2.4.0 R-09。頼んだ URL・行き着いた URL・中身。失敗なら理由）
+pub type UrlFetched = std::sync::Arc<Result<(String, String, Vec<u8>), String>>;
 
 /// アプリ全体のメッセージ（§6.4）。
 ///
@@ -239,6 +247,8 @@ pub enum Message {
     Editor(Action),
     /// diff の画面（v2.3.0 R-02）
     Diff(crate::app::diff::DiffMessage),
+    /// 図を拡大して見る画面（v2.4.0 R-04）
+    Figure(crate::app::FigureMessage),
     /// 選んでいる文字に目 grep の印を付ける（v2.3.0 R-05 C-3）
     EyeMarkSelection,
     /// 目次と見出しの番号（v2.3.0 R-10）
@@ -246,11 +256,31 @@ pub enum Message {
     /// Markdown の検査（v2.3.0 R-11）
     Lint(crate::app::LintMessage),
     /// スニペットの一覧の欄（v2.3.0 R-08）
+    /// コマンドパレット（v2.4.0 R-02）
+    OpenCommandPalette,
+    CommandPaletteInput(String),
+    CommandPaletteSubmit,
+    CommandPalettePick(usize),
+    CloseCommandPalette,
     OpenSnippetPicker,
     SnippetPickerInput(String),
     SnippetPickerSubmit,
     SnippetPickerPick(usize),
     CloseSnippetPicker,
+    /// 打っている所の候補を閉じる（v2.4.0 R-07 7b）
+    CloseCompletion,
+    /// URL を開く（v2.4.0 R-09）。窓を開く・打つ・開く（`Some` は最近の URL の何番目か）・閉じる・取れた
+    OpenUrlDialog,
+    UrlInput(String),
+    UrlSubmit(Option<usize>),
+    CloseUrlDialog,
+    UrlFetched(UrlFetched),
+    /// 発表を始める・終える（v2.4.0 R-07 7c）
+    TogglePresentation,
+    /// 発表で次・前へ（枚数）
+    PresentStep(i32),
+    /// 発表で何枚目かへ（`usize::MAX` なら最後）
+    PresentTo(usize),
     Preview(PreviewAction),
     /// 表示モードを切り替える
     SetMode(ViewMode),
@@ -353,6 +383,24 @@ pub enum Message {
     ClearRecent,
     /// 外で書き換えられたかを確かめた結果（R-21）。**頼んだときの見張りの世代**を添える
     ExternalStamp(u64, Option<crate::app::FileStamp>),
+    /// MCP サーバーからの頼み（v2.4.0 R-06 6b）。答えは中の送り口へ
+    Ipc(crate::ipc::Incoming),
+    /// MCP から頼まれた確認に答えた（v2.4.0 R-06 6c。真なら許す）
+    McpAnswer(bool),
+    /// 窓のハンドル（v2.4.0 R-05。Mica 風の地の位置合わせ）
+    MicaWindow(Option<isize>),
+    /// 壁紙を読んだ結果（v2.4.0 R-05。頼んだときのパス・更新時刻・モニターの大きさを添える）
+    MicaLoaded(
+        std::path::PathBuf,
+        Option<std::time::SystemTime>,
+        (u32, u32),
+        Result<std::sync::Arc<crate::io::backdrop::Loaded>, String>,
+    ),
+    /// 背景画像を読んだ結果（v2.4.0 R-01）。**頼んだときの鍵**を添える
+    BackdropLoaded(
+        crate::io::backdrop::Wanted,
+        Result<std::sync::Arc<crate::io::backdrop::Loaded>, String>,
+    ),
     /// 外の変更を読み直す／無視する（R-21）
     ReloadExternal,
     IgnoreExternal,
@@ -389,6 +437,10 @@ pub enum FileCommand {
     ExportPdf,
     /// HTML に出力する（§17A）
     ExportHtml,
+    /// PPTX に出力する（v2.4.0 R-07 7e。Marp の文書だけ）
+    ExportPptx,
+    /// スライドを書き出す（設定の既定の形式で。v2.4.0 R-07 7e）
+    ExportSlides,
 }
 
 /// 保存するときに、文字コードと BOM をどう決めるか（§19.4）。

@@ -17,6 +17,8 @@ pub struct DocumentMeta {
     pub format: FileFormat,
     /// 保存していない変更があるか
     pub dirty: bool,
+    /// URL から開いたなら、その URL（v2.4.0 R-09。保存先は持たない）
+    pub url: Option<String>,
 }
 
 impl DocumentMeta {
@@ -27,6 +29,7 @@ impl DocumentMeta {
             // **新規は BOM 付き UTF-8**（§19.4）
             format: FileFormat::for_new_document(),
             dirty: false,
+            url: None,
         }
     }
 
@@ -36,6 +39,7 @@ impl DocumentMeta {
             path: Some(path),
             format,
             dirty: false,
+            url: None,
         }
     }
 
@@ -45,6 +49,15 @@ impl DocumentMeta {
             .as_deref()
             .and_then(Path::file_stem)
             .map(|name| name.to_string_lossy().into_owned())
+            // URL から開いたものは、その名前（拡張子を除く）
+            .or_else(|| {
+                self.url.as_deref().map(|url| {
+                    let name = crate::io::remote::file_name(url);
+                    Path::new(&name)
+                        .file_stem()
+                        .map_or(name.clone(), |stem| stem.to_string_lossy().into_owned())
+                })
+            })
             .unwrap_or_else(|| "無題".to_owned())
     }
 
@@ -63,6 +76,8 @@ pub enum Pending {
     Open,
     /// 引数や関連付けで渡されたパスを開く
     OpenPath(PathBuf),
+    /// URL から開く（v2.4.0 R-09）
+    OpenUrl(String),
     /// 文字コードを指定して開き直す（§19.4）
     ///
     /// **未保存の確認を通す。** 開き直すと編集中の内容は消える
@@ -118,6 +133,7 @@ mod tests {
             path: Some(PathBuf::from("C:/docs/a.md")),
             format: FileFormat::default(),
             dirty: true,
+            url: None,
         }
     }
 

@@ -27,7 +27,11 @@ mod embed;
 mod export;
 mod io;
 mod layout;
+// MCP サーバー（v2.4.0 R-06）と、窓との通り道（6b）
+mod ipc;
+mod mcp;
 // PDF のページ分割（§5）
+mod marp;
 mod paginate;
 mod parse;
 mod render;
@@ -69,6 +73,8 @@ fn answer_without_a_window() -> Option<String> {
              \x20 -v, --version        版数を出す\n\
              \x20 -h, --help           この説明を出す\n\
              \x20 --automation         試験用の操作口を開く（GUI 自動テスト。標準入出力で JSON を交わす）\n\
+             \x20 --url <URL>          URL の Markdown を読み取り専用で開く\n\
+             \x20 --mcp                MCP サーバーとして動く（窓は出さない。MCP クライアントから標準入出力で呼ぶ）\n\
              \n\
              ファイルを渡すと、その Markdown を開いた状態で起動する。\n\
              2 つ以上渡すと、2 つ目からは別のウィンドウで開く（-r と -t は引き継ぐ）。",
@@ -88,6 +94,7 @@ const APP_NAME: &str = "mdview";
 /// ```text
 /// mdview 入力.md --export-html 出力.html
 /// mdview 入力.md --export-pdf  出力.pdf
+/// mdview 入力.md --export-pptx 出力.pptx（Marp の文書だけ）
 /// ```
 ///
 /// **画面と同じ結果にはならない。** 幅の測定に、実フォントではなく
@@ -105,7 +112,9 @@ fn export_without_a_window() -> Option<i32> {
 
     let html = find("--export-html");
     let pdf = find("--export-pdf");
-    if html.is_none() && pdf.is_none() {
+    // PPTX（v2.4.0 R-07 7e。Marp の文書だけ）
+    let pptx = find("--export-pptx");
+    if html.is_none() && pdf.is_none() && pptx.is_none() {
         return None;
     }
 
@@ -120,7 +129,7 @@ fn export_without_a_window() -> Option<i32> {
         if arg.starts_with('-') {
             skip_next = matches!(
                 arg.as_str(),
-                "--export-html" | "--export-pdf" | "-g" | "--goto"
+                "--export-html" | "--export-pdf" | "--export-pptx" | "-g" | "--goto"
             );
             return false;
         }
@@ -152,10 +161,16 @@ fn export_without_a_window() -> Option<i32> {
 
     struct Quiet;
     impl export::ExportWatch for Quiet {}
+    // Marp の文書はスライドとして書き出す（v2.4.0 R-07 7d）
+    let deck = export::slides::deck_for(&document);
 
     if let Some(out) = html {
         let at = std::time::Instant::now();
-        match export::html::export(&document, &title, base_dir, &Quiet) {
+        let written = match &deck {
+            Some(deck) => export::slides::html(&document, deck, &title, base_dir, &Quiet),
+            None => export::html::export(&document, &title, base_dir, &Quiet),
+        };
+        match written {
             Ok(html) => {
                 if let Err(error) = std::fs::write(&out, html.text) {
                     eprintln!("書けません: {error}");
@@ -174,9 +189,50 @@ fn export_without_a_window() -> Option<i32> {
         let at = std::time::Instant::now();
         // **実フォントでは測れない**ので固定の測定器を使う（上の注意）
         let measurer = layout::measure::FixedMeasurer::default();
-        match export::pdf::export(
+        let written = match &deck {
+            Some(deck) => export::slides::pdf(
+                &export::slides::fixed_measure,
+                &document,
+                deck,
+                &title,
+                base_dir,
+                &Quiet,
+                export::range::ExportRange::All,
+            ),
+            None => export::pdf::export(
+                &document,
+                &measurer,
+                &title,
+                base_dir,
+                &Quiet,
+                export::range::ExportRange::All,
+            ),
+        };
+        match written {
+            Ok(bytes) => {
+                if let Err(error) = std::fs::write(&out, bytes) {
+                    eprintln!("書けません: {error}");
+                    return Some(1);
+                }
+                report_export("PDF", &out, read_ms, at.elapsed().as_secs_f64() * 1000.0);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                return Some(1);
+            }
+        }
+    }
+
+    if let Some(out) = pptx {
+        let at = std::time::Instant::now();
+        let Some(deck) = &deck else {
+            eprintln!("PPTX にできるのは Marp の文書（frontmatter に marp: true）だけです");
+            return Some(1);
+        };
+        match export::slides::pptx(
+            &export::slides::fixed_measure,
             &document,
-            &measurer,
+            deck,
             &title,
             base_dir,
             &Quiet,
@@ -187,7 +243,7 @@ fn export_without_a_window() -> Option<i32> {
                     eprintln!("書けません: {error}");
                     return Some(1);
                 }
-                report_export("PDF", &out, read_ms, at.elapsed().as_secs_f64() * 1000.0);
+                report_export("PPTX", &out, read_ms, at.elapsed().as_secs_f64() * 1000.0);
             }
             Err(error) => {
                 eprintln!("{error}");
@@ -211,6 +267,12 @@ fn report_export(kind: &str, out: &str, read_ms: f64, export_ms: f64) {
 
 fn main() -> iced::Result {
     let _ = PROCESS_START.set(std::time::Instant::now());
+
+    // **MCP サーバーとして動く**（v2.4.0 R-06）。窓は出さず、標準入出力で MCP を話す。
+    // **端末へはつながない**（クライアントが渡した標準入出力の通り道を差し替えてしまう）
+    if std::env::args().any(|arg| arg == "--mcp") {
+        std::process::exit(mcp::run());
+    }
 
     // **落ちる前に書き出す口を仕掛ける**（§18.3）。
     // 画面を出す前に仕掛けるのは、起動の途中で落ちても効かせるためである

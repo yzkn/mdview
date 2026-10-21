@@ -13,6 +13,8 @@ pub enum Format {
     #[default]
     Pdf,
     Html,
+    /// スライドを 1 枚 1 画像で貼った PPTX（v2.4.0 R-07 7e。Marp の文書だけ）
+    Pptx,
 }
 
 impl Format {
@@ -20,6 +22,7 @@ impl Format {
         match self {
             Self::Pdf => "pdf",
             Self::Html => "html",
+            Self::Pptx => "pptx",
         }
     }
 
@@ -27,12 +30,13 @@ impl Format {
         match self {
             Self::Pdf => "PDF",
             Self::Html => "HTML",
+            Self::Pptx => "PPTX",
         }
     }
 
     /// 範囲を選べるか。**HTML はページという単位を持たない**（§17A.2）。
     pub fn takes_range(self) -> bool {
-        self == Self::Pdf
+        matches!(self, Self::Pdf | Self::Pptx)
     }
 }
 
