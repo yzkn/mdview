@@ -67,6 +67,21 @@ impl SettingsPage {
     }
 }
 
+/// フォーマッターの入り切りの鍵（v2.5.0 R-03）
+const TIDY_KEYS: [&str; 11] = [
+    "format_tables",
+    "format_bullets",
+    "format_emphasis",
+    "lint_fix_menu",
+    "lint_fix_key",
+    "lint_fix_save",
+    "lint_fix_close",
+    "format_menu",
+    "format_key",
+    "format_save",
+    "format_close",
+];
+
 /// 設定の変更 1 件。
 #[derive(Debug, Clone)]
 pub enum SettingChange {
@@ -138,6 +153,15 @@ pub enum SettingChange {
     CodeCopyButton(bool),
     /// Marp の文書をスライドに分けて見せる（v2.4.0 R-07 7a）
     MarpSlides(bool),
+    /// WYSIWYG（v2.5.0 R-01）
+    Wysiwyg(bool),
+    /// フォーマッター（v2.5.0 R-03）。鍵と値（入り切りの欄はまとめて扱う）
+    Tidy(&'static str, bool),
+    FormatBullet(char),
+    WysiwygLimit(String),
+    ListMarker(settings::Marker),
+    EmphasisMarker(settings::Marker),
+    StrongMarker(settings::Marker),
     /// Marp の指示を補う（v2.4.0 R-07 7b）
     MarpAssist(bool),
     /// 発表の画面にページ番号と経過時間を出す（v2.4.0 R-07 7c）
@@ -210,6 +234,8 @@ pub struct SettingsScreen {
     /// 手元の HTTP の口の欄（打ちかけの字。6d）と、いま受けている窓
     pub mcp_http_port: String,
     pub mcp_host: Option<crate::mcp::http::HostInfo>,
+    /// WYSIWYG の大きさの上限の欄（打ちかけの字。v2.5.0 R-01）
+    pub wysiwyg_limit: String,
 }
 
 impl SettingsScreen {
@@ -221,6 +247,7 @@ impl SettingsScreen {
         self.sun_fields = fresh.sun_fields;
         self.guide_columns = fresh.guide_columns;
         self.mcp_http_port = fresh.mcp_http_port;
+        self.wysiwyg_limit = fresh.wysiwyg_limit;
     }
 
     pub fn new(settings: &settings::Settings) -> Self {
@@ -249,6 +276,7 @@ impl SettingsScreen {
             mcp_log: Vec::new(),
             mcp_http_port: settings.mcp_http_port.to_string(),
             mcp_host: None,
+            wysiwyg_limit: settings.wysiwyg_limit_kb.to_string(),
         }
     }
 }
@@ -364,6 +392,12 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "editor_guide_columns",
             "minimap",
             "minimap_width",
+            // WYSIWYG（v2.5.0 R-01）
+            "wysiwyg",
+            "wysiwyg_limit_kb",
+            "list_marker",
+            "emphasis_marker",
+            "strong_marker",
         ],
         SettingsPage::Preview => vec![
             "preview_font_size",
@@ -410,6 +444,19 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "image_folder",
             "toc_depth",
             "lint_enabled",
+            // フォーマッター（v2.5.0 R-03）
+            "format_tables",
+            "format_bullets",
+            "format_bullet",
+            "format_emphasis",
+            "lint_fix_menu",
+            "lint_fix_key",
+            "lint_fix_save",
+            "lint_fix_close",
+            "format_menu",
+            "format_key",
+            "format_save",
+            "format_close",
         ],
         SettingsPage::Snippets => Vec::new(),
         SettingsPage::Slides => vec![
@@ -457,6 +504,22 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "figure_zoom" => SettingChange::FigureZoom(flag()?),
         "code_copy_button" => SettingChange::CodeCopyButton(flag()?),
         "marp_slides" => SettingChange::MarpSlides(flag()?),
+        "wysiwyg" => SettingChange::Wysiwyg(flag()?),
+        "format_bullet" => SettingChange::FormatBullet(
+            value
+                .trim()
+                .trim_matches('"')
+                .chars()
+                .next()
+                .filter(|c| matches!(c, '-' | '*' | '+'))?,
+        ),
+        _ if TIDY_KEYS.contains(&key) => {
+            SettingChange::Tidy(TIDY_KEYS.iter().find(|k| **k == key).copied()?, flag()?)
+        }
+        "wysiwyg_limit_kb" => SettingChange::WysiwygLimit(value.to_owned()),
+        "list_marker" => SettingChange::ListMarker(settings::Marker::parse(value)),
+        "emphasis_marker" => SettingChange::EmphasisMarker(settings::Marker::parse(value)),
+        "strong_marker" => SettingChange::StrongMarker(settings::Marker::parse(value)),
         "marp_assist" => SettingChange::MarpAssist(flag()?),
         "marp_present_info" => SettingChange::MarpPresentInfo(flag()?),
         "remember_urls" => SettingChange::RememberUrls(flag()?),
@@ -745,6 +808,44 @@ impl App {
             SettingChange::FigureZoom(on) => self.settings.figure_zoom = on,
             SettingChange::CodeCopyButton(on) => self.settings.code_copy_button = on,
             SettingChange::MarpSlides(on) => self.settings.marp_slides = on,
+            SettingChange::Wysiwyg(on) => {
+                self.settings.wysiwyg = on;
+                // 切ったら、WYSIWYG で見ていた窓は分割に戻す
+                if !on && self.mode == crate::render::ViewMode::Wysiwyg {
+                    self.mode = crate::render::ViewMode::Split;
+                }
+            }
+            SettingChange::WysiwygLimit(value) => {
+                if let Some(screen) = self.settings_screen.as_mut() {
+                    screen.wysiwyg_limit.clone_from(&value);
+                }
+                if let Ok(limit) = value.trim().parse::<u32>() {
+                    if (64..=settings::WYSIWYG_LIMIT_MAX_KB).contains(&limit) {
+                        self.settings.wysiwyg_limit_kb = limit;
+                    }
+                }
+            }
+            SettingChange::ListMarker(marker) => self.settings.list_marker = marker,
+            SettingChange::FormatBullet(c) => self.settings.format_bullet = c,
+            SettingChange::Tidy(key, on) => {
+                let s = &mut self.settings;
+                let slot = match key {
+                    "format_tables" => &mut s.format_tables,
+                    "format_bullets" => &mut s.format_bullets,
+                    "format_emphasis" => &mut s.format_emphasis,
+                    "lint_fix_menu" => &mut s.lint_fix_menu,
+                    "lint_fix_key" => &mut s.lint_fix_key,
+                    "lint_fix_save" => &mut s.lint_fix_save,
+                    "lint_fix_close" => &mut s.lint_fix_close,
+                    "format_menu" => &mut s.format_menu,
+                    "format_key" => &mut s.format_key,
+                    "format_save" => &mut s.format_save,
+                    _ => &mut s.format_close,
+                };
+                *slot = on;
+            }
+            SettingChange::EmphasisMarker(marker) => self.settings.emphasis_marker = marker,
+            SettingChange::StrongMarker(marker) => self.settings.strong_marker = marker,
             SettingChange::MarpAssist(on) => self.settings.marp_assist = on,
             SettingChange::MarpPresentInfo(on) => self.settings.marp_present_info = on,
             SettingChange::RememberUrls(on) => {
@@ -1262,6 +1363,80 @@ impl App {
                     SettingChange::MinimapWidth(d.minimap_width)
                 ),
             ),
+            // WYSIWYG（v2.5.0 R-01）
+            heading("WYSIWYG"),
+            with_reset(
+                toggle(
+                    "WYSIWYG を使う（表示 → WYSIWYG で、描いた文字の上で直す）",
+                    s.wysiwyg,
+                    SettingChange::Wysiwyg
+                ),
+                differs(&s.wysiwyg, &d.wysiwyg, SettingChange::Wysiwyg(d.wysiwyg)),
+            ),
+            with_reset(
+                line(
+                    "入れる文書の大きさの上限（KB）",
+                    text_input("1024", &screen.wysiwyg_limit)
+                        .on_input(|v| Message::Setting(SettingChange::WysiwygLimit(v)))
+                        .size(12)
+                        .width(Length::Fixed(80.0)),
+                ),
+                differs(
+                    &s.wysiwyg_limit_kb,
+                    &d.wysiwyg_limit_kb,
+                    SettingChange::WysiwygLimit(d.wysiwyg_limit_kb.to_string())
+                ),
+            ),
+            heading("新しく書くときの記法（元の書き方はできるだけ保つ）"),
+            with_reset(
+                line(
+                    "太字",
+                    pick_list(
+                        settings::Marker::ALL.to_vec(),
+                        Some(s.strong_marker),
+                        |m| Message::Setting(SettingChange::StrongMarker(m))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.strong_marker,
+                    &d.strong_marker,
+                    SettingChange::StrongMarker(d.strong_marker)
+                ),
+            ),
+            with_reset(
+                line(
+                    "強調（斜体）",
+                    pick_list(
+                        settings::Marker::ALL.to_vec(),
+                        Some(s.emphasis_marker),
+                        |m| Message::Setting(SettingChange::EmphasisMarker(m))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.emphasis_marker,
+                    &d.emphasis_marker,
+                    SettingChange::EmphasisMarker(d.emphasis_marker)
+                ),
+            ),
+            with_reset(
+                line(
+                    "リストの印",
+                    pick_list(
+                        settings::Marker::ALL.to_vec(),
+                        Some(s.list_marker),
+                        |m| Message::Setting(SettingChange::ListMarker(m))
+                    )
+                    .text_size(12),
+                ),
+                differs(
+                    &s.list_marker,
+                    &d.list_marker,
+                    SettingChange::ListMarker(d.list_marker)
+                ),
+            ),
+            note("記法は「最初の書き方」が - ・ * ・ ** 、「もう一方」が * ・ _ ・ __ です（リストの印・強調・太字の順）。見出しは # で書きます。太字と強調は、編集画面の Ctrl+B・Ctrl+I でも同じ記法を使います。"),
         ]
         .spacing(10)
         .into()
@@ -2007,8 +2182,66 @@ impl App {
                 ),
             ),
             self.lint_rules_section(),
+            // フォーマッター（v2.5.0 R-03）
+            self.tidy_section(),
         ]
         .spacing(10)
+        .into()
+    }
+
+    /// 「Markdown を整える」の欄（v2.5.0 R-03）
+    fn tidy_section(&self) -> Element<'_, Message> {
+        let s = &self.settings;
+        let d = Settings::default();
+        let check = |label: &'static str, key: &'static str, now: bool, default: bool| {
+            with_reset(
+                iced::widget::checkbox(now)
+                    .label(label)
+                    .text_size(12)
+                    .on_toggle(move |on| Message::Setting(SettingChange::Tidy(key, on))),
+                (now != default).then_some(SettingChange::Tidy(key, default)),
+            )
+        };
+        let bullets: Vec<char> = vec!['-', '*', '+'];
+        column![
+            heading("Markdown を整える（フォーマッター）"),
+            note("検査で直せる指摘をまとめて直し、次のものをそろえます。コードブロックの中は触りません。"),
+            check("表の桁をそろえる", "format_tables", s.format_tables, d.format_tables),
+            row![
+                check("リストの印をそろえる", "format_bullets", s.format_bullets, d.format_bullets),
+                pick_list(bullets, Some(s.format_bullet), |c| {
+                    Message::Setting(SettingChange::FormatBullet(c))
+                })
+                .text_size(12),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            check(
+                "強調と太字の記法をそろえる（エディタの「新しく書くときの記法」）",
+                "format_emphasis",
+                s.format_emphasis,
+                d.format_emphasis
+            ),
+            heading("当てるとき"),
+            text("検査の直し").size(12),
+            row![
+                check("メニュー", "lint_fix_menu", s.lint_fix_menu, d.lint_fix_menu),
+                check("ショートカットキー", "lint_fix_key", s.lint_fix_key, d.lint_fix_key),
+                check("保存するとき", "lint_fix_save", s.lint_fix_save, d.lint_fix_save),
+                check("閉じるとき", "lint_fix_close", s.lint_fix_close, d.lint_fix_close),
+            ]
+            .spacing(12),
+            text("Markdown を整える").size(12),
+            row![
+                check("メニュー", "format_menu", s.format_menu, d.format_menu),
+                check("ショートカットキー（Ctrl+Alt+F）", "format_key", s.format_key, d.format_key),
+                check("保存するとき", "format_save", s.format_save, d.format_save),
+                check("閉じるとき", "format_close", s.format_close, d.format_close),
+            ]
+            .spacing(12),
+            note("保存するときは、自分で保存したときだけ当てます（自動保存では当てません）。閉じるときに当てて変わったら、保存してから閉じます（保存先のある文書だけ）。当てた変更は取り消しで戻せます。"),
+        ]
+        .spacing(8)
         .into()
     }
 

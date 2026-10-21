@@ -109,6 +109,7 @@ UIA を使う道具（WinAppDriver・FlaUI・pywinauto など）でできるの�
 |`lint`（v2.4.0）|検査の指摘（`rule` と `line`）。Marp の指示の検査（MP001〜MP007）もここで見る|
 |`url` `url_dialog` `recent_urls`（v2.4.0）|URL から開いたならその URL・「URL を開く」の窓（`input` `busy` `error`）・最近開いた URL|
 |`presenting` `completion` `slides`（v2.4.0）|発表中のスライド（`slide`）・打っている所の候補（`items` `selected`）・Marp のスライド（`count` `size` と 1 枚ごとの `theme` `classes` `paginate` `header` `footer` `backgrounds` `notes` など）。無ければ null|
+|`wysiwyg`（v2.5.0）|WYSIWYG のキャレットのあるブロック（`block`）・描いた行（`line`）・その何字目（`index`）・描いた字（`text`）。WYSIWYG でなければ、またはブロックの外なら null。WYSIWYG の間は `key` の左右・後退・削除・改行・Tab・文字を描いた字の道へ流す|
 
 ---
 
@@ -256,6 +257,8 @@ xvfb-run -a -s "-screen 0 1920x1080x24" python3 tools/automation/spec_test.py --
 他のアプリが立ち上がるもの（`http(s)` のリンク・既定のアプリの設定）は、開かずに覚えた先（`external_opens`）で確かめる。
 v2.4.0 では、Mica 風の窓の地と背景画像の見た目・発表の全画面・PowerPoint で開いた PPTX・候補の一覧をマウスで押す・会社の中継（プロキシ）の向こうの HTTPS の URL・MCP クライアントから呼んだときの確認のダイアログは、人が見る。
 
+v2.5.0 では、WYSIWYG の上で押す・引く（キャレットを置く・選ぶ・☐ を押して入れ切りする）・道具の帯のアイコンとツールチップの見た目は、人が見る。
+
 ---
 
 ## 7. できないこと
@@ -284,3 +287,4 @@ v2.4.0 では、Mica 風の窓の地と背景画像の見た目・発表の全�
 |2026-10-13|v2.1.3: 状態に `read_only` を足した|
 |2026-10-19|v2.3.0: 状態に `focus_mode`、`overlay` に `diff`、設定画面の分類 `snippets` `compare` と自分の配色・スニペットの要素を足した。`Esc` は開いたものを先に閉じ、何も無ければ集中モードを出る|
 |2026-10-21|v2.4.0: `overlay` に `mcp_confirm` `present` `url_dialog` `figure`、状態に `backdrop` `preview_top_block` `figure` `lint` `url` `url_dialog` `recent_urls` `presenting` `completion` `slides`、設定画面の分類 `slides` `mcp` と、コマンドパレット・図の拡大・URL を開く・指示の候補・MCP の確認・プレビューのブロックの要素を足した。`Esc` は MCP の確認・発表・URL を開くを先に閉じる。`MDVIEW_MICA=off`|
+|2026-10-21|v2.5.0: 状態に `wysiwyg` を足し、WYSIWYG の間の `key` を描いた字の道へ流すようにした|

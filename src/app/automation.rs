@@ -224,6 +224,7 @@ fn mode_key(mode: ViewMode) -> &'static str {
         ViewMode::Edit => "edit",
         ViewMode::Preview => "preview",
         ViewMode::Split => "split",
+        ViewMode::Wysiwyg => "wysiwyg",
     }
 }
 
@@ -675,6 +676,22 @@ impl App {
             return self.with_status(out);
         }
         if self.about_open {
+            // イースターエッグの決まった所（v2.5.0 R-04。画面では字のまま）
+            out.push(Element::button(
+                "about.title",
+                super::APP_NAME,
+                Message::EggPoke(crate::render::EggSpot::Title),
+            ));
+            out.push(Element::button(
+                "about.version",
+                env!("CARGO_PKG_VERSION"),
+                Message::EggPoke(crate::render::EggSpot::Version),
+            ));
+            out.push(Element::button(
+                "about.corner",
+                "",
+                Message::EggPoke(crate::render::EggSpot::Corner),
+            ));
             out.push(Element::new(
                 "about.seek_note",
                 "text",
@@ -1378,6 +1395,16 @@ impl App {
             Value::Null,
             |presenting| json!({ "slide": presenting.slide }),
         );
+        // イースターエッグ（v2.5.0 R-04）
+        state["egg"] = json!(self.egg_name());
+        state["egg_word"] = json!(self.egg_word());
+        state["egg_score"] = json!(self.egg_score());
+        // WYSIWYG のキャレット（v2.5.0 R-01 a。WYSIWYG でなければ null）
+        state["wysiwyg"] = if self.mode == ViewMode::Wysiwyg {
+            self.wysiwyg_state()
+        } else {
+            Value::Null
+        };
         // 打っている所の候補（R-07 7b。出していなければ null）
         state["completion"] = self.completion.as_ref().map_or(Value::Null, |completion| {
             json!({
@@ -1513,12 +1540,60 @@ impl App {
                     reply_ok(&id, Value::Null);
                     return task;
                 }
+                // About の間の矢印・B・A・Enter はイースターエッグへ（v2.5.0 R-04。画面では購読が受ける）
+                if self.about_open && !chord.ctrl && !chord.alt {
+                    use crate::render::EggKey as E;
+                    let egg = match chord.key {
+                        ChordKey::Named(NamedKey::Up) => Some(E::Up),
+                        ChordKey::Named(NamedKey::Down) => Some(E::Down),
+                        ChordKey::Named(NamedKey::Left) => Some(E::Left),
+                        ChordKey::Named(NamedKey::Right) => Some(E::Right),
+                        ChordKey::Named(NamedKey::Enter) => Some(E::Enter),
+                        ChordKey::Char('b') => Some(E::B),
+                        ChordKey::Char('a') => Some(E::A),
+                        _ => None,
+                    };
+                    if let Some(egg) = egg {
+                        let task = self.update(Message::EggKey(egg));
+                        reply_ok(&id, Value::Null);
+                        return task;
+                    }
+                }
                 if self.editing_blocked() || self.open_menu.is_some() {
                     reply_err(
                         &id,
                         "本文に焦点がありません（入力欄・ダイアログ・メニューが開いています）",
                     );
                     return Task::none();
+                }
+                // **WYSIWYG では、描いた字を単位にした道へ流す**（v2.5.0 R-01 a。画面ではプレビューの部品が受ける打鍵）
+                if self.mode == ViewMode::Wysiwyg && !chord.ctrl && !chord.alt {
+                    use crate::render::WysiwygAction as W;
+                    let action = match chord.key {
+                        ChordKey::Named(NamedKey::Left) => Some(W::Left {
+                            select: chord.shift,
+                        }),
+                        ChordKey::Named(NamedKey::Right) => Some(W::Right {
+                            select: chord.shift,
+                        }),
+                        ChordKey::Named(NamedKey::Backspace) => Some(W::Backspace),
+                        ChordKey::Named(NamedKey::Delete) => Some(W::Delete),
+                        ChordKey::Named(NamedKey::Enter) => Some(W::Enter),
+                        ChordKey::Named(NamedKey::Tab) => Some(W::Tab { shift: chord.shift }),
+                        ChordKey::Char(ch) => Some(W::Insert(if chord.shift {
+                            ch.to_uppercase().collect()
+                        } else {
+                            ch.to_string()
+                        })),
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        let task = self.update(Message::Preview(
+                            crate::render::PreviewAction::Wysiwyg(action),
+                        ));
+                        reply_ok(&id, Value::Null);
+                        return task;
+                    }
                 }
                 let action = editor_action(&chord).or_else(|| match chord.key {
                     ChordKey::Char(ch) if !chord.ctrl && !chord.alt => {

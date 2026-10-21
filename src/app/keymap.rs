@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use crate::app::diff::DiffMessage;
 use crate::edit::datetime::Stamp;
 use crate::edit::transform::Transform;
-use crate::render::{FileCommand, Message};
+use crate::render::{FileCommand, Message, Restructure};
 
 /// 名前の付いたキー（文字を出さないもの）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -378,6 +378,18 @@ pub enum Command {
     UnnumberHeadings,
     // Markdown の検査の一覧（v2.3.0 R-11）。既定の打鍵は無い
     LintPanel,
+    // 検査の直しとフォーマッター（v2.5.0 R-03）
+    LintFixAll,
+    FormatDocument,
+    // 文書の組み替え（v2.5.0 R-01 b）
+    ItemIndent,
+    ItemOutdent,
+    RenumberList,
+    ToggleTask,
+    PromoteHeading,
+    DemoteHeading,
+    SectionUp,
+    SectionDown,
     // 集中モード（v2.3.0 R-13）
     FocusMode,
     // コマンドパレット（v2.4.0 R-02）
@@ -391,6 +403,8 @@ pub enum Command {
     ViewEdit,
     ViewPreview,
     ViewSplit,
+    // WYSIWYG（v2.5.0 R-01）。既定の打鍵は無い
+    ViewWysiwyg,
     ToggleToc,
     ToggleSync,
     ToggleInvisibles,
@@ -398,7 +412,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 94] = [
+    pub const ALL: [Command; 105] = [
         Self::New,
         Self::NewWindow,
         Self::Open,
@@ -470,6 +484,16 @@ impl Command {
         Self::NumberHeadings,
         Self::UnnumberHeadings,
         Self::LintPanel,
+        Self::LintFixAll,
+        Self::FormatDocument,
+        Self::ItemIndent,
+        Self::ItemOutdent,
+        Self::RenumberList,
+        Self::ToggleTask,
+        Self::PromoteHeading,
+        Self::DemoteHeading,
+        Self::SectionUp,
+        Self::SectionDown,
         Self::FocusMode,
         Self::Palette,
         Self::Present,
@@ -489,6 +513,7 @@ impl Command {
         Self::ViewEdit,
         Self::ViewPreview,
         Self::ViewSplit,
+        Self::ViewWysiwyg,
         Self::ToggleToc,
         Self::ToggleSync,
         Self::ToggleInvisibles,
@@ -569,6 +594,16 @@ impl Command {
             Self::NumberHeadings => "number_headings",
             Self::UnnumberHeadings => "unnumber_headings",
             Self::LintPanel => "lint_panel",
+            Self::LintFixAll => "lint_fix_all",
+            Self::FormatDocument => "format_document",
+            Self::ItemIndent => "item_indent",
+            Self::ItemOutdent => "item_outdent",
+            Self::RenumberList => "renumber_list",
+            Self::ToggleTask => "toggle_task",
+            Self::PromoteHeading => "promote_heading",
+            Self::DemoteHeading => "demote_heading",
+            Self::SectionUp => "section_up",
+            Self::SectionDown => "section_down",
             Self::FocusMode => "focus_mode",
             Self::Palette => "command_palette",
             Self::Present => "present",
@@ -592,6 +627,7 @@ impl Command {
             Self::ViewEdit => "view_edit",
             Self::ViewPreview => "view_preview",
             Self::ViewSplit => "view_split",
+            Self::ViewWysiwyg => "view_wysiwyg",
             Self::ToggleToc => "toggle_toc",
             Self::ToggleSync => "toggle_sync",
             Self::ToggleInvisibles => "toggle_invisibles",
@@ -674,6 +710,16 @@ impl Command {
             Self::NumberHeadings => "見出しに番号を振る",
             Self::UnnumberHeadings => "見出しの番号を外す",
             Self::LintPanel => "Markdown の検査の一覧",
+            Self::LintFixAll => "検査の直しをまとめて当てる",
+            Self::FormatDocument => "Markdown を整える",
+            Self::ItemIndent => "項目を字下げする",
+            Self::ItemOutdent => "項目の字下げを戻す",
+            Self::RenumberList => "リストの番号を振り直す",
+            Self::ToggleTask => "チェックを入れる・切る",
+            Self::PromoteHeading => "見出しの段を上げる",
+            Self::DemoteHeading => "見出しの段を下げる",
+            Self::SectionUp => "節を上へ動かす",
+            Self::SectionDown => "節を下へ動かす",
             Self::FocusMode => "集中モード",
             Self::Palette => "コマンドパレット",
             Self::Present => "発表（スライド）",
@@ -684,6 +730,7 @@ impl Command {
             Self::ViewEdit => "編集",
             Self::ViewPreview => "プレビュー",
             Self::ViewSplit => "分割",
+            Self::ViewWysiwyg => "WYSIWYG",
             Self::ToggleToc => "目次",
             Self::ToggleSync => "スクロール同期",
             Self::ToggleInvisibles => "空白・タブ・改行を表示",
@@ -752,9 +799,19 @@ impl Command {
             Self::FocusMode => &["F11"],
             // VS Code と同じ
             Self::Palette => &["Ctrl+Shift+P"],
+            // Shift+Alt+F（VS Code の整形）は表を整えるで使っている
+            Self::FormatDocument => &["Ctrl+Alt+F"],
+            // 文書の組み替え（v2.5.0 R-01 b）。WYSIWYG では Tab・Shift + Tab でも字下げする
+            Self::ItemIndent | Self::ItemOutdent | Self::RenumberList => &[],
+            Self::ToggleTask => &["Ctrl+Alt+Enter"],
+            Self::PromoteHeading => &["Shift+Alt+Left"],
+            Self::DemoteHeading => &["Shift+Alt+Right"],
+            Self::SectionUp => &["Shift+Alt+Up"],
+            Self::SectionDown => &["Shift+Alt+Down"],
             // プレゼンテーションの道具と同じ
             Self::Present => &["F5"],
             Self::ReadOnly => &[],
+            Self::ViewWysiwyg => &[],
             Self::OpenInApp
             | Self::SaveWithBom
             | Self::ExportPdf
@@ -775,6 +832,7 @@ impl Command {
             | Self::NumberHeadings
             | Self::UnnumberHeadings
             | Self::LintPanel
+            | Self::LintFixAll
             | Self::TableAddRow
             | Self::TableAddColumn
             | Self::Transform(_)
@@ -907,6 +965,22 @@ impl Command {
             Self::NumberHeadings => Message::Toc(crate::app::TocCommand::Number),
             Self::UnnumberHeadings => Message::Toc(crate::app::TocCommand::Unnumber),
             Self::LintPanel => Message::Lint(crate::app::LintMessage::TogglePanel),
+            Self::LintFixAll => Message::Tidy(
+                crate::render::TidyTool::Lint,
+                crate::render::TidyTrigger::Key,
+            ),
+            Self::FormatDocument => Message::Tidy(
+                crate::render::TidyTool::Format,
+                crate::render::TidyTrigger::Key,
+            ),
+            Self::ItemIndent => Message::Restructure(Restructure::Indent { outdent: false }),
+            Self::ItemOutdent => Message::Restructure(Restructure::Indent { outdent: true }),
+            Self::RenumberList => Message::Restructure(Restructure::Renumber),
+            Self::ToggleTask => Message::Restructure(Restructure::ToggleTask),
+            Self::PromoteHeading => Message::Restructure(Restructure::Heading { promote: true }),
+            Self::DemoteHeading => Message::Restructure(Restructure::Heading { promote: false }),
+            Self::SectionUp => Message::Restructure(Restructure::MoveSection { up: true }),
+            Self::SectionDown => Message::Restructure(Restructure::MoveSection { up: false }),
             Self::FocusMode => Message::ToggleFocusMode,
             Self::Palette => Message::OpenCommandPalette,
             Self::Present => Message::TogglePresentation,
@@ -917,6 +991,7 @@ impl Command {
             Self::ViewEdit => Message::SetMode(crate::render::ViewMode::Edit),
             Self::ViewPreview => Message::SetMode(crate::render::ViewMode::Preview),
             Self::ViewSplit => Message::SetMode(crate::render::ViewMode::Split),
+            Self::ViewWysiwyg => Message::SetMode(crate::render::ViewMode::Wysiwyg),
             Self::ToggleToc => Message::ToggleToc,
             Self::ToggleSync => Message::ToggleSync,
             Self::ToggleInvisibles => Message::ToggleInvisibles,

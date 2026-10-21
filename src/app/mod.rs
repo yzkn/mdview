@@ -87,11 +87,15 @@ mod figure_view;
 pub(crate) use command_palette::RECENT_MAX as COMMAND_RECENT_MAX;
 pub use figure_view::FigureMessage;
 // コードスニペット（v2.3.0 R-08 / R-09）
+mod egg;
 mod marp_assist;
 mod present;
 mod slides;
 mod snippets;
+mod structure;
+mod tidy;
 mod url_open;
+mod wysiwyg;
 // 目次を作る・見出しに番号を振る（v2.3.0 R-10）
 mod doc_toc;
 pub use doc_toc::TocCommand;
@@ -325,6 +329,10 @@ pub struct App {
     completion_dismissed: Option<marp_assist::CompletionKey>,
     /// 発表している最中（v2.4.0 R-07 7c）
     presenting: Option<present::Presenting>,
+    /// 保存してあるファイルの大きさ（v2.5.0 R-02）。**点滅の刻みで読み直す**（描くたびにディスクを見ない）
+    saved_bytes: Option<u64>,
+    /// About のイースターエッグ（v2.5.0 R-04）
+    egg: egg::EggState,
     /// 「URL を開く」の窓（v2.4.0 R-09）と、URL から開いたので読み取り専用にしたか
     url_dialog: Option<url_open::UrlDialog>,
     read_only_by_url: bool,
@@ -1015,6 +1023,8 @@ impl App {
                 presenting: None,
                 url_dialog: None,
                 read_only_by_url: false,
+                saved_bytes: None,
+                egg: egg::EggState::default(),
                 patch_choice: None,
                 snippet_session: None,
                 lint: Default::default(),
@@ -1633,6 +1643,8 @@ impl App {
             on_top: self.on_top,
             focus_mode: self.focus_mode,
             slides: self.deck.is_some(),
+            wysiwyg: self.settings.wysiwyg,
+            tidy_menu: (self.settings.lint_fix_menu, self.settings.format_menu),
             read_only: self.read_only,
             has_folds: !self.folded.is_empty(),
         }
@@ -1654,21 +1666,56 @@ impl App {
         .spacing(12);
 
         container(
-            container(
-                column![
-                    text(APP_NAME).size(18),
-                    text(format!("版数 {}", env!("CARGO_PKG_VERSION"))).size(12),
-                    text("このアプリ本体は Apache License 2.0 で配布しています。").size(12),
-                    text(ABOUT_SEEK_NOTE).size(12),
-                    text("同梱フォントのライセンス").size(14),
-                    scrollable(licenses).height(Length::Fixed(280.0)),
-                    button(text("閉じる").size(13))
-                        .padding([6, 16])
-                        .style(fluent::accent)
-                        .on_press(Message::CloseAbout),
+            container({
+                // 名前と版数は押せる（見た目は字のまま。v2.5.0 R-04）
+                let poke = |content: Element<'static, Message>, spot| {
+                    button(content)
+                        .padding(0)
+                        .style(button::text)
+                        .on_press(Message::EggPoke(spot))
+                };
+                let mut page = column![
+                    poke(
+                        text(APP_NAME).size(18).into(),
+                        crate::render::EggSpot::Title
+                    ),
+                    poke(
+                        text(format!("版数 {}", env!("CARGO_PKG_VERSION")))
+                            .size(12)
+                            .into(),
+                        crate::render::EggSpot::Version
+                    ),
                 ]
-                .spacing(10),
-            )
+                .spacing(10);
+                if let Some(word) = self.egg_word() {
+                    page = page.push(text(word).size(13).style(text::primary));
+                }
+                page = page
+                    .push(text("このアプリ本体は Apache License 2.0 で配布しています。").size(12))
+                    .push(text(ABOUT_SEEK_NOTE).size(12));
+                page = match self.egg_view() {
+                    Some(view) => page.push(view),
+                    None => page
+                        .push(text("同梱フォントのライセンス").size(14))
+                        .push(scrollable(licenses).height(Length::Fixed(280.0))),
+                };
+                page.push(
+                    row![
+                        button(text("閉じる").size(13))
+                            .padding([6, 16])
+                            .style(fluent::accent)
+                            .on_press(Message::CloseAbout),
+                        container(text("")).width(Length::Fill),
+                        iced::widget::mouse_area(
+                            container(text(""))
+                                .width(Length::Fixed(24.0))
+                                .height(Length::Fixed(24.0))
+                        )
+                        .on_double_click(Message::EggPoke(crate::render::EggSpot::Corner)),
+                    ]
+                    .align_y(iced::Alignment::End),
+                )
+            })
             .padding(24)
             .width(Length::Fixed(620.0))
             .style(fluent::card),
@@ -1692,8 +1739,10 @@ impl App {
                 ViewMode::Edit => "Edit",
                 ViewMode::Preview => "Preview",
                 ViewMode::Split => "Split",
+                ViewMode::Wysiwyg => "WYSIWYG",
             },
             bytes: self.document.text().len_bytes(),
+            saved_bytes: self.saved_bytes,
             read_only: self.read_only,
         }
     }
@@ -1949,6 +1998,8 @@ impl App {
         self.sync_deck();
         // Marp の指示の候補（v2.4.0 R-07 7b）
         self.sync_completion();
+        // WYSIWYG に入れない文書になったら（大きいファイルを開いた・テキストとして読んだ）、分割に戻す（v2.5.0 R-01）
+        self.guard_wysiwyg();
 
         // **畳んだ中へキャレットが入ったら開く**（R-20）。入口は検索・行へ
         // ジャンプ・取り消しなどいくつもあるので、出口の 1 か所で見る
@@ -1979,6 +2030,8 @@ impl App {
                 // 同じ見出しをもう一度押したら閉じる
                 self.open_menu = (self.open_menu != Some(menu)).then_some(menu);
             }
+            // **イースターエッグを出していれば、Esc は About に戻るだけ**（v2.5.0 R-04）
+            Message::CloseMenu if self.egg.egg.is_some() => self.egg.egg = None,
             Message::CloseMenu => {
                 // `Esc` は開いているものを閉じる。**両方まとめて閉じる**
                 self.open_menu = None;
@@ -2106,8 +2159,18 @@ impl App {
             }
             Message::Undo => self.undo(),
             Message::Redo => self.redo(),
-            Message::OpenAbout => self.about_open = true,
-            Message::CloseAbout => self.about_open = false,
+            Message::OpenAbout => {
+                self.about_open = true;
+                self.egg_reset();
+            }
+            Message::CloseAbout => {
+                self.about_open = false;
+                self.egg_reset();
+            }
+            // イースターエッグ（v2.5.0 R-04）
+            Message::EggPoke(spot) => self.egg_poke(spot),
+            Message::EggKey(key) => self.egg_key(key),
+            Message::EggTick => self.egg_tick(),
             Message::BlinkCaret => {
                 self.flush_settings();
                 self.flush_draft();
@@ -2133,6 +2196,8 @@ impl App {
                 if self.bench.is_none() {
                     self.editor.caret_visible = !self.editor.caret_visible;
                 }
+                // 保存してあるファイルの大きさ（v2.5.0 R-02。保存・外での書き換えに追いつく）
+                self.refresh_saved_bytes();
                 // diff の面は、打鍵を受けている面だけ点滅させる（v2.3.0 R-02）
                 self.diff_blink();
                 return Task::batch([watch, save]);
@@ -2169,6 +2234,9 @@ impl App {
                 return self.focus_editor_now();
             }
             Message::CloseCompletion => self.close_completion(),
+            // 検査の直し・フォーマッター（v2.5.0 R-03）
+            Message::Tidy(tool, trigger) => self.tidy(tool, trigger),
+            Message::Restructure(kind) => self.restructure(kind),
             // URL を開く（v2.4.0 R-09）
             Message::OpenUrlDialog => return self.open_url_dialog(),
             Message::UrlInput(text) => {
@@ -2218,18 +2286,50 @@ impl App {
                 return self.open_figure(block)
             }
             Message::Figure(message) => return self.figure_message(message),
+            // WYSIWYG（v2.5.0 R-01 a）。IME は編集画面と同じ道
+            Message::Preview(PreviewAction::Wysiwyg(action)) => {
+                self.preview_selection = None;
+                if let crate::render::WysiwygAction::Tab { shift } = action {
+                    // **リストの項目なら字下げ・戻す**（v2.5.0 R-01 b）。ほかは編集画面と同じ道
+                    if self.caret_on_item() {
+                        self.restructure(crate::render::Restructure::Indent { outdent: shift });
+                        self.editor.caret_visible = true;
+                        return Task::none();
+                    }
+                    return self.apply(Action::Tab { shift });
+                }
+                self.wysiwyg(action);
+                self.editor.caret_visible = true;
+            }
+            Message::Preview(PreviewAction::Ime(ime)) => return self.apply(Action::Ime(ime)),
             Message::Preview(action) => self.apply_preview(action),
+            Message::SetMode(ViewMode::Wysiwyg) if !self.settings.wysiwyg => {}
+            Message::SetMode(ViewMode::Wysiwyg)
+                if !self.wysiwyg_fits() || self.document.is_plain() =>
+            {
+                self.notice = Some(notice::Notice::plain(if self.document.is_plain() {
+                    "テキストとして読んでいる文書は WYSIWYG で直せません".to_owned()
+                } else {
+                    format!(
+                        "WYSIWYG に入れるのは {} KB までの文書です（設定 → エディタ で変えられます）",
+                        self.settings.wysiwyg_limit_kb
+                    )
+                }));
+            }
             Message::SetMode(mode) => {
                 self.mode = mode;
+                // **WYSIWYG は起動時の表示にしない**（大きい文書を開いて動かなくなるのを避ける）
                 self.settings.view_mode = match mode {
                     ViewMode::Edit => crate::io::settings::ViewMode::Edit,
                     ViewMode::Preview => crate::io::settings::ViewMode::Preview,
-                    ViewMode::Split => crate::io::settings::ViewMode::Split,
+                    ViewMode::Split | ViewMode::Wysiwyg => crate::io::settings::ViewMode::Split,
                 };
                 self.touch_settings();
                 self.sync_from_editor();
             }
             Message::CloseRequested => {
+                // 閉じるときに当てる設定なら当てる（v2.5.0 R-03。当てて変わったら保存する）
+                self.tidy_before_exit();
                 // **閉じる前に確認する**（§18.2）。確認が要るなら進めない
                 if !self.begin(Pending::Exit) {
                     return Task::none();
@@ -2708,6 +2808,16 @@ impl App {
         Task::none()
     }
 
+    /// 保存してあるファイルの大きさを読み直す（v2.5.0 R-02）
+    fn refresh_saved_bytes(&mut self) {
+        self.saved_bytes = self
+            .meta
+            .path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len());
+    }
+
     /// 終わる（設定を書いてから）。
     fn exit_now(&mut self) -> Task<Message> {
         self.remember_window();
@@ -2896,6 +3006,8 @@ impl App {
         match action {
             // `handle` が先に受ける（開くには仕事を返す必要がある）
             PreviewAction::LinkClicked { .. } => {}
+            // `handle` が先に受ける（WYSIWYG。v2.5.0 R-01 a）
+            PreviewAction::Wysiwyg(_) | PreviewAction::Ime(_) => {}
             // 写すのは `Ctrl + C`・編集 → コピーのとき（v2.2.0）
             PreviewAction::Selected(text) => self.preview_selection = text,
             // 発表の画面で次・前へ（v2.4.0 R-07 7c）
@@ -4227,6 +4339,7 @@ impl App {
         self.results = None;
         self.reset_watch();
         self.autosave_touched = None;
+        self.refresh_saved_bytes();
         // URL から開いたので読み取り専用にしていたら、ほかの文書では戻す（v2.4.0 R-09）
         if self.meta.url.is_none() && self.read_only_by_url {
             self.read_only = false;
@@ -4258,6 +4371,8 @@ impl App {
         let Some(path) = self.meta.path.clone() else {
             return Task::none();
         };
+        // 保存するときに当てる設定なら当てる（v2.5.0 R-03。自動保存では当てない）
+        self.tidy_on(crate::render::TidyTrigger::Save);
         self.save_to(path, how)
     }
 
@@ -4436,6 +4551,8 @@ impl App {
             return Task::none();
         };
 
+        // 保存するときに当てる設定なら当てる（v2.5.0 R-03。名前を付けて保存も）
+        self.tidy_on(crate::render::TidyTrigger::Save);
         let task = self.save_to(path, how);
         if !resume {
             return task;
@@ -5083,6 +5200,38 @@ impl App {
             } else {
                 iced::Subscription::none()
             },
+            // イースターエッグ（v2.5.0 R-04）: 動いている間は画面の刻み、About の間は打鍵
+            if self.egg_animating() {
+                iced::window::frames().map(|_| Message::EggTick)
+            } else {
+                iced::Subscription::none()
+            },
+            if self.about_open {
+                iced::event::listen_with(|event, _status, _window| {
+                    use iced::keyboard::key::Named;
+                    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        ref key, ..
+                    }) = event
+                    else {
+                        return None;
+                    };
+                    let egg = match key.as_ref() {
+                        iced::keyboard::Key::Named(Named::ArrowUp) => crate::render::EggKey::Up,
+                        iced::keyboard::Key::Named(Named::ArrowDown) => crate::render::EggKey::Down,
+                        iced::keyboard::Key::Named(Named::ArrowLeft) => crate::render::EggKey::Left,
+                        iced::keyboard::Key::Named(Named::ArrowRight) => {
+                            crate::render::EggKey::Right
+                        }
+                        iced::keyboard::Key::Named(Named::Enter) => crate::render::EggKey::Enter,
+                        iced::keyboard::Key::Character("b" | "B") => crate::render::EggKey::B,
+                        iced::keyboard::Key::Character("a" | "A") => crate::render::EggKey::A,
+                        _ => return None,
+                    };
+                    Some(Message::EggKey(egg))
+                })
+            } else {
+                iced::Subscription::none()
+            },
             if self.open_menu.is_some() || self.about_open {
                 iced::event::listen_with(|event, _status, _window| {
                     let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
@@ -5303,6 +5452,7 @@ impl App {
         let editor = container(self.with_backdrop(backdrop_view::Layer::Editor, editor))
             .width(Length::Fill)
             .height(Length::Fill);
+        let wysiwyg = self.mode == ViewMode::Wysiwyg;
         let preview = container(
             PreviewView::new(&self.document, &self.preview, Message::Preview)
                 .zoom(preview_factor(&self.settings))
@@ -5310,19 +5460,32 @@ impl App {
                 .colors(self.preview_colors())
                 .eye_marks(eye_marks.as_slice())
                 .embeds(&self.embeds)
-                // 押して編集画面の行へ飛ぶ・キャレットを追う（v2.4.0 R-03）
+                // 押して編集画面の行へ飛ぶ・キャレットを追う（v2.4.0 R-03）。**WYSIWYG では押すとキャレットを置く**
                 .jump(
-                    self.settings
-                        .preview_jump
+                    (self.settings.preview_jump && !wysiwyg)
                         .then_some(self.settings.preview_jump_click),
                 )
-                .reveal(self.preview_reveal())
+                .reveal(if wysiwyg {
+                    self.document.block_at_byte(self.caret_byte())
+                } else {
+                    self.preview_reveal()
+                })
                 // 図を拡大して見る（v2.4.0 R-04）
-                .figures(self.settings.figure_zoom, self.settings.figure_button)
+                .figures(
+                    self.settings.figure_zoom && !wysiwyg,
+                    self.settings.figure_button,
+                )
                 // コードブロックのコピー（v2.4.0 R-04 b）
-                .code_copy(self.settings.code_copy_button)
-                // Marp の文書はスライドの枠で（v2.4.0 R-07 7a）
-                .slides(self.deck.as_ref())
+                .code_copy(self.settings.code_copy_button && !wysiwyg)
+                // Marp の文書はスライドの枠で（v2.4.0 R-07 7a）。**WYSIWYG では普通の文書として直す**（v2.5.0 §0.2）
+                .slides(if wysiwyg { None } else { self.deck.as_ref() })
+                // 描いた文字の上で直す（v2.5.0 R-01 a）
+                .wysiwyg(wysiwyg.then(|| crate::render::WysiwygCaret {
+                    byte: self.caret_byte(),
+                    anchor: self.editor.anchor,
+                    preedit: self.editor.preedit.as_deref(),
+                    visible: self.editor.caret_visible,
+                }))
                 .base_dir(self.meta.base_dir())
                 .highlight(if self.search.open {
                     self.search.query.as_str()
@@ -5340,6 +5503,8 @@ impl App {
         let main: Element<'_, Message> = match self.mode {
             ViewMode::Edit => editor.into(),
             ViewMode::Preview => preview.into(),
+            // 描いた文字の上で直す（v2.5.0 R-01 a）。上に書式の道具の帯
+            ViewMode::Wysiwyg => column![self.wysiwyg_toolbar(), preview].into(),
             ViewMode::Split => {
                 // 設定の比率で分ける（§13.5）。つまみで変える口は次の段階
                 let left = (self.settings.split_ratio * 100.0).round().max(1.0) as u16;

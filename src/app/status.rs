@@ -34,6 +34,8 @@ pub struct Status {
     pub mode: &'static str,
     /// 文書の大きさ（バイト）
     pub bytes: usize,
+    /// 保存してあるファイルの大きさ（バイト。無題・URL から開いた文書では無い。v2.5.0 R-02）
+    pub saved_bytes: Option<u64>,
     /// 読み取り専用か（v2.1.3）
     pub read_only: bool,
 }
@@ -51,7 +53,19 @@ impl Status {
             lines: self.lines,
             encoding: self.encoding.clone(),
             mode: self.mode,
-            size: human_bytes(self.bytes),
+            size: self.size(),
+        }
+    }
+
+    /// 大きさの欄（v2.5.0 R-02）。**保存してあるファイルの大きさが違えば並べる**
+    /// （文字コード・BOM・改行の違いでも違う。ディスクの上の大きさを知らせるため）
+    fn size(&self) -> String {
+        let now = human_bytes(self.bytes);
+        match self.saved_bytes {
+            Some(saved) if saved != self.bytes as u64 => {
+                format!("{now}（保存 {}）", human_bytes(saved as usize))
+            }
+            _ => now,
         }
     }
 
@@ -132,8 +146,30 @@ mod tests {
             encoding: "UTF-8 / BOM なし / LF".to_owned(),
             mode: "Split",
             bytes: 2_048,
+            saved_bytes: None,
             read_only: false,
         }
+    }
+
+    /// 保存してあるファイルの大きさが違えば並べる（v2.5.0 R-02）
+    #[test]
+    fn the_saved_size_is_shown_when_it_differs() {
+        let same = Status {
+            saved_bytes: Some(2_048),
+            ..status()
+        };
+        assert_eq!(same.fields().size, "2.0 KB");
+        let differs = Status {
+            bytes: 12_697,
+            saved_bytes: Some(12_390),
+            ..status()
+        };
+        assert_eq!(differs.fields().size, "12.4 KB（保存 12.1 KB）");
+        assert_eq!(
+            status().fields().size,
+            "2.0 KB",
+            "保存の大きさが無ければ出さない"
+        );
     }
 
     /// §7.4 の項目がすべて出る。

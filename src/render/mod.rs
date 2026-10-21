@@ -13,6 +13,8 @@ pub mod fonts;
 mod measure;
 mod preview;
 pub mod slides;
+// WYSIWYG の見た目の行とキャレット（v2.5.0 R-01）
+pub mod wysiwyg;
 // 背景画像（v2.4.0 R-01）
 pub mod backdrop;
 // 図を拡大して見る（v2.4.0 R-04）
@@ -38,7 +40,8 @@ pub use editor::{
     CursorMove, DiffMarks, EditorState, EditorView, ImeAction, LineMark, RectSelection,
 };
 pub use preview::{
-    PreviewAction, PreviewColors, PreviewState, PreviewView, BASE_SIZE as PREVIEW_BASE_SIZE,
+    PreviewAction, PreviewColors, PreviewState, PreviewView, WysiwygCaret,
+    BASE_SIZE as PREVIEW_BASE_SIZE,
 };
 
 /// URL から取った結果（v2.4.0 R-09。頼んだ URL・行き着いた URL・中身。失敗なら理由）
@@ -269,6 +272,14 @@ pub enum Message {
     CloseSnippetPicker,
     /// 打っている所の候補を閉じる（v2.4.0 R-07 7b）
     CloseCompletion,
+    /// 検査の直し・フォーマッターを当てる（v2.5.0 R-03）
+    Tidy(TidyTool, TidyTrigger),
+    /// 文書の組み替え（v2.5.0 R-01 b）
+    Restructure(Restructure),
+    /// イースターエッグ（v2.5.0 R-04）
+    EggPoke(EggSpot),
+    EggKey(EggKey),
+    EggTick,
     /// URL を開く（v2.4.0 R-09）。窓を開く・打つ・開く（`Some` は最近の URL の何番目か）・閉じる・取れた
     OpenUrlDialog,
     UrlInput(String),
@@ -468,4 +479,91 @@ pub enum ViewMode {
     Preview,
     #[default]
     Split,
+    /// 描いた文字の上で直す（v2.5.0 R-01）
+    Wysiwyg,
+}
+
+/// 文書の組み替え（v2.5.0 R-01 b）。キャレットのある行（選んでいれば選んだ行）に当てる
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Restructure {
+    /// リストの項目を字下げする・戻す
+    Indent { outdent: bool },
+    /// 番号つきのリストの番号を振り直す
+    Renumber,
+    /// チェックを入れる・切る
+    ToggleTask,
+    /// 見出しの段を上げる（`#` を減らす）・下げる
+    Heading { promote: bool },
+    /// 節を前・後ろの同じ段の節と入れ替える
+    MoveSection { up: bool },
+}
+
+/// About の決まった所（v2.5.0 R-04。イースターエッグ）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EggSpot {
+    Title,
+    Version,
+    Corner,
+}
+
+/// イースターエッグの打鍵（v2.5.0 R-04）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EggKey {
+    Up,
+    Down,
+    Left,
+    Right,
+    B,
+    A,
+    Enter,
+}
+
+/// 検査の直しとフォーマッター（v2.5.0 R-03）のどちらを当てるか
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TidyTool {
+    /// 検査の直し
+    Lint,
+    /// フォーマッター
+    Format,
+}
+
+/// いつ当てたか（設定で選んだときだけ当てる）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TidyTrigger {
+    Menu,
+    Key,
+    Save,
+    Close,
+}
+
+/// WYSIWYG の操作（v2.5.0 R-01 a）。**見た目の行が要る動き（上下・行の頭と終わり・押した所）は、
+/// プレビューの部品が原文の位置を決めて `Place` で知らせる**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WysiwygAction {
+    /// キャレットを原文の位置へ（`select` なら選んだまま）
+    Place {
+        byte: usize,
+        select: bool,
+    },
+    /// 描いた字 1 つぶん左・右へ
+    Left {
+        select: bool,
+    },
+    Right {
+        select: bool,
+    },
+    Backspace,
+    Delete,
+    Enter,
+    Insert(String),
+    /// Tab（リストの項目なら字下げ・戻す。ほかは編集画面と同じ道）
+    Tab {
+        shift: bool,
+    },
+    /// 押した所の項目のチェックを入れ切りする（☐・☑ を押した。v2.5.0 R-01 b）
+    ToggleTask {
+        byte: usize,
+    },
+    /// キャレットのあるコードブロックの言語を変える（v2.5.0 R-01 b）
+    CodeLanguage(String),
 }

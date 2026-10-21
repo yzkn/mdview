@@ -279,6 +279,43 @@ impl std::fmt::Display for WindowMaterial {
     }
 }
 
+/// 新しく書くときの記法（v2.5.0 R-01。WYSIWYG と書式の道具が使う）。**元の書き方はできるだけ保つ**
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Marker {
+    /// 既定（リストの印 `-`・強調 `*`・太字 `**`）
+    #[default]
+    First,
+    /// もう一方（リストの印 `*`・強調 `_`・太字 `__`）
+    Second,
+}
+
+impl Marker {
+    pub const ALL: [Marker; 2] = [Self::First, Self::Second];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::First => "first",
+            Self::Second => "second",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Self {
+        match value.trim().trim_matches('"') {
+            "second" | "*" | "_" | "__" => Self::Second,
+            _ => Self::First,
+        }
+    }
+}
+
+impl std::fmt::Display for Marker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::First => "最初の書き方（-・*・**）",
+            Self::Second => "もう一方（*・_・__）",
+        })
+    }
+}
+
 /// スライドを書き出すときの既定の形式（v2.4.0 R-07 7e）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SlideExport {
@@ -628,6 +665,26 @@ pub struct Settings {
     pub remember_urls: bool,
     pub recent_urls: Vec<String>,
     pub remote_images: bool,
+    /// WYSIWYG（v2.5.0 R-01）。使うか・入れる文書の大きさの上限（KB）・新しく書くときの記法
+    pub wysiwyg: bool,
+    pub wysiwyg_limit_kb: u32,
+    pub list_marker: Marker,
+    pub emphasis_marker: Marker,
+    pub strong_marker: Marker,
+    /// フォーマッター（v2.5.0 R-03）。そろえるもの（表・リストの印とその字・強調と太字）と、
+    /// 検査の直し・フォーマッターを当てるとき（メニュー・ショートカット・保存・閉じる）
+    pub format_tables: bool,
+    pub format_bullets: bool,
+    pub format_bullet: char,
+    pub format_emphasis: bool,
+    pub lint_fix_menu: bool,
+    pub lint_fix_key: bool,
+    pub lint_fix_save: bool,
+    pub lint_fix_close: bool,
+    pub format_menu: bool,
+    pub format_key: bool,
+    pub format_save: bool,
+    pub format_close: bool,
     /// 差分の出し方（v2.3.0 R-02）
     pub diff_layout: DiffLayout,
     /// 差分で空白の違いをどう扱うか（R-02 d）
@@ -709,6 +766,9 @@ pub const AUTOSAVE_MIN: u32 = 2;
 pub const AUTOSAVE_MAX: u32 = 3600;
 /// 手元の HTTP の既定の口と、選べる範囲（v2.4.0 R-06 6d。**よく使われる口と、OS が配る口を避ける**）
 pub const MCP_HTTP_PORT: u16 = 39217;
+/// WYSIWYG に入れる文書の大きさの上限（KB）の既定と範囲（v2.5.0 R-01）
+pub const WYSIWYG_LIMIT_KB: u32 = 1024;
+pub const WYSIWYG_LIMIT_MAX_KB: u32 = 10 * 1024;
 pub const MCP_HTTP_PORT_MIN: u16 = 1024;
 pub const MCP_HTTP_PORT_MAX: u16 = 49151;
 
@@ -803,6 +863,23 @@ impl Default for Settings {
             remember_urls: true,
             recent_urls: Vec::new(),
             remote_images: false,
+            wysiwyg: true,
+            wysiwyg_limit_kb: WYSIWYG_LIMIT_KB,
+            list_marker: Marker::First,
+            emphasis_marker: Marker::First,
+            strong_marker: Marker::First,
+            format_tables: true,
+            format_bullets: true,
+            format_bullet: '-',
+            format_emphasis: true,
+            lint_fix_menu: true,
+            lint_fix_key: true,
+            lint_fix_save: false,
+            lint_fix_close: false,
+            format_menu: true,
+            format_key: true,
+            format_save: false,
+            format_close: false,
             diff_layout: DiffLayout::SideBySide,
             diff_whitespace: DiffWhitespace::Exact,
             diff_ignore_case: false,
@@ -1081,6 +1158,33 @@ impl Settings {
             self.marp_present_info,
             self.marp_export_format.as_str()
         ));
+        // WYSIWYG（v2.5.0 R-01）
+        out.push_str(&format!(
+            "wysiwyg = {}\nwysiwyg_limit_kb = {}\nlist_marker = \"{}\"\nemphasis_marker = \"{}\"\nstrong_marker = \"{}\"\n",
+            self.wysiwyg,
+            self.wysiwyg_limit_kb,
+            self.list_marker.as_str(),
+            self.emphasis_marker.as_str(),
+            self.strong_marker.as_str()
+        ));
+        // フォーマッター（v2.5.0 R-03）
+        out.push_str(&format!(
+            "format_tables = {}\nformat_bullets = {}\nformat_bullet = \"{}\"\nformat_emphasis = {}\n\
+             lint_fix_menu = {}\nlint_fix_key = {}\nlint_fix_save = {}\nlint_fix_close = {}\n\
+             format_menu = {}\nformat_key = {}\nformat_save = {}\nformat_close = {}\n",
+            self.format_tables,
+            self.format_bullets,
+            self.format_bullet,
+            self.format_emphasis,
+            self.lint_fix_menu,
+            self.lint_fix_key,
+            self.lint_fix_save,
+            self.lint_fix_close,
+            self.format_menu,
+            self.format_key,
+            self.format_save,
+            self.format_close
+        ));
         // URL を開く（v2.4.0 R-09）。**URL は空白で区切る**（URL に空白は入らない。" は %22 にする）
         out.push_str(&format!(
             "remember_urls = {}\nremote_images = {}\nrecent_urls = \"{}\"\n",
@@ -1137,7 +1241,7 @@ impl Settings {
     /// 外部クレートを使わない。読むのは平らな数項目だけで、
     /// TOML の全機能は要らない。
     pub fn from_toml(text: &str) -> Self {
-        const BOOL_KEYS: [&str; 38] = [
+        const BOOL_KEYS: [&str; 50] = [
             "toc_visible",
             "scroll_sync",
             "show_invisibles",
@@ -1184,6 +1288,20 @@ impl Settings {
             // URL を開く（v2.4.0 R-09）
             "remember_urls",
             "remote_images",
+            // WYSIWYG（v2.5.0 R-01）
+            "wysiwyg",
+            // フォーマッター（v2.5.0 R-03）
+            "format_tables",
+            "format_bullets",
+            "format_emphasis",
+            "lint_fix_menu",
+            "lint_fix_key",
+            "lint_fix_save",
+            "lint_fix_close",
+            "format_menu",
+            "format_key",
+            "format_save",
+            "format_close",
         ];
 
         let mut settings = Self::default();
@@ -1317,6 +1435,33 @@ impl Settings {
                 "marp_present_info" => settings.marp_present_info = flag,
                 "marp_export_format" => settings.marp_export_format = SlideExport::parse(value),
                 "remember_urls" => settings.remember_urls = flag,
+                "wysiwyg" => settings.wysiwyg = flag,
+                "format_tables" => settings.format_tables = flag,
+                "format_bullets" => settings.format_bullets = flag,
+                "format_bullet" => {
+                    if let Some(c @ ('-' | '*' | '+')) =
+                        value.trim().trim_matches('"').chars().next()
+                    {
+                        settings.format_bullet = c;
+                    }
+                }
+                "format_emphasis" => settings.format_emphasis = flag,
+                "lint_fix_menu" => settings.lint_fix_menu = flag,
+                "lint_fix_key" => settings.lint_fix_key = flag,
+                "lint_fix_save" => settings.lint_fix_save = flag,
+                "lint_fix_close" => settings.lint_fix_close = flag,
+                "format_menu" => settings.format_menu = flag,
+                "format_key" => settings.format_key = flag,
+                "format_save" => settings.format_save = flag,
+                "format_close" => settings.format_close = flag,
+                "wysiwyg_limit_kb" => {
+                    if let Some(limit) = ranged(value, 64..=WYSIWYG_LIMIT_MAX_KB) {
+                        settings.wysiwyg_limit_kb = limit;
+                    }
+                }
+                "list_marker" => settings.list_marker = Marker::parse(value),
+                "emphasis_marker" => settings.emphasis_marker = Marker::parse(value),
+                "strong_marker" => settings.strong_marker = Marker::parse(value),
                 "remote_images" => settings.remote_images = flag,
                 "recent_urls" => {
                     settings.recent_urls = value
@@ -1799,6 +1944,23 @@ mod tests {
             marp_present_info: true,
             marp_export_format: SlideExport::Pptx,
             remember_urls: false,
+            wysiwyg: false,
+            wysiwyg_limit_kb: 2048,
+            format_tables: false,
+            format_bullets: false,
+            format_bullet: '+',
+            format_emphasis: false,
+            lint_fix_menu: false,
+            lint_fix_key: false,
+            lint_fix_save: true,
+            lint_fix_close: true,
+            format_menu: false,
+            format_key: false,
+            format_save: true,
+            format_close: true,
+            list_marker: Marker::Second,
+            emphasis_marker: Marker::Second,
+            strong_marker: Marker::Second,
             recent_urls: vec!["https://example.com/a.md".to_owned()],
             remote_images: true,
             diff_layout: DiffLayout::Unified,

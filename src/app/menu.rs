@@ -74,6 +74,8 @@ pub enum Submenu {
     Format,
     /// 表（v2.1.0 R-16）
     Table,
+    /// 文書の組み替え（v2.5.0 R-01 b）
+    Structure,
 }
 
 impl Submenu {
@@ -88,6 +90,7 @@ impl Submenu {
             Submenu::LineEnding => "改行コードを指定して保存",
             Submenu::Format => "書式",
             Submenu::Table => "表",
+            Submenu::Structure => "リスト・見出しの組み替え",
         }
     }
 }
@@ -222,6 +225,10 @@ pub struct Context<'a> {
     pub focus_mode: bool,
     /// Marp の文書をスライドに分けて見せているか（v2.4.0 R-07 7c。発表できるか）
     pub slides: bool,
+    /// WYSIWYG を使うか（v2.5.0 R-01）
+    pub wysiwyg: bool,
+    /// 検査の直し・フォーマッターをメニューから当てるか（v2.5.0 R-03）
+    pub tidy_menu: (bool, bool),
     /// 読み取り専用か（v2.1.3）
     pub read_only: bool,
     /// 畳んでいる見出しがあるか（R-20）
@@ -433,6 +440,13 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
                     enabled: true,
                     access: Some('S'),
                 },
+                Item::Fold {
+                    label: Submenu::Structure.label(),
+                    open: context.open_submenu == Some(Submenu::Structure),
+                    message: Message::ToggleSubmenu(Submenu::Structure),
+                    enabled: true,
+                    access: Some('G'),
+                },
             ];
             // **表の整形を切っていたら出さない**（R-16）
             if context.table_format {
@@ -498,6 +512,25 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
                     c(Command::EyeMarkSelection),
                     Message::EyeMarkSelection,
                 ),
+                // 検査の直しとフォーマッター（v2.5.0 R-03）。**メニューから当てない設定なら押せない**
+                Item::action(
+                    "検査の直しをまとめて当てる",
+                    c(Command::LintFixAll),
+                    Message::Tidy(
+                        crate::render::TidyTool::Lint,
+                        crate::render::TidyTrigger::Menu,
+                    ),
+                )
+                .enabled(context.tidy_menu.0),
+                Item::action(
+                    "Markdown を整える",
+                    c(Command::FormatDocument),
+                    Message::Tidy(
+                        crate::render::TidyTool::Format,
+                        crate::render::TidyTrigger::Menu,
+                    ),
+                )
+                .enabled(context.tidy_menu.1),
             ]);
             items
         }
@@ -537,6 +570,15 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
             )
             .checked(context.mode == ViewMode::Split)
             .access('S'),
+            // 描いた文字の上で直す（v2.5.0 R-01）。**設定で切っていれば出さない**
+            Item::action(
+                "WYSIWYG",
+                c(Command::ViewWysiwyg),
+                Message::SetMode(ViewMode::Wysiwyg),
+            )
+            .checked(context.mode == ViewMode::Wysiwyg)
+            .enabled(context.wysiwyg)
+            .access('G'),
             Item::Separator,
             Item::action("目次", c(Command::ToggleToc), Message::ToggleToc)
                 .checked(context.toc_visible)
@@ -816,6 +858,27 @@ pub(super) fn submenu_items(which: Submenu, context: Context<'_>) -> Vec<Item> {
                 .indented(),
             ]
         }
+        Submenu::Structure => {
+            use crate::render::Restructure as R;
+            let item = |command: Command, message: R| {
+                Item::action(
+                    command.label(),
+                    context.accel(command),
+                    Message::Restructure(message),
+                )
+                .indented()
+            };
+            vec![
+                item(Command::ItemIndent, R::Indent { outdent: false }),
+                item(Command::ItemOutdent, R::Indent { outdent: true }),
+                item(Command::RenumberList, R::Renumber),
+                item(Command::ToggleTask, R::ToggleTask),
+                item(Command::PromoteHeading, R::Heading { promote: true }),
+                item(Command::DemoteHeading, R::Heading { promote: false }),
+                item(Command::SectionUp, R::MoveSection { up: true }),
+                item(Command::SectionDown, R::MoveSection { up: false }),
+            ]
+        }
         Submenu::Table => vec![
             Item::action(
                 "表を整形",
@@ -955,6 +1018,8 @@ mod tests {
             on_top: false,
             focus_mode: false,
             slides: false,
+            wysiwyg: true,
+            tidy_menu: (true, true),
             read_only: false,
             has_folds: true,
         }
@@ -1014,6 +1079,7 @@ mod tests {
                 Some(Submenu::TabWidth),
                 Some(Submenu::Format),
                 Some(Submenu::Table),
+                Some(Submenu::Structure),
             ] {
                 let context = Context {
                     open_submenu: open,

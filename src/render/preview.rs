@@ -142,6 +142,10 @@ pub enum PreviewAction {
     },
     /// 発表の画面で次・前へ（v2.4.0 R-07 7c。押下・ホイール）
     PresentStep(i32),
+    /// WYSIWYG の操作（v2.5.0 R-01 a）
+    Wysiwyg(super::WysiwygAction),
+    /// WYSIWYG での IME（編集画面と同じ道で当てる）
+    Ime(super::ImeAction),
     /// リンクを押した（v2.1.0 R-19）。**押した文字しか分からない**ので、
     /// アプリ側がブロックの原文から先を拾い直す
     LinkClicked { block: usize, text: String },
@@ -463,6 +467,19 @@ pub struct PreviewView<'a> {
     present: Option<usize>,
     /// 発表の画面の右下に出す文字（ページ番号と経過時間。出さなければ `None`）
     present_info: Option<String>,
+    /// WYSIWYG のキャレット（v2.5.0 R-01 a。`None` なら読むだけ）
+    wysiwyg: Option<WysiwygCaret<'a>>,
+}
+
+/// WYSIWYG のキャレット（原文の位置）。選んでいれば、掴んだ所も
+#[derive(Debug, Clone, Copy)]
+pub struct WysiwygCaret<'a> {
+    pub byte: usize,
+    pub anchor: Option<usize>,
+    /// 変換中の文字（IME）
+    pub preedit: Option<&'a str>,
+    /// キャレットを描くか（点滅）
+    pub visible: bool,
 }
 
 impl<'a> PreviewView<'a> {
@@ -501,7 +518,14 @@ impl<'a> PreviewView<'a> {
             slides: None,
             present: None,
             present_info: None,
+            wysiwyg: None,
         }
+    }
+
+    /// 描いた文字の上で直す（v2.5.0 R-01 a）
+    pub fn wysiwyg(mut self, caret: Option<WysiwygCaret<'a>>) -> Self {
+        self.wysiwyg = caret;
+        self
     }
 
     /// 発表の画面にする（v2.4.0 R-07 7c）。`info` は右下に出す文字
@@ -913,6 +937,185 @@ impl<'a> PreviewView<'a> {
     }
 }
 
+impl PreviewView<'_> {
+    /// 押した所の原文の位置（WYSIWYG。直せないブロックなら、その頭）
+    fn wysiwyg_byte_at<Renderer>(
+        &self,
+        state: &State,
+        bounds: Rectangle,
+        point: Point,
+    ) -> Option<usize>
+    where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let spot = self.spot_at::<Renderer>(state, bounds, point)?;
+        let shown = state
+            .visible
+            .iter()
+            .find(|shown| shown.index == spot.block)?;
+        match super::wysiwyg::mapped(self.document, shown) {
+            Some(mapped) => Some(mapped.byte_at(spot.line, spot.offset)),
+            None => self
+                .document
+                .blocks()
+                .get(spot.block)
+                .map(|block| block.bytes.start),
+        }
+    }
+
+    /// 押した所がチェックの印なら、その項目の原文の位置（v2.5.0 R-01 b）
+    fn wysiwyg_task_at<Renderer>(
+        &self,
+        state: &State,
+        bounds: Rectangle,
+        point: Point,
+    ) -> Option<usize>
+    where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let spot = self.spot_at::<Renderer>(state, bounds, point)?;
+        let shown = state
+            .visible
+            .iter()
+            .find(|shown| shown.index == spot.block)?;
+        let mapped = super::wysiwyg::mapped(self.document, shown)?;
+        mapped
+            .task_at(spot.line, spot.offset)
+            .then(|| mapped.byte_at(spot.line, spot.offset))
+    }
+
+    /// WYSIWYG の選択・キャレット・変換中の文字を描く
+    fn draw_wysiwyg<Renderer>(
+        &self,
+        renderer: &mut Renderer,
+        state: &State,
+        bounds: Rectangle,
+        caret: WysiwygCaret<'_>,
+        text_color: Color,
+    ) where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        // 選んだ所
+        if let Some(anchor) = caret.anchor.filter(|anchor| *anchor != caret.byte) {
+            let (from, to) = (anchor.min(caret.byte), anchor.max(caret.byte));
+            for shown in &state.visible {
+                let Some(mapped) = super::wysiwyg::mapped(self.document, shown) else {
+                    continue;
+                };
+                let measurer = IcedMeasurer::<Renderer>::new(shown.size);
+                for (number, line) in shown.laid.lines.iter().enumerate() {
+                    let length: usize = line.runs.iter().map(|run| run.text.chars().count()).sum();
+                    let low = mapped.byte_at(number, 0);
+                    let high = mapped.byte_at(number, length);
+                    if to <= low || from >= high {
+                        continue;
+                    }
+                    let offset_of = |byte: usize| {
+                        mapped
+                            .spot_of(byte, &shown.laid.lines)
+                            .filter(|(at, _)| *at == number)
+                            .map(|(_, offset)| offset)
+                    };
+                    // 行頭の印（• など）は選べない。印の後ろから塗る
+                    let floor = mapped.segments.get(number).map_or(0, |&(line, first)| {
+                        mapped.map.lines[line].start.saturating_sub(first)
+                    });
+                    let a = if from <= low {
+                        0
+                    } else {
+                        offset_of(from).unwrap_or(0)
+                    }
+                    .max(floor);
+                    let b = if to >= high {
+                        length
+                    } else {
+                        offset_of(to).unwrap_or(length)
+                    };
+                    let x0 = super::wysiwyg::x_of(&measurer, line, a);
+                    let x1 = super::wysiwyg::x_of(&measurer, line, b);
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(bounds.x + shown.x + x0, bounds.y + shown.y + line.top),
+                                Size::new((x1 - x0).max(2.0), line.height),
+                            ),
+                            ..Default::default()
+                        },
+                        Color {
+                            a: 0.28,
+                            ..text_color
+                        },
+                    );
+                }
+            }
+        }
+        let Some(rect) = super::wysiwyg::caret_rect::<Renderer>(
+            self.document,
+            &state.visible,
+            caret.byte,
+            bounds.position(),
+        ) else {
+            return;
+        };
+        // 変換中の文字はキャレットの所に、下線を付けて出す
+        let mut x = rect.x;
+        if let Some(preedit) = caret.preedit.filter(|preedit| !preedit.is_empty()) {
+            let size = (rect.height / 1.6).max(8.0);
+            let width =
+                IcedMeasurer::<Renderer>::new(size).width(preedit, crate::layout::TextStyle::Body);
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(rect.x, rect.y),
+                        Size::new(width, rect.height),
+                    ),
+                    ..Default::default()
+                },
+                Color {
+                    a: 0.10,
+                    ..text_color
+                },
+            );
+            renderer.fill_text(
+                Text {
+                    content: preedit.to_owned(),
+                    bounds: Size::new(f32::INFINITY, rect.height),
+                    size: Pixels(size),
+                    line_height: text::LineHeight::Absolute(Pixels(rect.height)),
+                    font: fonts::for_style(crate::layout::TextStyle::Body, size).0,
+                    align_x: text::Alignment::Left,
+                    align_y: iced::alignment::Vertical::Top,
+                    shaping: text::Shaping::Advanced,
+                    wrapping: text::Wrapping::None,
+                },
+                Point::new(rect.x, rect.y),
+                text_color,
+                bounds,
+            );
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(
+                        Point::new(rect.x, rect.y + rect.height - 2.0),
+                        Size::new(width, 1.0),
+                    ),
+                    ..Default::default()
+                },
+                text_color,
+            );
+            x += width;
+        }
+        if caret.visible {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle::new(Point::new(x, rect.y), rect.size()),
+                    ..Default::default()
+                },
+                text_color,
+            );
+        }
+    }
+}
+
 /// 行の左端からの横位置に、いちばん近い文字の切れ目（v2.2.0）
 fn offset_at(measurer: &dyn TextMeasurer, line: &crate::layout::LineBox, x: f32) -> usize {
     let mut base = 0usize;
@@ -1023,6 +1226,43 @@ where
                             }
                         }
                     }
+                    // **WYSIWYG では、押した所へキャレットを置く**（v2.5.0 R-01 a）。リンクは Ctrl + 押下で開く
+                    if self.wysiwyg.is_some() && bounds.contains(point) {
+                        let ctrl = tree.state.downcast_ref::<State>().modifiers.control();
+                        if ctrl {
+                            if let Some((block, text)) = self.link_under(tree, bounds, point) {
+                                shell.publish((self.on_action)(PreviewAction::LinkClicked {
+                                    block,
+                                    text,
+                                }));
+                                shell.capture_event();
+                                return;
+                            }
+                        }
+                        let state = tree.state.downcast_mut::<State>();
+                        let shift = state.modifiers.shift();
+                        // チェックの印を押したら入れ切りする（v2.5.0 R-01 b）
+                        if let Some(byte) = self.wysiwyg_task_at::<Renderer>(state, bounds, point) {
+                            shell.publish((self.on_action)(PreviewAction::Wysiwyg(
+                                super::WysiwygAction::ToggleTask { byte },
+                            )));
+                            shell.request_redraw();
+                            shell.capture_event();
+                            return;
+                        }
+                        if let Some(byte) = self.wysiwyg_byte_at::<Renderer>(state, bounds, point) {
+                            shell.publish((self.on_action)(PreviewAction::Wysiwyg(
+                                super::WysiwygAction::Place {
+                                    byte,
+                                    select: shift,
+                                },
+                            )));
+                        }
+                        state.selecting = true;
+                        shell.request_redraw();
+                        shell.capture_event();
+                        return;
+                    }
                     // **リンクの上なら開く**（R-19）
                     if let Some((block, text)) = self.link_under(tree, bounds, point) {
                         shell.publish((self.on_action)(PreviewAction::LinkClicked { block, text }));
@@ -1115,6 +1355,17 @@ where
                 let Some(point) = cursor.position() else {
                     return;
                 };
+                // WYSIWYG: 引いて選ぶ（v2.5.0 R-01 a）
+                if self.wysiwyg.is_some() {
+                    let state = tree.state.downcast_ref::<State>();
+                    if let Some(byte) = self.wysiwyg_byte_at::<Renderer>(state, bounds, point) {
+                        shell.publish((self.on_action)(PreviewAction::Wysiwyg(
+                            super::WysiwygAction::Place { byte, select: true },
+                        )));
+                    }
+                    shell.capture_event();
+                    return;
+                }
                 let state = tree.state.downcast_mut::<State>();
                 if let Some(spot) = self.spot_at::<Renderer>(state, bounds, point) {
                     if let Some(selection) = state.selection.as_mut() {
@@ -1186,6 +1437,21 @@ where
                     state.selecting = false;
                 }
                 let (updates, embed_requests) = self.relayout::<Renderer>(state, bounds);
+                // **WYSIWYG では、キャレットの矩形を OS へ知らせる**（IME の候補の窓の置き場。v2.5.0 R-01 a）
+                if let Some(caret) = self.wysiwyg {
+                    if let Some(rect) = super::wysiwyg::caret_rect::<Renderer>(
+                        self.document,
+                        &state.visible,
+                        caret.byte,
+                        bounds.position(),
+                    ) {
+                        shell.request_input_method(&iced::advanced::InputMethod::Enabled {
+                            cursor: rect,
+                            purpose: iced::advanced::input_method::Purpose::Normal,
+                            preedit: None::<iced::advanced::input_method::Preedit<String>>,
+                        });
+                    }
+                }
                 let laid_out = state.visible.len();
                 let hit_rate = state.cache.hit_rate();
 
@@ -1210,6 +1476,96 @@ where
                         hit_rate,
                         slide_pitch: state.pitch,
                     }));
+                }
+            }
+
+            // --- WYSIWYG の IME と打鍵（v2.5.0 R-01 a） ---
+            Event::InputMethod(ime) if self.wysiwyg.is_some() && !shell.is_event_captured() => {
+                use iced::advanced::input_method;
+                let action = match ime {
+                    input_method::Event::Opened => super::ImeAction::Opened,
+                    input_method::Event::Closed => super::ImeAction::Closed,
+                    input_method::Event::Preedit(content, _) => {
+                        super::ImeAction::Preedit(content.clone())
+                    }
+                    input_method::Event::Commit(text) => super::ImeAction::Commit(text.clone()),
+                };
+                shell.publish((self.on_action)(PreviewAction::Ime(action)));
+                shell.capture_event();
+            }
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                text,
+                modifiers,
+                ..
+            }) if self.wysiwyg.is_some() && !shell.is_event_captured() => {
+                let Some(caret) = self.wysiwyg else {
+                    return;
+                };
+                // 変換中の打鍵は IME のもの
+                if caret.preedit.is_some_and(|preedit| !preedit.is_empty()) {
+                    return;
+                }
+                // Ctrl・Alt つきは割り当てのもの（太字・保存など）
+                if modifiers.control() || modifiers.alt() {
+                    return;
+                }
+                use keyboard::key::Named;
+                let shift = modifiers.shift();
+                let state = tree.state.downcast_ref::<State>();
+                let action = match key.as_ref() {
+                    keyboard::Key::Named(Named::ArrowLeft) => {
+                        Some(super::WysiwygAction::Left { select: shift })
+                    }
+                    keyboard::Key::Named(Named::ArrowRight) => {
+                        Some(super::WysiwygAction::Right { select: shift })
+                    }
+                    keyboard::Key::Named(named @ (Named::ArrowUp | Named::ArrowDown)) => {
+                        let up = named == Named::ArrowUp;
+                        match super::wysiwyg::vertical::<Renderer>(
+                            self.document,
+                            &state.visible,
+                            caret.byte,
+                            up,
+                        ) {
+                            Some(byte) => Some(super::WysiwygAction::Place {
+                                byte,
+                                select: shift,
+                            }),
+                            None => {
+                                // 行き先が見えていない。送ってから、もう一度押してもらう
+                                let step = self.text_size * 1.6 * if up { -3.0 } else { 3.0 };
+                                shell.publish((self.on_action)(PreviewAction::Scrolled(step)));
+                                None
+                            }
+                        }
+                    }
+                    keyboard::Key::Named(named @ (Named::Home | Named::End)) => {
+                        super::wysiwyg::line_edge(
+                            self.document,
+                            &state.visible,
+                            caret.byte,
+                            named == Named::End,
+                        )
+                        .map(|byte| super::WysiwygAction::Place {
+                            byte,
+                            select: shift,
+                        })
+                    }
+                    keyboard::Key::Named(Named::Backspace) => Some(super::WysiwygAction::Backspace),
+                    keyboard::Key::Named(Named::Delete) => Some(super::WysiwygAction::Delete),
+                    keyboard::Key::Named(Named::Enter) => Some(super::WysiwygAction::Enter),
+                    keyboard::Key::Named(Named::Tab) => Some(super::WysiwygAction::Tab { shift }),
+                    keyboard::Key::Named(Named::Escape) => None,
+                    _ => text
+                        .as_ref()
+                        .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+                        .map(|text| super::WysiwygAction::Insert(text.to_string())),
+                };
+                if let Some(action) = action {
+                    shell.publish((self.on_action)(PreviewAction::Wysiwyg(action)));
+                    shell.request_redraw();
+                    shell.capture_event();
                 }
             }
 
@@ -1625,6 +1981,13 @@ where
                 });
             }
         });
+
+        // WYSIWYG の選択とキャレットと変換中の文字（v2.5.0 R-01 a）
+        if let Some(caret) = self.wysiwyg {
+            renderer.with_layer(clip, |renderer| {
+                self.draw_wysiwyg::<Renderer>(renderer, state, bounds, caret, text_color);
+            });
+        }
 
         // 発表の画面: 右下にページ番号と経過時間（出すときだけ）。スクロールバーは出さない
         if self.present.is_some() {

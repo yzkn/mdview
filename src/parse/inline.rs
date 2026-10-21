@@ -33,6 +33,8 @@ pub enum SpanStyle {
 pub struct Span {
     pub text: String,
     pub style: SpanStyle,
+    /// **原文に無い文字か**（画像の目印・区切り線の線。v2.5.0 R-01 の WYSIWYG が原文と突き合わせるときに飛ばす）
+    pub synthetic: bool,
 }
 
 impl Span {
@@ -40,6 +42,14 @@ impl Span {
         Self {
             text: text.into(),
             style,
+            synthetic: false,
+        }
+    }
+
+    fn synthetic(text: impl Into<String>, style: SpanStyle) -> Self {
+        Self {
+            synthetic: true,
+            ..Self::new(text, style)
         }
     }
 }
@@ -348,7 +358,7 @@ fn collect<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut BlockContent) {
             NodeValue::BlockQuote => collect(child, depth.saturating_add(1), out),
 
             NodeValue::ThematicBreak => out.lines.push(LogicalLine {
-                spans: vec![Span::new("─".repeat(16), SpanStyle::Normal)],
+                spans: vec![Span::synthetic("─".repeat(16), SpanStyle::Normal)],
                 indent: depth.min(MAX_DEPTH),
                 marker: None,
             }),
@@ -454,7 +464,8 @@ fn collect_spans<'a>(node: &'a AstNode<'a>, inherited: SpanStyle, out: &mut Vec<
             // ここで作った目印は使われない（`BlockContent::lone_image`）。
             NodeValue::Image(link) => {
                 let label = image_label(link.url.as_str(), child);
-                push(out, &label, inherited);
+                // 原文に無い文字（WYSIWYG が飛ばす）。前の範囲とはつながない
+                out.push(Span::synthetic(label, inherited));
             }
             NodeValue::Strikethrough => {
                 drop(value);
@@ -528,7 +539,7 @@ fn push(out: &mut Vec<Span>, text: &str, style: SpanStyle) {
         return;
     }
     if let Some(last) = out.last_mut() {
-        if last.style == style {
+        if last.style == style && !last.synthetic {
             last.text.push_str(text);
             return;
         }

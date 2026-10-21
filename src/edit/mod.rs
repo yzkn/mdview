@@ -16,6 +16,12 @@ pub mod toc;
 // Markdown の検査（v2.3.0 R-11）
 pub mod lint;
 pub mod transform;
+// WYSIWYG の描いた文字と原文の対応（v2.5.0 R-01）
+pub mod wysiwyg;
+// Markdown のフォーマッター（v2.5.0 R-03）
+pub mod format;
+// 文書の組み替え（v2.5.0 R-01 b）
+pub mod structure;
 
 /// 対応する括弧を探す（§4.8）。
 ///

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- インラインコード（mdview の道具の帯。v2.5.0 R-01） -->
+  <path d="M8 7 3 12l5 5"/>
+  <path d="M16 7l5 5-5 5"/>
+  <path d="M13.5 5 10.5 19"/>
+</svg>

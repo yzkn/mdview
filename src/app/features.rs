@@ -25,9 +25,13 @@ pub enum FormatKind {
 impl FormatKind {
     pub const ALL: [FormatKind; 4] = [Self::Bold, Self::Italic, Self::Code, Self::Link];
 
-    fn marker(self) -> &'static str {
+    /// 記号（**太字・強調は設定の記法**。v2.5.0 R-01）
+    fn marker(self, settings: &crate::io::settings::Settings) -> &'static str {
+        use crate::io::settings::Marker;
         match self {
+            Self::Bold if settings.strong_marker == Marker::Second => "__",
             Self::Bold => "**",
+            Self::Italic if settings.emphasis_marker == Marker::Second => "_",
             Self::Italic => "*",
             Self::Code => "`",
             Self::Link => "",
@@ -329,7 +333,7 @@ impl App {
             self.insert_link();
             return;
         }
-        let marker = kind.marker();
+        let marker = kind.marker(&self.settings);
         let m = marker.len();
 
         let Some(range) = self.selected() else {
