@@ -22,6 +22,8 @@ pub mod wysiwyg;
 pub mod format;
 // 文書の組み替え（v2.5.0 R-01 b）
 pub mod structure;
+// WYSIWYG で表を直す（v2.5.1 R-01）
+pub mod table;
 
 /// 対応する括弧を探す（§4.8）。
 ///

@@ -2,7 +2,8 @@
 //!
 //! 描いた行（折り返したもの）と、対応の表（`crate::edit::wysiwyg`）の行を結ぶ。
 //! **折り返した行をつなぐと表の行の字の並びになる**ので、行ごとに「表の何行目の何字目から」を数えて持つ
-//! （コードブロックは描いた行と原文の行が 1 対 1）。
+//! （コードブロックは描いた行と原文の行が 1 対 1）。表はセルごとに、描いた行が左のセルから並ぶ。
+//! 図・数式は、小窓を開いているときだけ小窓の行が原文の行と 1 対 1（v2.5.1 R-01）。
 
 use iced::advanced::text;
 use iced::{Point, Rectangle, Size};
@@ -14,6 +15,9 @@ use crate::edit::wysiwyg::{map_block, BlockMap, Pos};
 use crate::layout::{LineBox, TextMeasurer};
 use crate::parse::BlockKind;
 
+/// 描いた行が対応の表のどの行にも当たらない印（図の絵の札・描けなかった理由の行）
+const NOWHERE: usize = usize::MAX;
+
 /// 見えているブロック 1 つの対応（ブロックの原文の頭・表・描いた行ごとの「表の行・頭の字」）
 pub struct Mapped {
     pub start: usize,
@@ -23,13 +27,21 @@ pub struct Mapped {
 
 /// 見えているブロックの対応を作る（直せないブロックは `None`）
 pub fn mapped(document: &Document, shown: &Shown) -> Option<Mapped> {
-    if shown.laid.embed.is_some() {
+    // 図・数式は、小窓を開いているときだけ直せる（v2.5.1 R-01）
+    if shown.laid.embed.is_some() && shown.laid.editor.is_none() {
         return None;
     }
     let block = document.blocks().get(shown.index)?;
     let source = document.text().byte_slice(block.bytes.clone()).to_string();
     let map = map_block(block, &source)?;
-    let segments = if matches!(block.kind, BlockKind::Code { .. }) {
+    let segments = if let Some(editor) = shown.laid.editor {
+        (0..shown.laid.lines.len())
+            .map(|laid| match laid.checked_sub(editor.first) {
+                Some(line) if line < editor.count => (line, 0),
+                _ => (NOWHERE, 0),
+            })
+            .collect()
+    } else if matches!(block.kind, BlockKind::Code { .. }) {
         (0..shown.laid.lines.len()).map(|line| (line, 0)).collect()
     } else {
         let mut out = Vec::with_capacity(shown.laid.lines.len());
@@ -61,6 +73,10 @@ impl Mapped {
         let Some(&(line, first)) = self.segments.get(laid_line) else {
             return self.start + self.map.byte_of(self.map.last());
         };
+        // 図の絵の上（小窓の外）。小窓の頭へ
+        if line >= self.map.lines.len() {
+            return self.start + self.map.byte_of(self.map.first());
+        }
         let start = self.map.lines[line].start;
         self.start
             + self.map.byte_of(Pos {
@@ -74,7 +90,9 @@ impl Mapped {
         let Some(&(line, first)) = self.segments.get(laid_line) else {
             return false;
         };
-        let map = &self.map.lines[line];
+        let Some(map) = self.map.lines.get(line) else {
+            return false;
+        };
         let index = first + offset;
         index < map.start
             && map.chars[..map.start.min(map.chars.len())]
@@ -171,6 +189,44 @@ where
     ))
 }
 
+/// 描いた行の並びの中で、表のセルの上・下のセルへ（v2.5.1 R-01）。
+/// **表の上・下の端なら、表の外の行**（前のブロックの最後の行・次のブロックの最初の行）。
+/// 返すのは行き先の行の並びの番号。表の中でなければ `None`
+fn table_step(
+    rows: &[(usize, usize)],
+    maps: &[Option<Mapped>],
+    number: usize,
+    laid: usize,
+    up: bool,
+) -> Option<usize> {
+    let mapped = maps[number].as_ref()?;
+    let columns = mapped.map.columns?;
+    let line = mapped.segments.get(laid)?.0;
+    let target = if up {
+        line.checked_sub(columns)
+    } else {
+        Some(line + columns).filter(|target| *target < mapped.map.lines.len())
+    };
+    let ours = |row: &&(usize, usize)| row.0 == number;
+    match target {
+        // 上なら行き先のセルの最後の行、下なら最初の行
+        Some(target) => {
+            let mut found = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| ours(row) && mapped.segments[row.1].0 == target)
+                .map(|(index, _)| index);
+            if up {
+                found.next_back()
+            } else {
+                found.next()
+            }
+        }
+        None if up => rows.iter().position(|row| ours(&row))?.checked_sub(1),
+        None => Some(rows.iter().rposition(|row| ours(&row))? + 1),
+    }
+}
+
 /// 上・下の行へ（キャレットの x を保つ）。行き先が見えていなければ `None`
 pub fn vertical<Renderer>(
     document: &Document,
@@ -186,9 +242,12 @@ where
     let mut maps = Vec::new();
     for (number, shown) in visible.iter().enumerate() {
         let mapped = mapped(document, shown);
-        if mapped.is_some() {
+        if let Some(mapped) = &mapped {
+            // 対応の表に当たらない行（図の絵の札など）は飛ばす
             for laid in 0..shown.laid.lines.len() {
-                rows.push((number, laid));
+                if mapped.segments[laid].0 != NOWHERE {
+                    rows.push((number, laid));
+                }
             }
         }
         maps.push(mapped);
@@ -208,7 +267,13 @@ where
             )
         })
     })?;
-    let target = if up { row.checked_sub(1)? } else { row + 1 };
+    let (number, laid) = rows[row];
+    let target = match table_step(&rows, &maps, number, laid, up) {
+        Some(target) => target,
+        None if maps[number].as_ref()?.map.columns.is_some() => return None,
+        None if up => row.checked_sub(1)?,
+        None => row + 1,
+    };
     let &(number, laid) = rows.get(target)?;
     let shown = &visible[number];
     let line = &shown.laid.lines[laid];
@@ -313,6 +378,38 @@ mod tests {
             mapped.byte_at(0, 0),
             "- [ ] ".len(),
             "押した所の原文の位置は項目の字の頭"
+        );
+    }
+
+    /// 表はセルごとに描いた行が当たる。空のセルにもキャレットを置ける（v2.5.1 R-01）
+    #[test]
+    fn table_cells_map_to_their_laid_lines() {
+        let document = Document::from_text("| a | b |\n|---|---|\n| 1 |  |\n".to_owned());
+        let visible = vec![shown(&document, 0)];
+        let mapped = mapped(&document, &visible[0]).expect("表は直せる");
+        let lines: Vec<usize> = mapped.segments.iter().map(|(line, _)| *line).collect();
+        assert_eq!(lines, vec![0, 1, 2, 3]);
+        let empty = mapped.byte_at(3, 0);
+        assert_eq!(empty, "| a | b |\n|---|---|\n| 1 | ".len());
+        let rect = caret_rect::<iced::Renderer>(&document, &visible, empty, Point::ORIGIN);
+        assert!(rect.is_some(), "空のセルにもキャレットが出る");
+    }
+
+    /// 上下の矢印は、同じ列の上・下のセルへ（左右のセルへは行かない）
+    #[test]
+    fn arrows_move_between_rows_of_a_table() {
+        let text = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let document = Document::from_text(text.to_owned());
+        let visible = vec![shown(&document, 0)];
+        let b = text.find('b').unwrap();
+        let two = text.find('2').unwrap();
+        assert_eq!(
+            vertical::<iced::Renderer>(&document, &visible, b, false),
+            Some(two)
+        );
+        assert_eq!(
+            vertical::<iced::Renderer>(&document, &visible, two, true),
+            Some(b)
         );
     }
 }

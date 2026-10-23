@@ -107,6 +107,7 @@ pub fn build(
         code_background: false,
         rules: Vec::new(),
         embed: None,
+        editor: None,
     });
 
     blocks
@@ -135,6 +136,7 @@ fn single_line(
         code_background: false,
         rules: Vec::new(),
         embed: None,
+        editor: None,
     }
 }
 

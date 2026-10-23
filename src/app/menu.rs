@@ -898,7 +898,18 @@ pub(super) fn submenu_items(which: Submenu, context: Context<'_>) -> Vec<Item> {
                 Message::TableAddColumn,
             )
             .indented(),
-        ],
+        ]
+        .into_iter()
+        // キャレットのあるセルに当てる組み替え（v2.5.1 R-01）
+        .chain(crate::render::TableEdit::ALL.iter().map(|edit| {
+            Item::action(
+                edit.label(),
+                context.accel(Command::Table(*edit)),
+                Message::TableEdit(*edit),
+            )
+            .indented()
+        }))
+        .collect(),
         Submenu::Insert => crate::edit::datetime::Stamp::ALL
             .iter()
             .map(|stamp| {

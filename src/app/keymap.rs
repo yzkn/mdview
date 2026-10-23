@@ -398,6 +398,8 @@ pub enum Command {
     Present,
     TableAddRow,
     TableAddColumn,
+    // 表の組み替え（v2.5.1 R-01）。既定の打鍵は無い
+    Table(crate::render::TableEdit),
     Transform(Transform),
     Insert(Stamp),
     ViewEdit,
@@ -412,7 +414,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 105] = [
+    pub const ALL: [Command; 115] = [
         Self::New,
         Self::NewWindow,
         Self::Open,
@@ -499,6 +501,16 @@ impl Command {
         Self::Present,
         Self::TableAddRow,
         Self::TableAddColumn,
+        Self::Table(crate::render::TableEdit::ALL[0]),
+        Self::Table(crate::render::TableEdit::ALL[1]),
+        Self::Table(crate::render::TableEdit::ALL[2]),
+        Self::Table(crate::render::TableEdit::ALL[3]),
+        Self::Table(crate::render::TableEdit::ALL[4]),
+        Self::Table(crate::render::TableEdit::ALL[5]),
+        Self::Table(crate::render::TableEdit::ALL[6]),
+        Self::Table(crate::render::TableEdit::ALL[7]),
+        Self::Table(crate::render::TableEdit::ALL[8]),
+        Self::Table(crate::render::TableEdit::ALL[9]),
         Self::Transform(Transform::Upper),
         Self::Transform(Transform::Lower),
         Self::Transform(Transform::HalfWidth),
@@ -609,6 +621,7 @@ impl Command {
             Self::Present => "present",
             Self::TableAddRow => "table_add_row",
             Self::TableAddColumn => "table_add_column",
+            Self::Table(edit) => edit.id(),
             Self::Transform(which) => match which {
                 Transform::Upper => "transform_upper",
                 Transform::Lower => "transform_lower",
@@ -725,6 +738,7 @@ impl Command {
             Self::Present => "発表（スライド）",
             Self::TableAddRow => "表に行を足す",
             Self::TableAddColumn => "表に列を足す",
+            Self::Table(edit) => edit.label(),
             Self::Transform(which) => which.label(),
             Self::Insert(stamp) => stamp.label(),
             Self::ViewEdit => "編集",
@@ -835,6 +849,7 @@ impl Command {
             | Self::LintFixAll
             | Self::TableAddRow
             | Self::TableAddColumn
+            | Self::Table(_)
             | Self::Transform(_)
             | Self::Insert(_)
             | Self::ViewEdit
@@ -986,6 +1001,7 @@ impl Command {
             Self::Present => Message::TogglePresentation,
             Self::TableAddRow => Message::TableAddRow,
             Self::TableAddColumn => Message::TableAddColumn,
+            Self::Table(edit) => Message::TableEdit(edit),
             Self::Transform(which) => Message::Transform(which),
             Self::Insert(stamp) => Message::InsertStamp(stamp),
             Self::ViewEdit => Message::SetMode(crate::render::ViewMode::Edit),

@@ -276,6 +276,8 @@ pub enum Message {
     Tidy(TidyTool, TidyTrigger),
     /// 文書の組み替え（v2.5.0 R-01 b）
     Restructure(Restructure),
+    /// 表の行・列を足す／消す、列の寄せ方（v2.5.1 R-01）
+    TableEdit(TableEdit),
     /// イースターエッグ（v2.5.0 R-04）
     EggPoke(EggSpot),
     EggKey(EggKey),
@@ -498,6 +500,72 @@ pub enum Restructure {
     MoveSection { up: bool },
 }
 
+/// 表の組み替え（v2.5.1 R-01）。キャレットのあるセルに当てる（編集画面でも WYSIWYG でも）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TableEdit {
+    /// 行を足す（`below` なら下に）
+    InsertRow {
+        below: bool,
+    },
+    DeleteRow,
+    /// 列を足す（`right` なら右に）
+    InsertColumn {
+        right: bool,
+    },
+    DeleteColumn,
+    /// 列の寄せ方
+    Align(crate::edit::table::Align),
+}
+
+impl TableEdit {
+    pub const ALL: [TableEdit; 10] = [
+        TableEdit::InsertRow { below: false },
+        TableEdit::InsertRow { below: true },
+        TableEdit::DeleteRow,
+        TableEdit::InsertColumn { right: false },
+        TableEdit::InsertColumn { right: true },
+        TableEdit::DeleteColumn,
+        TableEdit::Align(crate::edit::table::Align::Left),
+        TableEdit::Align(crate::edit::table::Align::Center),
+        TableEdit::Align(crate::edit::table::Align::Right),
+        TableEdit::Align(crate::edit::table::Align::None),
+    ];
+
+    /// 名前（メニュー・コマンドパレット・道具の帯）
+    pub fn label(self) -> &'static str {
+        use crate::edit::table::Align;
+        match self {
+            Self::InsertRow { below: false } => "表の上に行を足す",
+            Self::InsertRow { below: true } => "表の下に行を足す",
+            Self::DeleteRow => "表の行を消す",
+            Self::InsertColumn { right: false } => "表の左に列を足す",
+            Self::InsertColumn { right: true } => "表の右に列を足す",
+            Self::DeleteColumn => "表の列を消す",
+            Self::Align(Align::Left) => "列を左に寄せる",
+            Self::Align(Align::Center) => "列を中央に寄せる",
+            Self::Align(Align::Right) => "列を右に寄せる",
+            Self::Align(Align::None) => "列の寄せ方を外す",
+        }
+    }
+
+    /// 割り当ての表の名前（`keybindings.toml`）
+    pub fn id(self) -> &'static str {
+        use crate::edit::table::Align;
+        match self {
+            Self::InsertRow { below: false } => "table_row_above",
+            Self::InsertRow { below: true } => "table_row_below",
+            Self::DeleteRow => "table_delete_row",
+            Self::InsertColumn { right: false } => "table_column_left",
+            Self::InsertColumn { right: true } => "table_column_right",
+            Self::DeleteColumn => "table_delete_column",
+            Self::Align(Align::Left) => "table_align_left",
+            Self::Align(Align::Center) => "table_align_center",
+            Self::Align(Align::Right) => "table_align_right",
+            Self::Align(Align::None) => "table_align_none",
+        }
+    }
+}
+
 /// About の決まった所（v2.5.0 R-04。イースターエッグ）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EggSpot {
@@ -566,4 +634,6 @@ pub enum WysiwygAction {
     },
     /// キャレットのあるコードブロックの言語を変える（v2.5.0 R-01 b）
     CodeLanguage(String),
+    /// Esc（図・数式の小窓を閉じる。v2.5.1 R-01）
+    Escape,
 }

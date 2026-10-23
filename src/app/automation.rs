@@ -332,6 +332,12 @@ impl App {
         if self.completion.is_some() && self.nothing_on_top() {
             return Some(Message::CloseCompletion);
         }
+        // WYSIWYG の図・数式の小窓（v2.5.1 R-01。画面ではプレビューの部品が受ける）
+        if self.figure_hold.is_some() && self.nothing_on_top() {
+            return Some(Message::Preview(crate::render::PreviewAction::Wysiwyg(
+                crate::render::WysiwygAction::Escape,
+            )));
+        }
         // 集中モード（v2.3.0 R-13）。**開いたものが無いときだけ**
         if self.focus_mode && self.nothing_on_top() {
             return Some(Message::ToggleFocusMode);

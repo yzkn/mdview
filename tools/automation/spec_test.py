@@ -746,7 +746,7 @@ PAGE_ITEMS = {
     "window": ["window_position", "always_on_top"],
     "editor": ["editor_font", "editor_font_size", "editor_line_spacing", "tab_width",
                "show_gremlins", "soft_wrap", "editor_syntax", "editor_ruler", "editor_guides",
-               "editor_guide_columns", "minimap", "minimap_width", "wysiwyg", "wysiwyg_limit_kb", "list_marker", "emphasis_marker", "strong_marker"],
+               "editor_guide_columns", "minimap", "minimap_width", "wysiwyg", "wysiwyg_limit_kb", "wysiwyg_table_align", "list_marker", "emphasis_marker", "strong_marker"],
     # プレビューから編集の行へ（v2.4.0 R-03）
     # 図の拡大（v2.4.0 R-04）
     "preview": ["preview_font_size", "preview_jump", "preview_jump_click", "preview_follow_caret",
@@ -793,7 +793,7 @@ CHANGED = {
     "bg_dark_blur": "strong",
     "preview_jump": "false", "preview_jump_click": "alt", "preview_follow_caret": "false",
     "figure_zoom": "false", "figure_button": "false", "figure_png_scale": "3",
-    "code_copy_button": "false", "mcp_enabled": "false", "mcp_headless": "false", "mcp_http": "true", "mcp_http_port": "39300", "marp_slides": "false", "marp_assist": "false", "marp_present_info": "true", "marp_export_format": "pptx", "remember_urls": "false", "remote_images": "true", "wysiwyg": "false", "wysiwyg_limit_kb": "2048", "format_tables": "false", "format_bullets": "false", "format_bullet": "+", "format_emphasis": "false", "lint_fix_menu": "false", "lint_fix_key": "false", "lint_fix_save": "true", "lint_fix_close": "true", "format_menu": "false", "format_key": "false", "format_save": "true", "format_close": "true", "list_marker": "second", "emphasis_marker": "second", "strong_marker": "second", "window_material": "opaque", "window_body_tint": "false",
+    "code_copy_button": "false", "mcp_enabled": "false", "mcp_headless": "false", "mcp_http": "true", "mcp_http_port": "39300", "marp_slides": "false", "marp_assist": "false", "marp_present_info": "true", "marp_export_format": "pptx", "remember_urls": "false", "remote_images": "true", "wysiwyg": "false", "wysiwyg_limit_kb": "2048", "wysiwyg_table_align": "true", "format_tables": "false", "format_bullets": "false", "format_bullet": "+", "format_emphasis": "false", "lint_fix_menu": "false", "lint_fix_key": "false", "lint_fix_save": "true", "lint_fix_close": "true", "format_menu": "false", "format_key": "false", "format_save": "true", "format_close": "true", "list_marker": "second", "emphasis_marker": "second", "strong_marker": "second", "window_material": "opaque", "window_body_tint": "false",
 }
 
 

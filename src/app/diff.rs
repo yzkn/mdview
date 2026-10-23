@@ -278,6 +278,7 @@ pub(super) fn route(message: &Message) -> Route {
         | Message::FormatTable
         | Message::TableAddRow
         | Message::TableAddColumn
+        | Message::TableEdit(_)
         | Message::ClosingBracket
         | Message::Toc(_)
         | Message::ClipboardImage(_) => Route::Pane,

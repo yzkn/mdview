@@ -88,6 +88,28 @@ pub struct LaidOutBlock {
     pub rules: Vec<f32>,
     /// 埋め込み（図・数式・画像）の置き場。無ければ `None`
     pub embed: Option<EmbedPlacement>,
+    /// 図・数式の原文の小窓（WYSIWYG で開いているときだけ。v2.5.1 R-01）
+    pub editor: Option<EditorBox>,
+}
+
+/// 図・数式の原文の小窓（v2.5.1 R-01）。**小窓の `i` 行目は、原文の中身の `i` 行目**
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EditorBox {
+    /// 小窓の最初の行（`lines` の添字）と、行の数
+    pub first: usize,
+    pub count: usize,
+    /// 小窓の枠の上と高さ（ブロック先頭からの相対 Y。枠の余白を含む）
+    pub top: f32,
+    pub height: f32,
+}
+
+/// 図・数式を描き、すぐ下に原文の小窓を開いたレイアウト（v2.5.1 R-01）
+pub struct FigureLayout {
+    pub laid: LaidOutBlock,
+    /// 描く依頼（いまの原文と、前に描けた原文）。**アプリ層が投げる**
+    pub requests: Vec<EmbedSource>,
+    /// いまの原文が描けていれば、その中身（アプリ層が「前に描けた原文」として覚え直す）
+    pub drawn: Option<String>,
 }
 
 /// 埋め込みを置く場所と大きさ。
@@ -220,7 +242,153 @@ pub fn layout_block(block: &Block, source: &str, cx: &LayoutContext) -> LaidOutB
         code_background: matches!(block.kind, BlockKind::Code { .. }) && embed.is_none(),
         rules,
         embed,
+        editor: None,
     }
+}
+
+/// 小窓の枠の内側の余白
+const EDITOR_PADDING: f32 = 6.0;
+
+/// 図・数式を描き、すぐ下に原文の小窓を開く（v2.5.1 R-01）。図・数式でなければ `None`。
+///
+/// **書きかけで描けない間は、前に描けた絵（`held`）を残す。** いまの原文が描けたら、それに替える。
+/// 描けなかったときは、その理由を絵と小窓の間に小さく出す。描く依頼を止めて待つのは
+/// ワーカープールの役目（打つのが止まって 300 ms。`embed::pool::DEBOUNCE`）
+pub fn layout_figure_editor(
+    block: &Block,
+    source: &str,
+    held: &str,
+    cx: &LayoutContext,
+) -> Option<FigureLayout> {
+    let BlockKind::Code { language } = &block.kind else {
+        return None;
+    };
+    let kind = embed_kind_of(language.as_deref()?)?;
+    let base = LayoutContext::style_for(&block.kind);
+    let line_height = cx.measurer.line_height(base);
+    let drawable =
+        |body: &str| kind != EmbedKind::Diagram || crate::embed::diagram::is_supported(body);
+    let state = |request: &EmbedSource| cx.embeds.and_then(|lookup| lookup.state(&request.key()));
+
+    // 描く依頼は、描画器に渡すのと同じ中身（`code_body`）で作る
+    let (_, body) = code_body(source);
+    let current = EmbedSource::new(kind, body, cx.width);
+    let previous = EmbedSource::new(kind, held, cx.width);
+    let mut requests = Vec::new();
+    if drawable(body) {
+        requests.push(current.clone());
+    }
+    let has_previous =
+        held != body && drawable(held) && matches!(state(&previous), Some(JobState::Done(_)));
+    if has_previous {
+        requests.push(previous.clone());
+    }
+    let unsupported = || "この種類の図は描けません".to_owned();
+    let current_state = if drawable(body) {
+        state(&current)
+    } else {
+        None
+    };
+    let mut drawn = None;
+    let (shown, error) = match current_state {
+        Some(JobState::Done(_)) => {
+            drawn = Some(body.to_owned());
+            (Some(&current), None)
+        }
+        Some(JobState::Failed(error)) if has_previous => (Some(&previous), Some(error.to_string())),
+        _ if !drawable(body) => (has_previous.then_some(&previous), Some(unsupported())),
+        _ if has_previous => (Some(&previous), None),
+        // 前の絵が無い。描いている間の札か、描けなかった理由を出す
+        _ => (Some(&current), None),
+    };
+    let (mut lines, embed) = match shown {
+        Some(request) => layout_embed(request, base, cx),
+        None => (Vec::new(), None),
+    };
+    let mut top = lines
+        .iter()
+        .map(|line| line.top + line.height)
+        .fold(0.0_f32, f32::max)
+        .max(embed.map_or(0.0, |placement| placement.top + placement.height));
+    if let Some(error) = error {
+        let name = if kind == EmbedKind::Math {
+            "数式"
+        } else {
+            "図"
+        };
+        let text = format!("{name}: {error}");
+        let width = cx.measurer.width(&text, base);
+        lines.push(LineBox {
+            top,
+            height: line_height,
+            left: 0.0,
+            runs: vec![TextRun {
+                text,
+                style: base,
+                decoration: RunDecoration::None,
+                role: TokenRole::Comment,
+                x: 0.0,
+                width,
+            }],
+            source: None,
+        });
+        top += line_height;
+    }
+
+    // 小窓（原文の中身を 1 行ずつ。`$$` の囲みも外す）
+    let editor_top = top + line_height / 2.0;
+    let (offset, inner) = fenced_body(source);
+    let first = lines.len();
+    let mut y = editor_top + EDITOR_PADDING;
+    let mut push = |start: usize, raw: &str, lines: &mut Vec<LineBox>| {
+        let text = raw.trim_end_matches(['\n', '\r']);
+        let runs = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![TextRun {
+                text: text.to_owned(),
+                style: base,
+                decoration: RunDecoration::None,
+                role: TokenRole::Plain,
+                x: 0.0,
+                width: cx.measurer.width(text, base),
+            }]
+        };
+        lines.push(LineBox {
+            top: y,
+            height: line_height,
+            left: EDITOR_PADDING * 2.0,
+            runs,
+            source: Some(offset + start..offset + start + raw.len()),
+        });
+        y += line_height;
+    };
+    for (start, raw) in source_lines(inner) {
+        push(start, raw, &mut lines);
+    }
+    if lines.len() == first {
+        push(0, "", &mut lines);
+    }
+    let count = lines.len() - first;
+    let height = count as f32 * line_height + EDITOR_PADDING * 2.0;
+    Some(FigureLayout {
+        laid: LaidOutBlock {
+            height: editor_top + height + cx.block_spacing,
+            lines,
+            quote_bar: false,
+            code_background: false,
+            rules: Vec::new(),
+            embed,
+            editor: Some(EditorBox {
+                first,
+                count,
+                top: editor_top,
+                height,
+            }),
+        },
+        requests,
+        drawn,
+    })
 }
 
 /// このブロックが埋め込みになりうるか。**本文を読まずに判定する。**
@@ -450,6 +618,22 @@ fn layout_table(
             .enumerate()
         {
             let inner = (width - CELL_PADDING * 2.0).max(1.0);
+            // **空のセルにも字の無い行を 1 つ置く**（WYSIWYG のキャレットの置き場。v2.5.1 R-01）
+            if cell.is_empty() {
+                let offset = match table.align(column) {
+                    CellAlign::Left => 0.0,
+                    CellAlign::Center => inner / 2.0,
+                    CellAlign::Right => inner,
+                };
+                lines.push(LineBox {
+                    top,
+                    height: line_height,
+                    left: origin + CELL_PADDING + offset,
+                    runs: Vec::new(),
+                    source: None,
+                });
+                continue;
+            }
             for (index, runs) in cell.into_iter().enumerate() {
                 if runs.is_empty() {
                     continue;
@@ -672,9 +856,22 @@ fn layout_plain(source: &str, style: TextStyle, cx: &LayoutContext) -> Vec<LineB
 ///
 /// **閉じフェンスが無いことがある**（文書末尾で開いたまま。§12.3）。
 pub fn code_body(source: &str) -> (usize, &str) {
+    body_between(source, false)
+}
+
+/// `code_body` と同じだが、**`$$` の囲みも外す**（WYSIWYG で直す中身。v2.5.1 R-01）。
+///
+/// 描く依頼には `code_body` を使う（数式の描画器は `$$` ごと受け取って描ける）
+pub fn fenced_body(source: &str) -> (usize, &str) {
+    body_between(source, true)
+}
+
+fn body_between(source: &str, dollars: bool) -> (usize, &str) {
     let is_fence = |line: &str| {
         let trimmed = line.trim_start();
-        trimmed.starts_with("```") || trimmed.starts_with("~~~")
+        trimmed.starts_with("```")
+            || trimmed.starts_with("~~~")
+            || (dollars && trimmed.trim_end() == "$$")
     };
 
     let mut start = 0usize;
@@ -1722,5 +1919,111 @@ fn main() {}
         };
         let result = layout_block(&block, "", &cx);
         assert!(result.height > 0.0);
+    }
+
+    /// 鍵ごとに状態を返す引き口（試験用。v2.5.1 R-01）
+    struct KeyedEmbeds(Vec<(EmbedKey, JobState)>);
+
+    impl EmbedLookup for KeyedEmbeds {
+        fn state(&self, key: &EmbedKey) -> Option<JobState> {
+            self.0
+                .iter()
+                .find(|(found, _)| found == key)
+                .map(|(_, state)| state.clone())
+        }
+    }
+
+    fn done() -> JobState {
+        JobState::Done(crate::embed::RenderedEmbed {
+            width: 400,
+            height: 300,
+            pixels: std::sync::Arc::new(Vec::new()),
+        })
+    }
+
+    fn figure_editor(text: &str, held: &str, states: Vec<(&str, JobState)>) -> FigureLayout {
+        let measurer = FixedMeasurer::default();
+        let kind = if text.contains("mermaid") {
+            EmbedKind::Diagram
+        } else {
+            EmbedKind::Math
+        };
+        let lookup = KeyedEmbeds(
+            states
+                .into_iter()
+                .map(|(body, state)| (EmbedSource::new(kind, body, 800.0).key(), state))
+                .collect(),
+        );
+        let cx = LayoutContext {
+            width: 800.0,
+            measurer: &measurer,
+            block_spacing: 12.0,
+            indent_unit: 24.0,
+            base_dir: None,
+            embeds: Some(&lookup),
+        };
+        let blocks = scan_lines(text).blocks;
+        let block = &blocks[0];
+        layout_figure_editor(block, &text[block.bytes.clone()], held, &cx).expect("図")
+    }
+
+    const MERMAID_BODY: &str = "graph TD; A-->B\n";
+
+    /// 図の下に原文の小窓が開く。小窓の行は原文の中身の行
+    #[test]
+    fn the_figure_editor_opens_below_the_figure() {
+        let figure = figure_editor(MERMAID, MERMAID_BODY, vec![(MERMAID_BODY, done())]);
+        let placement = figure.laid.embed.expect("絵");
+        let editor = figure.laid.editor.expect("小窓");
+        assert!(editor.top >= placement.top + placement.height);
+        assert_eq!(editor.count, 1);
+        assert_eq!(figure.laid.lines[editor.first].text(), "graph TD; A-->B");
+        assert_eq!(figure.drawn.as_deref(), Some(MERMAID_BODY));
+        assert!(figure.laid.height > editor.top + editor.height);
+    }
+
+    /// 書きかけで描けない間は前の絵を残し、描けなかった理由を小さく出す
+    #[test]
+    fn the_previous_picture_stays_while_the_source_fails() {
+        let held = "graph TD; A-->C\n";
+        let failed = JobState::Failed(crate::embed::EmbedError::Failed("構文誤り".to_owned()));
+        let figure = figure_editor(MERMAID, held, vec![(held, done()), (MERMAID_BODY, failed)]);
+        let previous = EmbedSource::new(EmbedKind::Diagram, held, 800.0).key();
+        assert_eq!(figure.laid.embed.expect("前の絵").key, previous);
+        assert!(figure.laid.lines[0].text().contains("構文誤り"));
+        assert!(figure.drawn.is_none());
+        assert_eq!(figure.requests.len(), 2, "いまの原文と前の原文の両方を頼む");
+        // 描いている間は、理由を出さずに前の絵
+        let figure = figure_editor(MERMAID, held, vec![(held, done())]);
+        assert_eq!(figure.laid.embed.expect("前の絵").key, previous);
+        assert_eq!(figure.laid.editor.unwrap().first, 0, "理由の行は無い");
+    }
+
+    /// `$$` の数式の小窓には、囲みを出さない
+    #[test]
+    fn the_math_editor_hides_dollar_fences() {
+        let text = "$$\nx^2\ny\n$$\n";
+        let (_, body) = code_body(text);
+        let figure = figure_editor(text, body, vec![(body, done())]);
+        let editor = figure.laid.editor.unwrap();
+        let shown: Vec<String> = figure.laid.lines[editor.first..]
+            .iter()
+            .map(LineBox::text)
+            .collect();
+        assert_eq!(shown, vec!["x^2", "y"]);
+        assert_eq!(fenced_body(text), (3, "x^2\ny\n"));
+    }
+
+    /// 空のセルにも字の無い行を置く（WYSIWYG のキャレットの置き場。v2.5.1 R-01）
+    #[test]
+    fn empty_cells_get_an_empty_line() {
+        let laid = layout_first("| a |  |\n|---|---:|\n|  | b |\n", 800.0);
+        assert_eq!(laid.lines.len(), 4);
+        assert!(laid.lines[1].runs.is_empty());
+        assert!(laid.lines[2].runs.is_empty());
+        assert!(
+            laid.lines[1].left > laid.lines[3].left,
+            "右寄せの列の空のセルは右端に置く"
+        );
     }
 }

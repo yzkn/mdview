@@ -93,6 +93,8 @@ mod present;
 mod slides;
 mod snippets;
 mod structure;
+// 表と図・数式を直す（v2.5.1 R-01）
+mod table;
 mod tidy;
 mod url_open;
 mod wysiwyg;
@@ -303,6 +305,12 @@ pub struct App {
     wrap_columns: Option<usize>,
     /// プレビューで選んだ文字（v2.2.0）。**最後に触ったのがプレビューのときだけ**写す
     preview_selection: Option<String>,
+    /// 小窓を開いている図・数式（原文の頭と、前に描けた原文。v2.5.1 R-01）
+    figure_hold: Option<(usize, String)>,
+    /// 中で打った表（原文の頭。桁をそろえ直す設定のとき、キャレットが出たらそろえる。v2.5.1 R-01）
+    table_touched: Option<usize>,
+    /// 最後に見た文書の版（表で打ったかを見分ける）
+    table_seen: Option<u64>,
     /// 起動時のファイルを裏で読んでいる最中か（v2.2.2。`preload`）。
     ///
     /// **この間は本文を書き換えず、上書き保存もしない**（空の本文で元のファイルを上書きしない）
@@ -1009,6 +1017,9 @@ impl App {
                 wrap_key: None,
                 wrap_columns: None,
                 preview_selection: None,
+                figure_hold: None,
+                table_touched: None,
+                table_seen: None,
                 preloading: false,
                 pending_goto: None,
                 settings_screen: None,
@@ -2000,6 +2011,9 @@ impl App {
         self.sync_completion();
         // WYSIWYG に入れない文書になったら（大きいファイルを開いた・テキストとして読んだ）、分割に戻す（v2.5.0 R-01）
         self.guard_wysiwyg();
+        // 触った表の桁をそろえる・図の小窓を開く（v2.5.1 R-01）。キャレットの行き先は出口で見る
+        self.settle_table();
+        self.track_figure();
 
         // **畳んだ中へキャレットが入ったら開く**（R-20）。入口は検索・行へ
         // ジャンプ・取り消しなどいくつもあるので、出口の 1 か所で見る
@@ -2237,6 +2251,7 @@ impl App {
             // 検査の直し・フォーマッター（v2.5.0 R-03）
             Message::Tidy(tool, trigger) => self.tidy(tool, trigger),
             Message::Restructure(kind) => self.restructure(kind),
+            Message::TableEdit(edit) => self.table_command(edit),
             // URL を開く（v2.4.0 R-09）
             Message::OpenUrlDialog => return self.open_url_dialog(),
             Message::UrlInput(text) => {
@@ -2290,6 +2305,11 @@ impl App {
             Message::Preview(PreviewAction::Wysiwyg(action)) => {
                 self.preview_selection = None;
                 if let crate::render::WysiwygAction::Tab { shift } = action {
+                    // **表の中ならセルを動く**（v2.5.1 R-01）
+                    if self.table_tab(shift) {
+                        self.editor.caret_visible = true;
+                        return Task::none();
+                    }
                     // **リストの項目なら字下げ・戻す**（v2.5.0 R-01 b）。ほかは編集画面と同じ道
                     if self.caret_on_item() {
                         self.restructure(crate::render::Restructure::Indent { outdent: shift });
@@ -3038,7 +3058,10 @@ impl App {
                 laid_out,
                 hit_rate,
                 slide_pitch,
+                figure_drawn,
             } => {
+                // 小窓を開いている図・数式が描けた（v2.5.1 R-01）
+                self.figure_drawn(figure_drawn);
                 // **依頼はここで投げる。** まとめて渡す（1 件ずつではない）。
                 // こうしないと「もう要らなくなったもの」が分からず、
                 // 打鍵の途中の図まで描いてしまう（§16.12 のデバウンス）
@@ -3099,6 +3122,9 @@ impl App {
         if text.is_empty() || self.refuse_edit() {
             return;
         }
+        // **WYSIWYG で表のセルへ入れるなら、`|` を逃がし改行を空白に**（v2.5.1 R-01）。
+        // 打鍵・IME・貼り付けのどれもここを通る
+        let text = &self.cell_text(text);
         // **矩形が掛かっていれば各行へ入れる**（§4.13）
         if self.editor.rect.is_some() {
             self.insert_into_rect(text);
@@ -5480,6 +5506,12 @@ impl App {
                 // Marp の文書はスライドの枠で（v2.4.0 R-07 7a）。**WYSIWYG では普通の文書として直す**（v2.5.0 §0.2）
                 .slides(if wysiwyg { None } else { self.deck.as_ref() })
                 // 描いた文字の上で直す（v2.5.0 R-01 a）
+                // 図・数式の原文の小窓（v2.5.1 R-01）
+                .figure_edit(if wysiwyg {
+                    self.open_figure_edit()
+                } else {
+                    None
+                })
                 .wysiwyg(wysiwyg.then(|| crate::render::WysiwygCaret {
                     byte: self.caret_byte(),
                     anchor: self.editor.anchor,

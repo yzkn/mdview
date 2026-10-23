@@ -30,8 +30,8 @@ use super::slides::{Frame, Shown};
 use crate::document::Document;
 use crate::embed::{EmbedSource, JobState};
 use crate::layout::{
-    embed_source, is_embed_block, layout_block, BlockKey, EmbedLookup, LayoutCache, LayoutContext,
-    RunDecoration, ScrollAnchor, TextMeasurer, TokenRole,
+    embed_source, is_embed_block, layout_block, layout_figure_editor, BlockKey, EmbedLookup,
+    LayoutCache, LayoutContext, LineBox, RunDecoration, ScrollAnchor, TextMeasurer, TokenRole,
 };
 
 /// 字句の役割を色に変える（DEC-211 / §16.10）。
@@ -139,6 +139,8 @@ pub enum PreviewAction {
         hit_rate: f32,
         /// スライドの枠で見せているとき、1 枚の高さと枠の間（v2.4.0 R-07 7a）
         slide_pitch: Option<f32>,
+        /// 小窓を開いている図・数式の、いまの原文が描けていればその中身（v2.5.1 R-01）
+        figure_drawn: Option<String>,
     },
     /// 発表の画面で次・前へ（v2.4.0 R-07 7c。押下・ホイール）
     PresentStep(i32),
@@ -398,6 +400,8 @@ struct State {
     hover_code: Option<usize>,
     /// 写したコードブロックと時刻（**少しの間だけ印を出す**）
     copied: Option<(usize, std::time::Instant)>,
+    /// 小窓を開いている図・数式の、いまの原文が描けていればその中身（v2.5.1 R-01）
+    figure_drawn: Option<String>,
 }
 
 impl Default for State {
@@ -416,6 +420,7 @@ impl Default for State {
             hover_figure: None,
             hover_code: None,
             copied: None,
+            figure_drawn: None,
         }
     }
 }
@@ -469,6 +474,8 @@ pub struct PreviewView<'a> {
     present_info: Option<String>,
     /// WYSIWYG のキャレット（v2.5.0 R-01 a。`None` なら読むだけ）
     wysiwyg: Option<WysiwygCaret<'a>>,
+    /// 原文の小窓を開く図・数式（ブロックの番号と、前に描けた原文。v2.5.1 R-01）
+    figure: Option<(usize, &'a str)>,
 }
 
 /// WYSIWYG のキャレット（原文の位置）。選んでいれば、掴んだ所も
@@ -519,7 +526,14 @@ impl<'a> PreviewView<'a> {
             present: None,
             present_info: None,
             wysiwyg: None,
+            figure: None,
         }
+    }
+
+    /// 図・数式の下に原文の小窓を開く（v2.5.1 R-01）。`held` は前に描けた原文（書きかけの間はこれを描く）
+    pub fn figure_edit(mut self, figure: Option<(usize, &'a str)>) -> Self {
+        self.figure = figure;
+        self
     }
 
     /// 描いた文字の上で直す（v2.5.0 R-01 a）
@@ -719,10 +733,25 @@ impl<'a> PreviewView<'a> {
                     continue;
                 }
                 // 行の高さの中、無ければその上で最後の行
-                let line = lines
+                let mut line = lines
                     .iter()
                     .rposition(|line| point.y >= y + line.top)
                     .unwrap_or(0);
+                // **同じ高さに並ぶ行（表のセル）は、押した x にいちばん近いもの**（v2.5.1 R-01）
+                let x = point.x - (bounds.x + shown.x);
+                let side_by_side = lines.iter().enumerate().filter(|(_, candidate)| {
+                    point.y >= y + candidate.top && point.y < y + candidate.top + candidate.height
+                });
+                let distance = |candidate: &LineBox| {
+                    let right =
+                        candidate.left + candidate.runs.last().map_or(0.0, |run| run.x + run.width);
+                    (candidate.left - x).max(x - right).max(0.0)
+                };
+                if let Some((nearest, _)) =
+                    side_by_side.min_by(|a, b| distance(a.1).total_cmp(&distance(b.1)))
+                {
+                    line = nearest;
+                }
                 let found = &lines[line];
                 let x = point.x - (bounds.x + shown.x + found.left);
                 let measurer = IcedMeasurer::<Renderer>::new(shown.size);
@@ -825,6 +854,7 @@ impl<'a> PreviewView<'a> {
         state.visible.clear();
         state.frames.clear();
         state.pitch = None;
+        state.figure_drawn = None;
         let mut updates = Vec::new();
         let mut requests = Vec::new();
         if heights.is_empty() || bounds.width <= PADDING * 2.0 {
@@ -895,7 +925,16 @@ impl<'a> PreviewView<'a> {
                     .to_string()
             };
             let peek = source_of();
-            let laid_out = if is_embed_block(block, &peek) {
+            // 図・数式の小窓（v2.5.1 R-01）。これもキャッシュに載せない
+            let figure = self
+                .figure
+                .filter(|(open, _)| *open == index)
+                .and_then(|(_, held)| layout_figure_editor(block, &peek, held, &cx));
+            let laid_out = if let Some(figure) = figure {
+                requests.extend(figure.requests);
+                state.figure_drawn = figure.drawn;
+                figure.laid
+            } else if is_embed_block(block, &peek) {
                 if let Some(request) = embed_source(block, &peek, cx.width, self.base_dir) {
                     requests.push(request);
                 }
@@ -948,6 +987,18 @@ impl PreviewView<'_> {
     where
         Renderer: text::Renderer<Font = iced::Font>,
     {
+        // 図・数式の絵を押したら、小窓の頭へ（v2.5.1 R-01。そこで小窓が開く）
+        if let Some((index, _)) = self.figure_under(state, bounds, point) {
+            let block = self.document.blocks().get(index)?;
+            let source = self
+                .document
+                .text()
+                .byte_slice(block.bytes.clone())
+                .to_string();
+            if let Some(map) = crate::edit::wysiwyg::map_block(block, &source) {
+                return Some(block.bytes.start + map.byte_of(map.first()));
+            }
+        }
         let spot = self.spot_at::<Renderer>(state, bounds, point)?;
         let shown = state
             .visible
@@ -1475,6 +1526,7 @@ where
                         laid_out,
                         hit_rate,
                         slide_pitch: state.pitch,
+                        figure_drawn: state.figure_drawn.clone(),
                     }));
                 }
             }
@@ -1556,7 +1608,8 @@ where
                     keyboard::Key::Named(Named::Delete) => Some(super::WysiwygAction::Delete),
                     keyboard::Key::Named(Named::Enter) => Some(super::WysiwygAction::Enter),
                     keyboard::Key::Named(Named::Tab) => Some(super::WysiwygAction::Tab { shift }),
-                    keyboard::Key::Named(Named::Escape) => None,
+                    // 図・数式の小窓を閉じる（v2.5.1 R-01）
+                    keyboard::Key::Named(Named::Escape) => Some(super::WysiwygAction::Escape),
                     _ => text
                         .as_ref()
                         .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
@@ -1774,6 +1827,25 @@ where
                                 ..Default::default()
                             },
                             over.table_rule.unwrap_or(Color { a: 0.25, ..muted }),
+                        );
+                    }
+
+                    // 図・数式の原文の小窓の枠（v2.5.1 R-01）
+                    if let Some(editor) = laid_out.editor {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(left, y + editor.top),
+                                    Size::new(shown.width.max(0.0), editor.height),
+                                ),
+                                border: iced::Border {
+                                    radius: 4.0.into(),
+                                    width: 1.0,
+                                    color: Color { a: 0.35, ..muted },
+                                },
+                                ..Default::default()
+                            },
+                            over.code_background.unwrap_or(Color { a: 0.06, ..muted }),
                         );
                     }
 

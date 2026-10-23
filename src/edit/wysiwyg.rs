@@ -8,8 +8,9 @@
 //! 飛ばす（その文字の位置は、いま見ている所のまま）。空白は空白どうし（改行も）で当てる。
 //! リンクの `](…)` は、本文の字を探す前に読み飛ばす（URL の中の字に当てない）。
 //!
-//! コードブロックは、原文の行がそのまま出るので、行の字をそのまま当てる。
-//! 表・区切り線・改ページ・テキストの塊は、R-01 a では直さない（`None`）。
+//! コードブロックは、原文の行がそのまま出るので、行の字をそのまま当てる（図・数式の小窓も同じ。v2.5.1）。
+//! 表は**セル 1 つを 1 行**として、行ごとに左から並べる（区切りの行は数えない。v2.5.1 R-01）。
+//! 区切り線・改ページ・テキストの塊は直さない（`None`）。
 //!
 //! **描画も iced も知らない。** 行の折り返しは知らなくてよい（折り返した行をつなぐと、ここの行の字の並びになる）。
 
@@ -46,6 +47,8 @@ impl LineMap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockMap {
     pub lines: Vec<LineMap>,
+    /// 表なら列の数（`lines` はセル。行 `r`・列 `c` のセルは `r * 列の数 + c`。v2.5.1 R-01）
+    pub columns: Option<usize>,
 }
 
 /// ブロックの中の位置（行・字）
@@ -90,10 +93,15 @@ pub fn map_block(block: &Block, source: &str) -> Option<BlockMap> {
                     start,
                 });
             }
-            Some(BlockMap { lines })
+            Some(BlockMap {
+                lines,
+                columns: None,
+            })
         }
+        BlockKind::Table => map_table(source),
         BlockKind::Code { .. } => {
-            let (offset, body) = crate::layout::code_body(source);
+            // `$$` の囲みも外す（数式の小窓。v2.5.1 R-01）
+            let (offset, body) = crate::layout::fenced_body(source);
             let mut lines = Vec::new();
             let mut at = 0usize;
             for raw in body.split_inclusive('\n') {
@@ -122,10 +130,66 @@ pub fn map_block(block: &Block, source: &str) -> Option<BlockMap> {
                     start: 0,
                 });
             }
-            Some(BlockMap { lines })
+            Some(BlockMap {
+                lines,
+                columns: None,
+            })
         }
         _ => None,
     }
+}
+
+/// 表の対応（v2.5.1 R-01）。字は画面と同じ解析（`parse_table`）から取り、セルの原文の中だけで当てる。
+/// **画面の解析と行・セルの数が合わなければ直さない**（`None`）
+fn map_table(source: &str) -> Option<BlockMap> {
+    let table = crate::parse::inline::parse_table(source);
+    let columns = table.columns();
+    if columns == 0 {
+        return None;
+    }
+    let rows = super::table::rows(source);
+    let content: Vec<&super::table::Row> = rows
+        .iter()
+        .enumerate()
+        .filter(|(number, _)| *number != 1)
+        .map(|(_, row)| row)
+        .collect();
+    if content.len() != table.rows.len() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(content.len() * columns);
+    for (row, parsed) in content.iter().zip(&table.rows) {
+        for column in 0..columns {
+            let mut chars = Vec::new();
+            let mut synthetic = Vec::new();
+            if let Some(cell) = parsed.cells.get(column) {
+                for span in &cell.spans {
+                    for c in span.text.chars() {
+                        chars.push(c);
+                        synthetic.push(span.synthetic);
+                    }
+                }
+            }
+            let bytes = match row.cells.get(column) {
+                Some(cell) => {
+                    let inner = super::table::content(source, cell);
+                    align(&chars, &synthetic, &source[..cell.end], inner.start).0
+                }
+                // セルの足りない行。打つと行の終わりに入る（そこが次のセルになる）
+                None => vec![row.line.end; chars.len() + 1],
+            };
+            lines.push(LineMap {
+                chars,
+                bytes,
+                synthetic,
+                start: 0,
+            });
+        }
+    }
+    Some(BlockMap {
+        lines,
+        columns: Some(columns),
+    })
 }
 
 /// 字を原文に当てる。返すのは字ごとの位置（と行の終わり）と、次に探し始める位置
@@ -362,11 +426,46 @@ mod tests {
     }
 
     #[test]
-    fn images_and_tables_are_not_edited_here() {
+    fn images_are_not_edited_here() {
         let (block, source) = first_block("![絵](a.png)\n");
         assert!(map_block(&block, &source).is_none());
-        let (block, source) = first_block("|a|b|\n|-|-|\n|1|2|\n");
-        assert!(map_block(&block, &source).is_none());
+    }
+
+    /// 表はセル 1 つが 1 行。区切りの行は数えない（v2.5.1 R-01）
+    #[test]
+    fn tables_map_cell_by_cell() {
+        let text = "| 名前 | **値** |\n|---|---|\n| a \\| b |  |\n";
+        let map = assert_exact(text);
+        assert_eq!(map.columns, Some(2));
+        assert_eq!(map.lines.len(), 4);
+        assert_eq!(map.text(), "名前\n値\na | b\n");
+        // 空のセルは、前の空白の後ろに打つ
+        let (_, source) = first_block(text);
+        let empty = &map.lines[3];
+        assert!(empty.is_empty());
+        assert_eq!(&source[empty.bytes[0] - 1..empty.bytes[0] + 1], "  ");
+        // 「値」は ** の後ろ
+        assert_eq!(map.lines[1].bytes[0], "| 名前 | **".len());
+        // セルの終わりは字の直後
+        assert_eq!(map.lines[0].bytes[2], "| 名前".len());
+    }
+
+    /// 足りないセルは行の終わりに当てる
+    #[test]
+    fn short_rows_map_to_the_line_end() {
+        let (block, source) = first_block("|a|b|\n|-|-|\n|1|\n");
+        let map = map_block(&block, &source).unwrap();
+        assert_eq!(map.lines.len(), 4);
+        assert_eq!(map.lines[3].bytes, vec!["|a|b|\n|-|-|\n|1|".len()]);
+    }
+
+    /// `$$` の囲みも外して中身だけを当てる（v2.5.1 R-01）
+    #[test]
+    fn dollar_math_maps_only_its_body() {
+        let (block, source) = first_block("$$\nx^2\n$$\n");
+        let map = map_block(&block, &source).unwrap();
+        assert_eq!(map.text(), "x^2");
+        assert_eq!(map.byte_of(map.first()), 3);
     }
 
     #[test]

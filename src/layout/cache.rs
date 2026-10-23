@@ -128,6 +128,7 @@ mod tests {
             code_background: false,
             rules: Vec::new(),
             embed: None,
+            editor: None,
         }
     }
 

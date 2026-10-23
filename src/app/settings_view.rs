@@ -155,6 +155,8 @@ pub enum SettingChange {
     MarpSlides(bool),
     /// WYSIWYG（v2.5.0 R-01）
     Wysiwyg(bool),
+    /// 表のセルを直したら桁をそろえ直す（v2.5.1 R-01）
+    WysiwygTableAlign(bool),
     /// フォーマッター（v2.5.0 R-03）。鍵と値（入り切りの欄はまとめて扱う）
     Tidy(&'static str, bool),
     FormatBullet(char),
@@ -395,6 +397,7 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             // WYSIWYG（v2.5.0 R-01）
             "wysiwyg",
             "wysiwyg_limit_kb",
+            "wysiwyg_table_align",
             "list_marker",
             "emphasis_marker",
             "strong_marker",
@@ -505,6 +508,7 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "code_copy_button" => SettingChange::CodeCopyButton(flag()?),
         "marp_slides" => SettingChange::MarpSlides(flag()?),
         "wysiwyg" => SettingChange::Wysiwyg(flag()?),
+        "wysiwyg_table_align" => SettingChange::WysiwygTableAlign(flag()?),
         "format_bullet" => SettingChange::FormatBullet(
             value
                 .trim()
@@ -815,6 +819,7 @@ impl App {
                     self.mode = crate::render::ViewMode::Split;
                 }
             }
+            SettingChange::WysiwygTableAlign(on) => self.settings.wysiwyg_table_align = on,
             SettingChange::WysiwygLimit(value) => {
                 if let Some(screen) = self.settings_screen.as_mut() {
                     screen.wysiwyg_limit.clone_from(&value);
@@ -1385,6 +1390,18 @@ impl App {
                     &s.wysiwyg_limit_kb,
                     &d.wysiwyg_limit_kb,
                     SettingChange::WysiwygLimit(d.wysiwyg_limit_kb.to_string())
+                ),
+            ),
+            with_reset(
+                toggle(
+                    "表のセルを直したら、その表の桁をそろえ直す（切ると、触ったセルだけ書き換える）",
+                    s.wysiwyg_table_align,
+                    SettingChange::WysiwygTableAlign
+                ),
+                differs(
+                    &s.wysiwyg_table_align,
+                    &d.wysiwyg_table_align,
+                    SettingChange::WysiwygTableAlign(d.wysiwyg_table_align)
                 ),
             ),
             heading("新しく書くときの記法（元の書き方はできるだけ保つ）"),

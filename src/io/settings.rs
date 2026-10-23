@@ -668,6 +668,8 @@ pub struct Settings {
     /// WYSIWYG（v2.5.0 R-01）。使うか・入れる文書の大きさの上限（KB）・新しく書くときの記法
     pub wysiwyg: bool,
     pub wysiwyg_limit_kb: u32,
+    /// 表のセルを直したら、その表の桁をそろえ直すか（v2.5.1 R-01。切っていれば触ったセルだけ書き換える）
+    pub wysiwyg_table_align: bool,
     pub list_marker: Marker,
     pub emphasis_marker: Marker,
     pub strong_marker: Marker,
@@ -865,6 +867,7 @@ impl Default for Settings {
             remote_images: false,
             wysiwyg: true,
             wysiwyg_limit_kb: WYSIWYG_LIMIT_KB,
+            wysiwyg_table_align: false,
             list_marker: Marker::First,
             emphasis_marker: Marker::First,
             strong_marker: Marker::First,
@@ -1160,9 +1163,10 @@ impl Settings {
         ));
         // WYSIWYG（v2.5.0 R-01）
         out.push_str(&format!(
-            "wysiwyg = {}\nwysiwyg_limit_kb = {}\nlist_marker = \"{}\"\nemphasis_marker = \"{}\"\nstrong_marker = \"{}\"\n",
+            "wysiwyg = {}\nwysiwyg_limit_kb = {}\nwysiwyg_table_align = {}\nlist_marker = \"{}\"\nemphasis_marker = \"{}\"\nstrong_marker = \"{}\"\n",
             self.wysiwyg,
             self.wysiwyg_limit_kb,
+            self.wysiwyg_table_align,
             self.list_marker.as_str(),
             self.emphasis_marker.as_str(),
             self.strong_marker.as_str()
@@ -1241,7 +1245,7 @@ impl Settings {
     /// 外部クレートを使わない。読むのは平らな数項目だけで、
     /// TOML の全機能は要らない。
     pub fn from_toml(text: &str) -> Self {
-        const BOOL_KEYS: [&str; 50] = [
+        const BOOL_KEYS: [&str; 51] = [
             "toc_visible",
             "scroll_sync",
             "show_invisibles",
@@ -1290,6 +1294,7 @@ impl Settings {
             "remote_images",
             // WYSIWYG（v2.5.0 R-01）
             "wysiwyg",
+            "wysiwyg_table_align",
             // フォーマッター（v2.5.0 R-03）
             "format_tables",
             "format_bullets",
@@ -1436,6 +1441,7 @@ impl Settings {
                 "marp_export_format" => settings.marp_export_format = SlideExport::parse(value),
                 "remember_urls" => settings.remember_urls = flag,
                 "wysiwyg" => settings.wysiwyg = flag,
+                "wysiwyg_table_align" => settings.wysiwyg_table_align = flag,
                 "format_tables" => settings.format_tables = flag,
                 "format_bullets" => settings.format_bullets = flag,
                 "format_bullet" => {
@@ -1946,6 +1952,7 @@ mod tests {
             remember_urls: false,
             wysiwyg: false,
             wysiwyg_limit_kb: 2048,
+            wysiwyg_table_align: true,
             format_tables: false,
             format_bullets: false,
             format_bullet: '+',

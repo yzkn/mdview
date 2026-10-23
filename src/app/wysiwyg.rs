@@ -81,7 +81,7 @@ impl App {
     }
 
     /// 直せる隣のブロック（`forward` なら後ろ）の頭（か終わり）
-    fn neighbour(&self, from: usize, forward: bool) -> Option<usize> {
+    pub(super) fn neighbour(&self, from: usize, forward: bool) -> Option<usize> {
         let from = from as isize;
         self.editable_from(if forward { from + 1 } else { from - 1 }, forward)
     }
@@ -154,7 +154,10 @@ impl App {
                 }
                 let forward = matches!(action, WysiwygAction::Delete);
                 if let Some(range) = self.selected() {
-                    self.delete_source(range);
+                    // 表のセルをまたぐなら、セルの中身だけを消す（v2.5.1 R-01）
+                    if !self.clear_cells(range.clone()) {
+                        self.delete_source(range);
+                    }
                     return;
                 }
                 self.delete_char(forward);
@@ -170,6 +173,9 @@ impl App {
                         .map(|b| b.kind.clone())
                 });
                 match kind {
+                    // 表は下のセルへ（v2.5.1 R-01。セルの中では改行しない）
+                    Some(crate::parse::BlockKind::Table) if self.table_enter() => {}
+                    Some(crate::parse::BlockKind::Table) => {}
                     // リスト・引用の続き、コードの改行は、編集画面と同じ道（v2.5.0 R-01 b で引用も）
                     Some(crate::parse::BlockKind::List | crate::parse::BlockKind::Quote) => {
                         let _ = self.apply(Action::Insert("\n".to_owned()));
@@ -181,6 +187,10 @@ impl App {
             }
             WysiwygAction::Insert(text) => {
                 if !self.refuse_edit() {
+                    // 表のセルをまたいで選んでいれば、先にセルの中身を消す（v2.5.1 R-01）
+                    if let Some(range) = self.selected() {
+                        self.clear_cells(range);
+                    }
                     self.insert(&text);
                 }
             }
@@ -188,6 +198,7 @@ impl App {
             WysiwygAction::Tab { .. } => {}
             WysiwygAction::ToggleTask { byte } => self.toggle_task_at(byte),
             WysiwygAction::CodeLanguage(language) => self.set_code_language(&language),
+            WysiwygAction::Escape => self.leave_figure(),
         }
     }
 
@@ -333,6 +344,30 @@ impl App {
                 R::MoveSection { up: false },
             ),
         ];
+        // 表の中なら、行・列を足す／消す、列の寄せ方（v2.5.1 R-01）
+        if self.caret_in_table() {
+            use crate::edit::table::Align;
+            use crate::render::TableEdit as T;
+            let table = |icon, edit: T| {
+                tool(
+                    icon,
+                    edit.label(),
+                    Command::Table(edit),
+                    Message::TableEdit(edit),
+                )
+            };
+            tools.push(gap());
+            tools.push(table(Icon::RowAbove, T::InsertRow { below: false }));
+            tools.push(table(Icon::RowBelow, T::InsertRow { below: true }));
+            tools.push(table(Icon::RowDelete, T::DeleteRow));
+            tools.push(table(Icon::ColumnLeft, T::InsertColumn { right: false }));
+            tools.push(table(Icon::ColumnRight, T::InsertColumn { right: true }));
+            tools.push(table(Icon::ColumnDelete, T::DeleteColumn));
+            tools.push(gap());
+            tools.push(table(Icon::AlignLeft, T::Align(Align::Left)));
+            tools.push(table(Icon::AlignCenter, T::Align(Align::Center)));
+            tools.push(table(Icon::AlignRight, T::Align(Align::Right)));
+        }
         // コードブロックの中なら、言語の欄（v2.5.0 R-01 b）
         if let Some(language) = self.code_language() {
             tools.push(gap());
@@ -383,10 +418,15 @@ impl App {
         } else {
             here.map.before(here.pos)
         };
+        let table = here.map.columns.is_some();
         if let Some(pos) = target {
             // 行をまたぐ（リストの項目の境）なら、前の行の終わりからこの行の頭までを消す
             if pos.line != here.pos.line || (forward && pos.index >= here.map.lines[pos.line].len())
             {
+                // **表のセルの境は消さない**（v2.5.1 R-01。`|` が消えると表が崩れる）
+                if table {
+                    return;
+                }
                 let (from, to) = if forward {
                     let next = here.map.after(pos);
                     (here.map.byte_of(pos), next.map(|n| here.map.byte_of(n)))
@@ -408,6 +448,35 @@ impl App {
         }
         // ブロックの端
         let kind = self.document.blocks()[here.index].kind.clone();
+        // **つなげるのは段落・見出し・リスト・引用どうしだけ**（v2.5.1 R-01）。表・コード・図とは
+        // つながず、隣のブロックへキャレットを動かすだけにする（囲みや `|` が消えると崩れる）
+        let joinable = |kind: &crate::parse::BlockKind| {
+            matches!(
+                kind,
+                crate::parse::BlockKind::Paragraph
+                    | crate::parse::BlockKind::Heading(_)
+                    | crate::parse::BlockKind::List
+                    | crate::parse::BlockKind::Quote
+            )
+        };
+        let neighbour_joinable = |byte: usize| {
+            self.document
+                .block_at_byte(byte)
+                .and_then(|index| self.document.blocks().get(index))
+                .is_some_and(|block| joinable(&block.kind))
+        };
+        if !forward && here.pos == here.map.first() && !joinable(&kind) {
+            if let Some(previous) = self.neighbour(here.index, false) {
+                self.wysiwyg_place(previous, false);
+            }
+            return;
+        }
+        if forward && !joinable(&kind) {
+            if let Some(next) = self.neighbour(here.index, true) {
+                self.wysiwyg_place(next, false);
+            }
+            return;
+        }
         if !forward {
             let caret = here.start + here.map.byte_of(here.pos);
             // 見出し・リスト・引用の頭なら、まず記号を外して段落にする
@@ -424,23 +493,40 @@ impl App {
             }
             // 前のブロックの終わりから、このブロックの字の頭までを消してつなぐ
             if let Some(previous) = self.neighbour(here.index, false) {
-                self.delete_source(previous..caret);
+                if neighbour_joinable(previous) {
+                    self.delete_source(previous..caret);
+                } else {
+                    self.wysiwyg_place(previous, false);
+                }
             }
         } else if let Some(next) = self.neighbour(here.index, true) {
             let caret = here.start + here.map.byte_of(here.pos);
-            self.delete_source(caret..next);
+            if neighbour_joinable(next) {
+                self.delete_source(caret..next);
+            } else {
+                self.wysiwyg_place(next, false);
+            }
         }
     }
 
     /// WYSIWYG の様子（試験の口）
     pub(super) fn wysiwyg_state(&self) -> serde_json::Value {
         match self.here() {
-            Some(here) => serde_json::json!({
-                "block": here.index,
-                "line": here.pos.line,
-                "index": here.pos.index,
-                "text": here.map.text(),
-            }),
+            Some(here) => {
+                let mut state = serde_json::json!({
+                    "block": here.index,
+                    "line": here.pos.line,
+                    "index": here.pos.index,
+                    "text": here.map.text(),
+                });
+                // 表のセル（v2.5.1 R-01）と、小窓を開いている図・数式
+                if let Some(columns) = here.map.columns {
+                    state["row"] = (here.pos.line / columns).into();
+                    state["column"] = (here.pos.line % columns).into();
+                }
+                state["figure"] = self.figure_hold.is_some().into();
+                state
+            }
             None => serde_json::Value::Null,
         }
     }
@@ -461,10 +547,20 @@ enum Icon {
     HeadingDown,
     SectionUp,
     SectionDown,
+    // 表（v2.5.1 R-01）
+    RowAbove,
+    RowBelow,
+    RowDelete,
+    ColumnLeft,
+    ColumnRight,
+    ColumnDelete,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
 }
 
 impl Icon {
-    const ALL: [Icon; 11] = [
+    const ALL: [Icon; 20] = [
         Icon::Bold,
         Icon::Italic,
         Icon::Code,
@@ -476,6 +572,15 @@ impl Icon {
         Icon::HeadingDown,
         Icon::SectionUp,
         Icon::SectionDown,
+        Icon::RowAbove,
+        Icon::RowBelow,
+        Icon::RowDelete,
+        Icon::ColumnLeft,
+        Icon::ColumnRight,
+        Icon::ColumnDelete,
+        Icon::AlignLeft,
+        Icon::AlignCenter,
+        Icon::AlignRight,
     ];
 
     fn svg(self) -> &'static str {
@@ -491,6 +596,15 @@ impl Icon {
             Self::Italic => include_str!("../../assets/toolbar/italic.svg"),
             Self::Code => include_str!("../../assets/toolbar/code.svg"),
             Self::Link => include_str!("../../assets/toolbar/link.svg"),
+            Self::RowAbove => include_str!("../../assets/toolbar/table-row-above.svg"),
+            Self::RowBelow => include_str!("../../assets/toolbar/table-row-below.svg"),
+            Self::RowDelete => include_str!("../../assets/toolbar/table-row-delete.svg"),
+            Self::ColumnLeft => include_str!("../../assets/toolbar/table-column-left.svg"),
+            Self::ColumnRight => include_str!("../../assets/toolbar/table-column-right.svg"),
+            Self::ColumnDelete => include_str!("../../assets/toolbar/table-column-delete.svg"),
+            Self::AlignLeft => include_str!("../../assets/toolbar/align-left.svg"),
+            Self::AlignCenter => include_str!("../../assets/toolbar/align-center.svg"),
+            Self::AlignRight => include_str!("../../assets/toolbar/align-right.svg"),
         }
     }
 }
