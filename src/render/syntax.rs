@@ -83,6 +83,50 @@ impl SyntaxColors {
     }
 }
 
+/// Markdown 以外のファイルの着色の覚え（v2.8.0 R-01）。**ブロックの番号ごとに**行ごとの区間を持つ。
+///
+/// 着色は 1 ブロックで数 ms かかるので、描くたびにやり直さない。番号は編集で変わるので、
+/// 直したブロックだけが着色し直しになる（プレビューのレイアウトキャッシュと同じ考え方）
+#[derive(Debug, Default)]
+pub struct CodeCache {
+    blocks: std::cell::RefCell<std::collections::HashMap<u64, std::sync::Arc<CodeLines>>>,
+}
+
+/// ブロックの行ごとの区間
+pub type CodeLines = Vec<Vec<crate::parse::highlight::Token>>;
+
+impl CodeCache {
+    /// 覚えておくブロックの数の目安（超えたら空にする）
+    const CAPACITY: usize = 1024;
+
+    /// ブロックの行ごとの区間。大きすぎるブロック（上限 `limit` バイト超）は `None`（色を付けない）。
+    /// **言語や上限を変えたら、アプリが文書を組み直す**（番号が変わるので覚えは使われなくなる）
+    pub fn tokens(
+        &self,
+        revision: u64,
+        language: &str,
+        limit: usize,
+        source: impl FnOnce() -> String,
+    ) -> Option<std::sync::Arc<CodeLines>> {
+        if let Some(found) = self.blocks.borrow().get(&revision) {
+            return (!found.is_empty()).then(|| found.clone());
+        }
+        let source = source();
+        let lines = if source.len() > limit {
+            Vec::new()
+        } else {
+            crate::parse::highlight::highlight(&source, Some(language))
+        };
+        let lines = std::sync::Arc::new(lines);
+        let mut blocks = self.blocks.borrow_mut();
+        if blocks.len() >= Self::CAPACITY {
+            blocks.clear();
+        }
+        blocks.insert(revision, lines.clone());
+        (!lines.is_empty()).then_some(lines)
+    }
+}
+
 /// 1 行の色の範囲（前から並び、重ならない）。
 pub fn spans(text: &str, kind: Option<&BlockKind>) -> Vec<(Range<usize>, Role)> {
     match kind {

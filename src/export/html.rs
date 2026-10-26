@@ -131,7 +131,11 @@ pub(super) fn body_html(
                 // **`<img>` タグ 1 つだけのものも画像として埋め込む**（v2.1.0 R-17）。
                 // 生の HTML は出さない設定なので、扱わないと黙って消える
                 NodeValue::HtmlBlock(html) => crate::parse::inline::img_tag(&html.literal)
-                    .map(|tag| image_html(&tag.src, &tag.alt, tag.width, base_dir, skipped)),
+                    .map(|tag| image_html(&tag.src, &tag.alt, tag.width, base_dir, skipped))
+                    // HTML の表（v2.8.0 R-05）。**読んだ中身から書き直す**（元の属性は出さない）
+                    .or_else(|| {
+                        crate::layout::html_table_of(&html.literal).map(|table| table_html(&table))
+                    }),
                 NodeValue::HtmlInline(html) if alone_in_paragraph(node) => {
                     crate::parse::inline::img_tag(html)
                         .map(|tag| image_html(&tag.src, &tag.alt, tag.width, base_dir, skipped))
@@ -225,6 +229,54 @@ fn alone_in_paragraph<'a>(node: &'a AstNode<'a>) -> bool {
                 NodeValue::Text(text) if text.trim().is_empty())
             || matches!(child.data.borrow().value, NodeValue::SoftBreak)
     })
+}
+
+/// HTML の表を書き直す（v2.8.0 R-05）。字の飾り・結合・寄せ方だけを出す（リンクの行き先は出さない）
+fn table_html(table: &crate::parse::html_table::HtmlTable) -> String {
+    use crate::parse::inline::{CellAlign, SpanStyle};
+    let mut out = String::from("<table>\n");
+    for row in &table.rows {
+        out.push_str("<tr>");
+        for cell in &row.cells {
+            let tag = if cell.header || row.header {
+                "th"
+            } else {
+                "td"
+            };
+            let mut attributes = String::new();
+            if cell.colspan > 1 {
+                attributes.push_str(&format!(" colspan=\"{}\"", cell.colspan));
+            }
+            if cell.rowspan > 1 {
+                attributes.push_str(&format!(" rowspan=\"{}\"", cell.rowspan));
+            }
+            match cell.align {
+                CellAlign::Center => attributes.push_str(" style=\"text-align: center\""),
+                CellAlign::Right => attributes.push_str(" style=\"text-align: right\""),
+                CellAlign::Left => {}
+            }
+            out.push_str(&format!("<{tag}{attributes}>"));
+            for (index, line) in cell.lines.iter().enumerate() {
+                if index > 0 {
+                    out.push_str("<br>");
+                }
+                for span in line {
+                    let text = escape(&span.text);
+                    out.push_str(&match span.style {
+                        SpanStyle::Strong => format!("<strong>{text}</strong>"),
+                        SpanStyle::Emphasis => format!("<em>{text}</em>"),
+                        SpanStyle::Code => format!("<code>{text}</code>"),
+                        SpanStyle::Link => format!("<u>{text}</u>"),
+                        SpanStyle::Normal => text,
+                    });
+                }
+            }
+            out.push_str(&format!("</{tag}>"));
+        }
+        out.push_str("</tr>\n");
+    }
+    out.push_str("</table>");
+    out
 }
 
 /// 解析の設定。**画面と同じ**にする（GFM）。
@@ -507,6 +559,27 @@ mod tests {
 
         assert_eq!(result.skipped_images, 1);
         assert!(result.text.contains("<p>本文</p>"));
+    }
+
+    /// HTML の表は読んだ中身から書き直す（v2.8.0 R-05）。結合・寄せ方・飾りは残し、元の属性は出さない
+    #[test]
+    fn html_tables_are_rewritten() {
+        let out = html(
+            "<table>\n<tr><th onclick=\"x()\">名前</th><th align=\"right\">数</th></tr>\n<tr><td colspan=\"2\"><b>a</b> &amp; <a href=\"javascript:x\">b</a></td></tr>\n</table>\n",
+        );
+        assert!(out.contains("<th>名前</th>"), "{out}");
+        assert!(out.contains("<th style=\"text-align: right\">数</th>"));
+        assert!(
+            out.contains("<td colspan=\"2\"><strong>a</strong> &amp; <u>b</u></td>"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("onclick") && !out.contains("javascript"),
+            "元の属性は出さない"
+        );
+        // 表でない HTML は、いままでどおり原文を出す
+        let out = html("<div>x</div>\n");
+        assert!(out.contains("&lt;div&gt;"));
     }
 
     /// 図は SVG のまま入る（§17A.2）。**画素にしない**

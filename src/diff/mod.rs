@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 
 // パッチの書き出し・読み込み・当てる処理（R-03 / R-04）
 pub mod patch;
+// フォルダーの比較と 3 つのファイルのマージ（v2.6.0 R-04）
+pub mod folder;
+pub mod merge;
 
 use similar::{Algorithm, DiffOp};
 

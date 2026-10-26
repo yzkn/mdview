@@ -121,9 +121,10 @@ impl App {
         )));
     }
 
-    /// 画像を URL から取るかを、いまの文書と設定に合わせる
+    /// 画像を URL から取るか・中継先を OS に聞くか（v2.6.0 R-02）を、いまの文書と設定に合わせる
     pub(super) fn sync_remote_images(&self) {
         crate::embed::image::allow_remote(self.settings.remote_images, self.meta.url.clone());
+        crate::io::remote::use_system_proxy(self.settings.url_system_proxy);
     }
 
     /// 「URL を開く」の窓

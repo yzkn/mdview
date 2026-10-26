@@ -433,6 +433,8 @@ impl App {
             && self.command_palette.is_none()
             && self.figure.is_none()
             && self.diff_screen.is_none()
+            && self.merge_screen.is_none()
+            && self.folder_screen.is_none()
             && self.draft.is_none()
             && !self.confirming
             && self.export_dialog.is_none()

@@ -17,6 +17,13 @@ pub mod launch;
 pub mod settings;
 // URL から読む（v2.4.0 R-09）
 pub mod remote;
+// 中継先を OS に聞く（v2.6.0 R-02）
+pub mod system_proxy;
+// ごみ箱へ入れる（v2.7.0 R-03）
+pub mod trash;
+// 自動構成スクリプト（PAC）の評価（v2.8.0 R-06。Linux だけ。試験はどの OS でも）
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+pub mod pac;
 // 自分の配色（v2.3.0 R-05）
 pub mod palette;
 // 目 grep（v2.3.0 R-05）

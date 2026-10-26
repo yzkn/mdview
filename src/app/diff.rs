@@ -91,6 +91,8 @@ pub enum DiffMessage {
     LoadedPatch(Result<Box<LoadedFile>, String>),
     /// 当てるファイルの部分を選んだ（D-6）。`None` なら取り消し
     ChoosePatch(Option<usize>),
+    /// プレビューでの比較の面からの通知（v2.6.0 R-04 b）
+    Preview(Side, crate::render::PreviewAction),
 }
 
 /// 何と何を比べているか。
@@ -165,6 +167,9 @@ pub struct DiffScreen {
     pub unified_marks: DiffMarks,
     /// 違いごとの、1 列の面での最初の行
     pub unified_starts: Vec<usize>,
+    /// プレビューでの比較（v2.6.0 R-04 b）。左右の送り具合と、違うブロックの色
+    pub previews: [crate::render::PreviewState; 2],
+    pub preview_marks: [Vec<(usize, Color)>; 2],
 }
 
 fn index(side: Side) -> usize {
@@ -195,12 +200,19 @@ impl DiffScreen {
             unified: None,
             unified_marks: DiffMarks::default(),
             unified_starts: Vec::new(),
+            previews: Default::default(),
+            preview_marks: [Vec::new(), Vec::new()],
         }
     }
 
     /// 1 列で出しているか
     pub fn is_unified(&self) -> bool {
         self.layout == crate::io::settings::DiffLayout::Unified
+    }
+
+    /// プレビューで出しているか（v2.6.0 R-04 b）
+    pub fn is_preview(&self) -> bool {
+        self.layout == crate::io::settings::DiffLayout::Preview
     }
 
     pub fn pane(&self, side: Side) -> &Pane {
@@ -281,7 +293,18 @@ pub(super) fn route(message: &Message) -> Route {
         | Message::TableEdit(_)
         | Message::ClosingBracket
         | Message::Toc(_)
-        | Message::ClipboardImage(_) => Route::Pane,
+        | Message::ClipboardImage(_)
+        // 検索・置き換え（v2.8.0 R-02）は、いま入力のある面で
+        | Message::OpenSearch
+        | Message::FocusSearch
+        | Message::SearchInput(_)
+        | Message::SearchSubmit
+        | Message::SearchStep(_)
+        | Message::ToggleRegex
+        | Message::ToggleCase
+        | Message::ReplaceOne
+        | Message::ReplaceAll
+        | Message::SearchFound { .. } => Route::Pane,
         Message::File(FileCommand::Save) => Route::Save,
         Message::File(_)
         | Message::OpenBrowser
@@ -290,8 +313,6 @@ pub(super) fn route(message: &Message) -> Route {
         | Message::ReopenAs(_)
         | Message::SaveWithEncoding(..)
         | Message::SaveWithLineEnding(_)
-        | Message::OpenSearch
-        | Message::FocusSearch
         | Message::OpenGoto
         | Message::SetMode(_)
         | Message::ToggleToc
@@ -506,6 +527,38 @@ fn line_byte(rope: &ropey::Rope, line: usize) -> usize {
     }
 }
 
+/// 行を含むブロック（行の前にブロックが無ければ最初のもの）
+fn block_at_line(document: &Document, line: usize) -> usize {
+    document
+        .blocks()
+        .partition_point(|block| block.start_line <= line)
+        .saturating_sub(1)
+}
+
+/// プレビューでの比較の色（v2.6.0 R-04 b）。**違いに掛かるブロック**に、消えた・足した・変わったの色を付ける
+fn preview_marks(document: &Document, diff: &Diff, side: Side) -> Vec<(usize, Color)> {
+    let mut out = Vec::new();
+    for (index, block) in document.blocks().iter().enumerate() {
+        let lines = block.start_line..block.start_line + block.line_count.max(1);
+        let found = diff.changes().find_map(|change| {
+            let (own, other) = match side {
+                Side::Left => (change.left(), change.right()),
+                Side::Right => (change.right(), change.left()),
+            };
+            (own.start < lines.end && lines.start < own.end).then_some(other.is_empty())
+        });
+        if let Some(only_here) = found {
+            let color = match (only_here, side) {
+                (true, Side::Left) => REMOVED,
+                (true, Side::Right) => ADDED,
+                (false, _) => CHANGED,
+            };
+            out.push((index, color));
+        }
+    }
+    out
+}
+
 fn line_text(document: &Document, line: usize) -> String {
     let rope = document.text();
     if line >= rope.len_lines() {
@@ -691,6 +744,7 @@ impl App {
                     self.apply_patch(file);
                 }
             }
+            DiffMessage::Preview(side, action) => self.diff_preview_action(side, action),
             DiffMessage::Computed(generation, diff) => {
                 let Some(screen) = self.diff_screen.as_mut() else {
                     return Task::none();
@@ -767,6 +821,8 @@ impl App {
         self.diff_screen = None;
         self.notice = None;
         self.editor.caret_visible = true;
+        // フォルダーの比較から開いていたら、その行を比べ直す（v2.6.0 R-04 a）
+        self.folder_reopen();
     }
 
     /// 打鍵を受けている面へメッセージを回す（`update` の入口から呼ぶ）。
@@ -893,6 +949,74 @@ impl App {
             editor.place_caret(line, 0);
             editor.top_line = top_line;
             editor.top_segment = (top_line, segment);
+            // プレビューでの比較も、違いのあるブロックへ送る（v2.6.0 R-04 b）
+            let document = pane_document(&screen, side, &self.document);
+            let block = block_at_line(document, line);
+            screen.previews[index(side)].anchor = crate::layout::ScrollAnchor {
+                block_id: block,
+                offset_in_block: 0.0,
+            };
+        }
+        self.diff_screen = Some(screen);
+    }
+
+    /// プレビューでの比較の面からの通知（v2.6.0 R-04 b）。送ったら、もう片方を対応するブロックへ揃える
+    fn diff_preview_action(&mut self, side: Side, action: crate::render::PreviewAction) {
+        use crate::render::PreviewAction;
+        let Some(mut screen) = self.diff_screen.take() else {
+            return;
+        };
+        match action {
+            PreviewAction::Scrolled(delta) => {
+                let viewport = 600.0;
+                let own = pane_document(&screen, side, &self.document);
+                let anchor =
+                    screen.previews[index(side)]
+                        .anchor
+                        .scrolled(delta, own.heights(), viewport);
+                // もう片方は、見えている頭のブロックの行に対応する行のブロックへ
+                let other = match side {
+                    Side::Left => Side::Right,
+                    Side::Right => Side::Left,
+                };
+                let line = own
+                    .blocks()
+                    .get(anchor.block_id)
+                    .map_or(0, |block| block.start_line);
+                let row = screen.diff.row_of(side, line);
+                let other_line = screen.diff.line_at_row(other, row);
+                let other_doc = pane_document(&screen, other, &self.document);
+                let block = block_at_line(other_doc, other_line);
+                // ブロックの中の位置は、高さの比で写す
+                let own_height = own.heights().height(anchor.block_id);
+                let other_height = other_doc.heights().height(block);
+                let other_anchor = crate::layout::ScrollAnchor {
+                    block_id: block,
+                    offset_in_block: if own_height > 0.0 {
+                        anchor.offset_in_block / own_height * other_height
+                    } else {
+                        0.0
+                    },
+                };
+                screen.previews[index(side)].anchor = anchor;
+                screen.previews[index(other)].anchor = other_anchor;
+            }
+            PreviewAction::Measured {
+                updates,
+                embed_requests,
+                ..
+            } => {
+                // 面の文書の高さを直し、図を頼む（**ほかの面の図を捨てない**よう、まとめて渡さず 1 つずつ）
+                match screen.pane_mut(side).doc.as_mut() {
+                    Some(doc) => doc.document.set_heights(&updates),
+                    None => self.document.set_heights(&updates),
+                }
+                for request in embed_requests {
+                    self.embeds.request(request);
+                }
+                self.preview.embeds_pending = self.embeds.pending();
+            }
+            _ => {}
         }
         self.diff_screen = Some(screen);
     }
@@ -1231,6 +1355,49 @@ impl App {
     }
 
     /// 1 列の面の文書を本文として扱いながら `f` を呼ぶ。**読み取り専用にして通す**
+    /// 本文を `doc` と入れ替えて `f` を通す（v2.6.0 R-04 c。マージの面）。`read_only` なら書き換えを断る
+    pub(super) fn in_doc<R>(
+        &mut self,
+        doc: &mut PaneDoc,
+        read_only: bool,
+        f: impl FnOnce(&mut App) -> R,
+    ) -> R {
+        let main_wrap = self.wrap.take();
+        let main_folds = std::mem::take(&mut self.folds);
+        let main_headings = std::mem::take(&mut self.fold_headings);
+        std::mem::swap(&mut self.document, &mut doc.document);
+        std::mem::swap(&mut self.editor, &mut doc.editor);
+        std::mem::swap(&mut self.history, &mut doc.history);
+        std::mem::swap(&mut self.meta, &mut doc.meta);
+        let main_read_only = std::mem::replace(&mut self.read_only, read_only);
+        self.diff_own = true;
+        let notice = self.notice.take();
+        let result = f(self);
+        // 読むだけの面で書き換えようとしたら、その面の言葉で知らせる
+        if read_only && self.notice.is_some() {
+            self.notice = Some(super::notice::Notice::plain(
+                "左右の面は読むだけです。結果の面で直してください".to_owned(),
+            ));
+        } else if self.notice.is_none() {
+            self.notice = notice;
+        }
+        self.diff_own = false;
+        self.read_only = main_read_only;
+        std::mem::swap(&mut self.document, &mut doc.document);
+        std::mem::swap(&mut self.editor, &mut doc.editor);
+        std::mem::swap(&mut self.history, &mut doc.history);
+        std::mem::swap(&mut self.meta, &mut doc.meta);
+        self.wrap = main_wrap;
+        self.folds = main_folds;
+        self.fold_headings = main_headings;
+        result
+    }
+
+    /// 1 列の比較の面で `f` を行う（検索。v2.8.0 R-02）
+    pub(super) fn in_unified_pane<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
+        self.in_unified(f)
+    }
+
     fn in_unified<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
         let Some(mut screen) = self.diff_screen.take() else {
             return f(self);
@@ -1403,11 +1570,21 @@ impl App {
             }
             row += rows;
         }
+        // プレビューでの比較の色（v2.6.0 R-04 b）
+        let preview_colors = if screen.is_preview() {
+            [
+                preview_marks(left_doc, &diff, Side::Left),
+                preview_marks(right_doc, &diff, Side::Right),
+            ]
+        } else {
+            [Vec::new(), Vec::new()]
+        };
         // 1 列の面（読むだけ）。**面の文書を借りているうちに作る**
         let unified = screen
             .is_unified()
             .then(|| build_unified(&diff, left_doc, right_doc, &inline));
         screen.map = map;
+        screen.preview_marks = preview_colors;
         if let Some((doc, marks, starts)) = unified {
             // 読んでいた場所を保つ（作り直しても先頭へ戻らない）
             let keep = screen
@@ -1543,8 +1720,8 @@ impl App {
                 .on_press_maybe(message.map(Message::Diff))
         };
         let any = !screen.diff.is_identical();
-        // 1 列では写さない（読むだけ）
-        let chosen = screen.current.is_some() && !screen.is_unified();
+        // 1 列・プレビューでは写さない（読むだけ）
+        let chosen = screen.current.is_some() && !screen.is_unified() && !screen.is_preview();
         let position = match screen.current {
             Some(n) => format!("{} / {}", n + 1, screen.diff.change_count()),
             None => String::new(),
@@ -1587,6 +1764,7 @@ impl App {
         let options = row![
             layout_button("左右に並べる", DiffLayout::SideBySide),
             layout_button("1 列に混ぜる", DiffLayout::Unified),
+            layout_button("プレビュー", DiffLayout::Preview),
             iced::widget::pick_list(
                 crate::io::settings::DiffWhitespace::ALL.to_vec(),
                 Some(self.settings.diff_whitespace),
@@ -1630,7 +1808,9 @@ impl App {
             .diff_marks(Some(&screen.unified_marks))
             // 行番号は行の頭に元のものを書いてあるので、通し番号は出さない
             .show_gutter(false)
-            .accept_keys(self.open_menu.is_none() && !screen.confirm_close)
+            .accept_keys(self.open_menu.is_none() && !screen.confirm_close && !self.search_focused)
+            .highlight_matches(self.search_highlight(super::SearchTarget::Unified))
+            .match_colors(self.match_colors())
             .display(self.tab_width(), false, false, false);
             let titles = format!(
                 "- {}　+ {}（読むだけ）",
@@ -1639,6 +1819,19 @@ impl App {
             return body
                 .push(container(text(titles).size(12)).padding([2, 4]))
                 .push(container(view).width(Length::Fill).height(Length::Fill))
+                .into();
+        }
+        // プレビューでの比較（v2.6.0 R-04 b。読むだけ）
+        if screen.is_preview() {
+            return body
+                .push(
+                    row![
+                        self.diff_preview_pane(screen, Side::Left),
+                        self.diff_preview_pane(screen, Side::Right),
+                    ]
+                    .spacing(6)
+                    .height(Length::Fill),
+                )
                 .into();
         }
         // 地図に見えている範囲（左の面の先頭の段）
@@ -1666,6 +1859,35 @@ impl App {
             .spacing(2)
             .height(Length::Fill),
         )
+        .into()
+    }
+
+    /// プレビューでの比較の面（v2.6.0 R-04 b）
+    fn diff_preview_pane<'a>(&'a self, screen: &'a DiffScreen, side: Side) -> Element<'a, Message> {
+        let pane = screen.pane(side);
+        let document = pane_document(screen, side, &self.document);
+        let meta = pane_meta(screen, side, &self.meta);
+        let i = index(side);
+        let view = crate::render::PreviewView::new(document, &screen.previews[i], move |action| {
+            Message::Diff(DiffMessage::Preview(side, action))
+        })
+        .zoom(super::preview_factor(&self.settings))
+        .colors(self.preview_colors())
+        .match_color(self.match_colors().0)
+        // プレビューでの比較では、検索の語を左右とも塗る（v2.8.0 R-02。読むだけ）
+        .highlight(if self.search.open {
+            self.search.query.as_str()
+        } else {
+            ""
+        })
+        .embeds(&self.embeds)
+        .base_dir(meta.base_dir())
+        .block_marks(&screen.preview_marks[i]);
+        column![
+            container(text(format!("{}（読むだけ）", pane.title)).size(12)).padding([2, 4]),
+            container(view).width(Length::Fill).height(Length::Fill),
+        ]
+        .width(Length::FillPortion(1))
         .into()
     }
 
@@ -1699,7 +1921,11 @@ impl App {
         .sizes(size, line_height)
         .spacers(Some(&screen.tables[i]))
         .diff_marks(Some(&screen.marks[i]))
-        .accept_keys(focused && self.open_menu.is_none() && !screen.confirm_close)
+        .accept_keys(
+            focused && self.open_menu.is_none() && !screen.confirm_close && !self.search_focused,
+        )
+        .highlight_matches(self.search_highlight(super::SearchTarget::Diff(side)))
+        .match_colors(self.match_colors())
         .display(
             self.tab_width(),
             self.settings.show_invisibles,
@@ -1811,6 +2037,97 @@ mod tests {
         match &screen.pane(side).doc {
             Some(doc) => doc.document.text().to_string(),
             None => app.document.text().to_string(),
+        }
+    }
+
+    /// 裏の走査をその場で行い、結果を渡す（試験用）
+    fn finish_search(app: &mut App, side: Side) {
+        let pattern = app.search.pattern().expect("語");
+        let rope = match &app.diff_screen.as_ref().unwrap().pane(side).doc {
+            Some(doc) => doc.document.text().clone(),
+            None => app.document.text().clone(),
+        };
+        let generation = app.search.generation;
+        let _ = app.update(Message::SearchFound {
+            generation,
+            found: Ok(pattern.find_all(&rope)),
+            jump: true,
+        });
+    }
+
+    /// 比べる画面では、いま入力のある面を探す。面を移ると探し直し、閉じると検索の欄も閉じる（v2.8.0 R-02）
+    #[test]
+    fn search_follows_the_focused_pane() {
+        let mut app = app_with("本文 x\n");
+        let _ = app.update(Message::OpenSearch);
+        assert!(app.search.open);
+        open_files(&mut app, "a\nxa\nx\n", "a\nB\n");
+        assert!(!app.search.open, "開いたら編集中の文書の検索は閉じる");
+        // 左の面を押してから探す
+        let _ = app.update(Message::Diff(DiffMessage::Pane(
+            Side::Left,
+            Action::Move {
+                movement: crate::render::CursorMove::DocumentStart,
+                select: false,
+            },
+        )));
+        let _ = app.update(Message::OpenSearch);
+        assert!(app.search.open, "比べる画面でも開く");
+        let _ = app.update(Message::SearchInput("x".to_owned()));
+        finish_search(&mut app, Side::Left);
+        assert_eq!(app.search.matches.len(), 2);
+        assert_eq!(
+            app.search_highlight(super::super::SearchTarget::Diff(Side::Left))
+                .0
+                .len(),
+            2
+        );
+        assert!(app
+            .search_highlight(super::super::SearchTarget::Diff(Side::Right))
+            .0
+            .is_empty());
+        // 次の一致へ移ると、左の面のキャレットが動く
+        let _ = app.update(Message::SearchStep(true));
+        let caret = app
+            .diff_screen
+            .as_ref()
+            .unwrap()
+            .pane(Side::Left)
+            .doc
+            .as_ref()
+            .unwrap()
+            .editor
+            .cursor_line;
+        assert_eq!(caret, 2, "2 件目（3 行目の x）");
+        // 右の面へ移ると、一致を捨てて右で探し直す
+        let _ = app.update(Message::Diff(DiffMessage::Pane(
+            Side::Right,
+            Action::Move {
+                movement: crate::render::CursorMove::DocumentStart,
+                select: false,
+            },
+        )));
+        assert!(app.search.matches.is_empty());
+        finish_search(&mut app, Side::Right);
+        assert!(app.search.matches.is_empty(), "右には x が無い");
+        // 置き換えは面の文書を書き換える。編集中の文書は変わらない
+        let _ = app.update(Message::SearchInput("B".to_owned()));
+        finish_search(&mut app, Side::Right);
+        let _ = app.update(Message::ReplaceInput("C".to_owned()));
+        let _ = app.update(Message::ReplaceAll);
+        assert_eq!(pane_text(&app, Side::Right), "a\nC\n");
+        assert_eq!(app.document.text().to_string(), "本文 x\n");
+        // Esc はまず検索の欄を閉じる
+        assert!(matches!(app.escape_message(), Some(Message::CloseSearch)));
+        let _ = app.update(Message::CloseSearch);
+        assert!(matches!(
+            app.escape_message(),
+            Some(Message::Diff(DiffMessage::Close))
+        ));
+        let _ = app.update(Message::OpenSearch);
+        let _ = app.update(Message::Diff(DiffMessage::Close));
+        if app.diff_screen.is_none() {
+            assert!(!app.search.open, "閉じたら検索の欄も閉じる");
         }
     }
 
@@ -2232,7 +2549,13 @@ mod tests {
         assert_eq!(route(&Message::Editor(Action::Backspace)), Route::Pane);
         assert_eq!(route(&Message::File(FileCommand::Save)), Route::Save);
         assert_eq!(route(&Message::File(FileCommand::Open)), Route::Blocked);
-        assert_eq!(route(&Message::OpenSearch), Route::Blocked);
+        assert_eq!(
+            route(&Message::OpenSearch),
+            Route::Pane,
+            "検索は面で（v2.8.0 R-02）"
+        );
+        assert_eq!(route(&Message::CloseSearch), Route::Pass);
+        assert_eq!(route(&Message::OpenGoto), Route::Blocked);
         assert_eq!(route(&Message::BlinkCaret), Route::Pass);
     }
 }

@@ -15,9 +15,13 @@ pub mod inline;
 
 // コードブロックの着色（設計メモ DEC-211）
 pub mod highlight;
+// 既定の構文に無い言語（v2.8.1 R-01）
+mod extra_syntax;
 
 // `$$` を数式の囲みへ直す（HTML 出力のため。§16.6）
 pub mod dollar;
+// HTML の表（v2.8.0 R-05）
+pub mod html_table;
 
 // Rescan は rescan_from の戻り値。呼び出し側は分配するだけなので直接は名指ししない
 #[allow(unused_imports)]

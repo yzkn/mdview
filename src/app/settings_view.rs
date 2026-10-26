@@ -104,6 +104,17 @@ pub enum SettingChange {
     SoftWrap(bool),
     /// 記法の色（v2.3.0 R-05）
     EditorSyntax(bool),
+    /// Markdown 以外のファイルの言語ごとの色（v2.8.0 R-01）・色を付けるブロックの上限（KB）・色を付ける拡張子
+    CodeColors(bool),
+    /// PPTX に字体を埋め込む（v2.8.0 R-04）
+    PptxEmbedFonts(bool),
+    /// HTML の表を表として描く（v2.8.0 R-05）
+    HtmlTables(bool),
+    CodeColorLimit(String),
+    CodeColorExtensions(String),
+    /// 検索の一致の色・いまの一致の色（v2.8.0 R-02）
+    SearchMatchColor(String),
+    SearchCurrentColor(String),
     /// 目次に入れる深さ（v2.3.0 R-10）
     TocDepth(u8),
     /// Markdown の検査（v2.3.0 R-11）。全体と、規則ごと
@@ -143,6 +154,13 @@ pub enum SettingChange {
     SunField(usize, String),
     /// プレビューから編集の行へ（v2.4.0 R-03）
     PreviewJump(bool),
+    /// frontmatter の欄（v2.6.0 R-03）
+    FrontmatterPanel(bool),
+    /// フォルダーの比較で比べない名前・マージの衝突の記号（v2.6.0 R-04）
+    DiffFolderIgnore(String),
+    MergeMarkers(bool),
+    /// まとめて写す前に確かめる（v2.7.0 R-03）
+    DiffCopyConfirm(bool),
     PreviewJumpClick(settings::JumpClick),
     PreviewFollowCaret(bool),
     /// 図の拡大（v2.4.0 R-04）
@@ -171,6 +189,8 @@ pub enum SettingChange {
     /// URL を開く（v2.4.0 R-09）
     RememberUrls(bool),
     RemoteImages(bool),
+    /// 中継先を OS に聞く（v2.6.0 R-02）
+    UrlSystemProxy(bool),
     ClearRecentUrls,
     /// スライドを書き出すときの既定の形式（v2.4.0 R-07 7e）
     MarpExportFormat(settings::SlideExport),
@@ -238,6 +258,8 @@ pub struct SettingsScreen {
     pub mcp_host: Option<crate::mcp::http::HostInfo>,
     /// WYSIWYG の大きさの上限の欄（打ちかけの字。v2.5.0 R-01）
     pub wysiwyg_limit: String,
+    /// 色を付けるブロックの上限（打っている途中の字。v2.8.0 R-01）
+    pub code_color_limit: String,
 }
 
 impl SettingsScreen {
@@ -250,6 +272,7 @@ impl SettingsScreen {
         self.guide_columns = fresh.guide_columns;
         self.mcp_http_port = fresh.mcp_http_port;
         self.wysiwyg_limit = fresh.wysiwyg_limit;
+        self.code_color_limit = fresh.code_color_limit;
     }
 
     pub fn new(settings: &settings::Settings) -> Self {
@@ -279,6 +302,7 @@ impl SettingsScreen {
             mcp_http_port: settings.mcp_http_port.to_string(),
             mcp_host: None,
             wysiwyg_limit: settings.wysiwyg_limit_kb.to_string(),
+            code_color_limit: settings.code_color_limit_kb.to_string(),
         }
     }
 }
@@ -389,6 +413,11 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "show_gremlins",
             "soft_wrap",
             "editor_syntax",
+            "code_colors",
+            "code_color_limit_kb",
+            "code_color_extensions",
+            "search_match_color",
+            "search_current_color",
             "editor_ruler",
             "editor_guides",
             "editor_guide_columns",
@@ -404,6 +433,10 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
         ],
         SettingsPage::Preview => vec![
             "preview_font_size",
+            // frontmatter の欄（v2.6.0 R-03）
+            "frontmatter_panel",
+            // HTML の表（v2.8.0 R-05）
+            "html_tables",
             // プレビューから編集の行へ（v2.4.0 R-03）
             "preview_jump",
             "preview_jump_click",
@@ -431,6 +464,7 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
         SettingsPage::File => vec![
             "remember_urls",
             "remote_images",
+            "url_system_proxy",
             "recent_limit",
             "autosave_draft",
             "autosave",
@@ -467,6 +501,7 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "marp_assist",
             "marp_present_info",
             "marp_export_format",
+            "pptx_embed_fonts",
         ],
         SettingsPage::Compare => vec![
             "diff_layout",
@@ -474,6 +509,10 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "diff_ignore_case",
             "diff_ignore_eol",
             "patch_format",
+            // フォルダーの比較とマージ（v2.6.0 R-04）
+            "diff_folder_ignore",
+            "merge_markers",
+            "diff_copy_confirm",
         ],
         // MCP（v2.4.0 R-06 6c）。操作ごとの扱いは別の要素（`settings.mcp.<道具>`）
         SettingsPage::Mcp => vec!["mcp_enabled", "mcp_headless", "mcp_http", "mcp_http_port"],
@@ -502,6 +541,7 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "editor_line_spacing" => SettingChange::EditorLineSpacing(number()?),
         "preview_font_size" => SettingChange::PreviewFontSize(number()?),
         "preview_jump" => SettingChange::PreviewJump(flag()?),
+        "frontmatter_panel" => SettingChange::FrontmatterPanel(flag()?),
         "preview_jump_click" => SettingChange::PreviewJumpClick(settings::JumpClick::parse(value)),
         "preview_follow_caret" => SettingChange::PreviewFollowCaret(flag()?),
         "figure_zoom" => SettingChange::FigureZoom(flag()?),
@@ -528,6 +568,7 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "marp_present_info" => SettingChange::MarpPresentInfo(flag()?),
         "remember_urls" => SettingChange::RememberUrls(flag()?),
         "remote_images" => SettingChange::RemoteImages(flag()?),
+        "url_system_proxy" => SettingChange::UrlSystemProxy(flag()?),
         "marp_export_format" => {
             SettingChange::MarpExportFormat(settings::SlideExport::parse(value))
         }
@@ -549,6 +590,13 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "show_gremlins" => SettingChange::Gremlins(flag()?),
         "soft_wrap" => SettingChange::SoftWrap(flag()?),
         "editor_syntax" => SettingChange::EditorSyntax(flag()?),
+        "code_colors" => SettingChange::CodeColors(flag()?),
+        "pptx_embed_fonts" => SettingChange::PptxEmbedFonts(flag()?),
+        "html_tables" => SettingChange::HtmlTables(flag()?),
+        "code_color_limit_kb" => SettingChange::CodeColorLimit(value.to_owned()),
+        "code_color_extensions" => SettingChange::CodeColorExtensions(value.to_owned()),
+        "search_match_color" => SettingChange::SearchMatchColor(value.to_owned()),
+        "search_current_color" => SettingChange::SearchCurrentColor(value.to_owned()),
         "editor_ruler" => SettingChange::EditorRuler(flag()?),
         "toc_depth" => SettingChange::TocDepth(value.trim().parse().ok()?),
         "lint_enabled" => SettingChange::LintEnabled(flag()?),
@@ -571,6 +619,9 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "diff_ignore_case" => SettingChange::DiffIgnoreCase(flag()?),
         "diff_ignore_eol" => SettingChange::DiffIgnoreEol(flag()?),
         "patch_format" => SettingChange::PatchFormat(settings::PatchFormat::parse(value)),
+        "diff_folder_ignore" => SettingChange::DiffFolderIgnore(value.to_owned()),
+        "merge_markers" => SettingChange::MergeMarkers(flag()?),
+        "diff_copy_confirm" => SettingChange::DiffCopyConfirm(flag()?),
         // 背景画像（v2.4.0 R-01）
         _ if key.starts_with("bg_") => SettingChange::Backdrop(key.to_owned(), value.to_owned()),
         "sun_latitude" => SettingChange::SunField(0, value.to_owned()),
@@ -722,10 +773,40 @@ impl App {
                 // 推定の寸法も直す（倍率を変えたときと同じ。§4.13）
                 self.refresh_metrics();
             }
-            SettingChange::TabWidth(width) => self.settings.tab_width = width.clamp(1, 16),
+            SettingChange::TabWidth(width) => {
+                self.settings.tab_width = width.clamp(1, 16);
+                self.refresh_tab_width();
+            }
             SettingChange::Gremlins(on) => self.settings.show_gremlins = on,
             SettingChange::SoftWrap(on) => self.settings.soft_wrap = on,
             SettingChange::EditorSyntax(on) => self.settings.editor_syntax = on,
+            SettingChange::PptxEmbedFonts(on) => self.settings.pptx_embed_fonts = on,
+            SettingChange::HtmlTables(on) => {
+                self.settings.html_tables = on;
+                self.refresh_html_tables();
+            }
+            SettingChange::CodeColors(on) => {
+                self.settings.code_colors = on;
+                self.refresh_code_language();
+            }
+            SettingChange::CodeColorLimit(value) => {
+                if let Some(screen) = self.settings_screen.as_mut() {
+                    screen.code_color_limit.clone_from(&value);
+                }
+                if let Ok(limit) = value.trim().parse::<u32>() {
+                    if settings::CODE_COLOR_LIMIT_RANGE.contains(&limit) {
+                        self.settings.code_color_limit_kb = limit;
+                        self.refresh_code_language();
+                    }
+                }
+            }
+            SettingChange::CodeColorExtensions(value) => {
+                self.settings.code_color_extensions = value;
+                self.refresh_code_language();
+            }
+            // 打っている途中の読めない色は、テーマの色のまま（読めたら効く）
+            SettingChange::SearchMatchColor(value) => self.settings.search_match_color = value,
+            SettingChange::SearchCurrentColor(value) => self.settings.search_current_color = value,
             SettingChange::EditorRuler(on) => self.settings.editor_ruler = on,
             SettingChange::LintEnabled(on) => self.settings.lint_enabled = on,
             SettingChange::LintRule(rule, on) => {
@@ -803,10 +884,14 @@ impl App {
                 task = self.sync_diff_options();
             }
             SettingChange::PatchFormat(format) => self.settings.patch_format = format,
+            SettingChange::DiffFolderIgnore(value) => self.settings.diff_folder_ignore = value,
+            SettingChange::MergeMarkers(on) => self.settings.merge_markers = on,
+            SettingChange::DiffCopyConfirm(on) => self.settings.diff_copy_confirm = on,
             SettingChange::Palette(change) => self.apply_palette(change),
             SettingChange::Eye(change) => self.apply_eye(change),
             SettingChange::Snippet(change) => self.apply_snippet(change),
             SettingChange::PreviewJump(on) => self.settings.preview_jump = on,
+            SettingChange::FrontmatterPanel(on) => self.settings.frontmatter_panel = on,
             SettingChange::PreviewJumpClick(click) => self.settings.preview_jump_click = click,
             SettingChange::PreviewFollowCaret(on) => self.settings.preview_follow_caret = on,
             SettingChange::FigureZoom(on) => self.settings.figure_zoom = on,
@@ -859,6 +944,10 @@ impl App {
                 if !on {
                     self.settings.recent_urls.clear();
                 }
+            }
+            SettingChange::UrlSystemProxy(on) => {
+                self.settings.url_system_proxy = on;
+                self.sync_remote_images();
             }
             SettingChange::RemoteImages(on) => {
                 self.settings.remote_images = on;
@@ -1339,6 +1428,76 @@ impl App {
                     SettingChange::EditorSyntax(d.editor_syntax)
                 ),
             ),
+            // 言語ごとの色（v2.8.0 R-01）
+            with_reset(
+                toggle(
+                    "Markdown 以外のファイル（.rs・.py・.json など）に言語ごとの色を付ける（編集画面とプレビュー）",
+                    s.code_colors,
+                    SettingChange::CodeColors
+                ),
+                differs(
+                    &s.code_colors,
+                    &d.code_colors,
+                    SettingChange::CodeColors(d.code_colors)
+                ),
+            ),
+            with_reset(
+                line(
+                    "色を付けるブロック（空行で区切った塊）の大きさの上限（KB。超えたら色無し）",
+                    text_input("64", &screen.code_color_limit)
+                        .on_input(|v| Message::Setting(SettingChange::CodeColorLimit(v)))
+                        .size(12)
+                        .width(Length::Fixed(80.0)),
+                ),
+                differs(
+                    &s.code_color_limit_kb,
+                    &d.code_color_limit_kb,
+                    SettingChange::CodeColorLimit(d.code_color_limit_kb.to_string())
+                ),
+            ),
+            with_reset(
+                line(
+                    "色を付ける拡張子（空なら知っているもの全部。`rs, py` や `conf=sh` のように）",
+                    text_input("rs, py, conf=sh", &s.code_color_extensions)
+                        .on_input(|v| Message::Setting(SettingChange::CodeColorExtensions(v)))
+                        .size(12)
+                        .width(Length::Fixed(260.0)),
+                ),
+                differs(
+                    &s.code_color_extensions,
+                    &d.code_color_extensions,
+                    SettingChange::CodeColorExtensions(d.code_color_extensions.clone())
+                ),
+            ),
+            heading("検索の一致の色"),
+            with_reset(
+                line(
+                    "一致の色（`#rrggbb`。空ならテーマに合わせる）",
+                    text_input("#rrggbb", &s.search_match_color)
+                        .on_input(|v| Message::Setting(SettingChange::SearchMatchColor(v)))
+                        .size(12)
+                        .width(Length::Fixed(120.0)),
+                ),
+                differs(
+                    &s.search_match_color,
+                    &d.search_match_color,
+                    SettingChange::SearchMatchColor(d.search_match_color.clone())
+                ),
+            ),
+            with_reset(
+                line(
+                    "いまの一致の色（比べる画面の違いの色と見分けにくければ変える）",
+                    text_input("#rrggbb", &s.search_current_color)
+                        .on_input(|v| Message::Setting(SettingChange::SearchCurrentColor(v)))
+                        .size(12)
+                        .width(Length::Fixed(120.0)),
+                ),
+                differs(
+                    &s.search_current_color,
+                    &d.search_current_color,
+                    SettingChange::SearchCurrentColor(d.search_current_color.clone())
+                ),
+            ),
             heading("ミニマップ"),
             with_reset(
                 toggle(
@@ -1485,6 +1644,34 @@ impl App {
                 ),
             ),
             note("プレビューのフォントは変えられません。PDF 出力と同じ測り方を保つためです。"),
+            // frontmatter の欄（v2.6.0 R-03）
+            heading("frontmatter"),
+            with_reset(
+                toggle(
+                    "プレビューと WYSIWYG の頭に frontmatter の欄を出す（欄を出している間は、本文では frontmatter を描かない）",
+                    s.frontmatter_panel,
+                    SettingChange::FrontmatterPanel
+                ),
+                differs(
+                    &s.frontmatter_panel,
+                    &d.frontmatter_panel,
+                    SettingChange::FrontmatterPanel(d.frontmatter_panel)
+                ),
+            ),
+            // HTML の表（v2.8.0 R-05）
+            heading("HTML の表"),
+            with_reset(
+                toggle(
+                    "<table> を表として描く（WYSIWYG ではセルの上で直せる。ほかの HTML は原文のまま）",
+                    s.html_tables,
+                    SettingChange::HtmlTables
+                ),
+                differs(
+                    &s.html_tables,
+                    &d.html_tables,
+                    SettingChange::HtmlTables(d.html_tables)
+                ),
+            ),
             // プレビューから編集の行へ（v2.4.0 R-03）
             heading("編集画面との行き来"),
             with_reset(
@@ -1801,6 +1988,18 @@ impl App {
                     SettingChange::RemoteImages(d.remote_images)
                 ),
             ),
+            with_reset(
+                toggle(
+                    "中継先（プロキシ）を OS に聞く（Windows・macOS は自動構成スクリプトも OS と同じ。Linux は GNOME の手動の設定）",
+                    s.url_system_proxy,
+                    SettingChange::UrlSystemProxy
+                ),
+                differs(
+                    &s.url_system_proxy,
+                    &d.url_system_proxy,
+                    SettingChange::UrlSystemProxy(d.url_system_proxy)
+                ),
+            ),
             note("ファイル → URL を開く…（Ctrl+Shift+L）で、URL の Markdown を読み取り専用で開きます。GitHub・GitLab・gist の画面の URL は中身の URL に読み替えます。画像を URL から取るのを入れると、ローカルの文書でも http:// https:// の画像を取りに行きます（業務の文書では外へ通信が出ることに気をつけてください）。"),
             heading("外での変更"),
             with_reset(
@@ -1993,7 +2192,20 @@ impl App {
                     SettingChange::MarpExportFormat(d.marp_export_format)
                 ),
             ),
-            note("ファイル → スライドを書き出す… はこの形式で書き出します。PDF・HTML・PPTX に出力… でも、Marp の文書はスライドとして書き出します。PPTX は 1 枚を 1 枚の画像にして貼るので、PowerPoint で文字は直せません（発表者のメモはノートに入ります）。"),
+            // 字体の埋め込み（v2.8.0 R-04）
+            with_reset(
+                toggle(
+                    "PPTX に字体を埋め込む（使った字だけ。同梱フォントの無い PC でも同じ字体で出る）",
+                    s.pptx_embed_fonts,
+                    SettingChange::PptxEmbedFonts
+                ),
+                differs(
+                    &s.pptx_embed_fonts,
+                    &d.pptx_embed_fonts,
+                    SettingChange::PptxEmbedFonts(d.pptx_embed_fonts)
+                ),
+            ),
+            note("ファイル → スライドを書き出す… はこの形式で書き出します。PDF・HTML・PPTX に出力… でも、Marp の文書はスライドとして書き出します。PPTX は見出し・段落・リスト・表を PowerPoint で文字を直せる形にします（図・数式・画像は画像。発表者のメモはノートに入ります）。埋め込んだ字体は使った字だけなので、PowerPoint で新しく打った字は別の字体で出ることがあります。"),
             note("表示 → 発表（F5）で、キャレットのあるスライドから全画面で 1 枚ずつ見せます。→ ↓ PageDown Space Enter・押す・ホイールで次へ、← ↑ PageUp BackSpace・右の押下で前へ、Home・End で最初と最後、Esc で終わります。"),
             note("frontmatter の中と <!-- の後ろで打つと、指示の名前と値の候補を出します（↑↓ で選び、Enter か Tab で入れ、Esc で閉じる）。知らないテーマ・読めない値・名前の打ち間違い・見つからない背景の画像は、Markdown の検査と同じ所（波線と一覧）に出します。"),
         ]
@@ -2079,6 +2291,47 @@ impl App {
                     &s.patch_format,
                     &d.patch_format,
                     SettingChange::PatchFormat(d.patch_format)
+                ),
+            ),
+            // フォルダーの比較とマージ（v2.6.0 R-04）
+            heading("フォルダーの比較"),
+            with_reset(
+                line(
+                    "比べない名前（, で区切る。* が使える）",
+                    text_input(".git, node_modules, target", &s.diff_folder_ignore)
+                        .on_input(|v| Message::Setting(SettingChange::DiffFolderIgnore(v)))
+                        .size(12)
+                        .width(Length::Fixed(260.0)),
+                ),
+                differs(
+                    &s.diff_folder_ignore,
+                    &d.diff_folder_ignore,
+                    SettingChange::DiffFolderIgnore(d.diff_folder_ignore.clone())
+                ),
+            ),
+            heading("3 つのファイルのマージ"),
+            with_reset(
+                toggle(
+                    "衝突を結果にも記号（<<<<<<< ======= >>>>>>>）で書く（切ると、3 面の印だけ）",
+                    s.merge_markers,
+                    SettingChange::MergeMarkers
+                ),
+                differs(
+                    &s.merge_markers,
+                    &d.merge_markers,
+                    SettingChange::MergeMarkers(d.merge_markers)
+                ),
+            ),
+            with_reset(
+                toggle(
+                    "フォルダーの比較からまとめて写す前に、作る・上書きする・消すものを見せて確かめる",
+                    s.diff_copy_confirm,
+                    SettingChange::DiffCopyConfirm
+                ),
+                differs(
+                    &s.diff_copy_confirm,
+                    &d.diff_copy_confirm,
+                    SettingChange::DiffCopyConfirm(d.diff_copy_confirm)
                 ),
             ),
         ]

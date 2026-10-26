@@ -358,6 +358,9 @@ pub enum Command {
     CompareFiles,
     CompareFilesInApp,
     CompareSaved,
+    // フォルダーの比較・3 つのファイルのマージ（v2.6.0 R-04）。既定の打鍵は無い
+    CompareFolders,
+    MergeFiles,
     // diff の画面の操作（v2.3.0 R-02）
     DiffNext,
     DiffPrevious,
@@ -414,7 +417,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 115] = [
+    pub const ALL: [Command; 117] = [
         Self::New,
         Self::NewWindow,
         Self::Open,
@@ -472,6 +475,8 @@ impl Command {
         Self::CompareFiles,
         Self::CompareFilesInApp,
         Self::CompareSaved,
+        Self::CompareFolders,
+        Self::MergeFiles,
         Self::DiffNext,
         Self::DiffPrevious,
         Self::DiffCopyRight,
@@ -592,6 +597,8 @@ impl Command {
             Self::CompareFiles => "compare_files",
             Self::CompareFilesInApp => "compare_files_in_app",
             Self::CompareSaved => "compare_saved",
+            Self::CompareFolders => "compare_folders",
+            Self::MergeFiles => "merge_files",
             Self::DiffNext => "diff_next",
             Self::DiffPrevious => "diff_previous",
             Self::DiffCopyRight => "diff_copy_right",
@@ -709,6 +716,8 @@ impl Command {
             Self::CompareFiles => "ファイルを比べる",
             Self::CompareFilesInApp => "アプリ内で選んで比べる",
             Self::CompareSaved => "保存してある元と比べる",
+            Self::CompareFolders => "フォルダーを比べる",
+            Self::MergeFiles => "3 つのファイルをマージする",
             Self::DiffNext => "次の違い（比べる画面）",
             Self::DiffPrevious => "前の違い（比べる画面）",
             Self::DiffCopyRight => "右の面へ写す（比べる画面）",
@@ -835,6 +844,8 @@ impl Command {
             | Self::CompareFiles
             | Self::CompareFilesInApp
             | Self::CompareSaved
+            | Self::CompareFolders
+            | Self::MergeFiles
             | Self::DiffCopyRight
             | Self::DiffCopyLeft
             | Self::DiffSwap
@@ -895,6 +906,8 @@ impl Command {
                 | Self::CompareFiles
                 | Self::CompareFilesInApp
                 | Self::CompareSaved
+                | Self::CompareFolders
+                | Self::MergeFiles
                 | Self::ViewEdit
                 | Self::ViewPreview
                 | Self::ViewSplit
@@ -966,6 +979,8 @@ impl Command {
             Self::CompareFiles => Message::Diff(DiffMessage::OpenFiles { in_app: false }),
             Self::CompareFilesInApp => Message::Diff(DiffMessage::OpenFiles { in_app: true }),
             Self::CompareSaved => Message::Diff(DiffMessage::OpenSaved),
+            Self::CompareFolders => Message::Folder(crate::app::FolderMessage::Open),
+            Self::MergeFiles => Message::Merge(crate::app::MergeMessage::Open),
             Self::DiffNext => Message::Diff(DiffMessage::Next),
             Self::DiffPrevious => Message::Diff(DiffMessage::Previous),
             Self::DiffCopyRight => Message::Diff(DiffMessage::CopyTo(crate::diff::Side::Right)),

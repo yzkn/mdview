@@ -237,6 +237,7 @@ fn export_without_a_window() -> Option<i32> {
             base_dir,
             &Quiet,
             export::range::ExportRange::All,
+            io::settings::Settings::load().pptx_embed_fonts,
         ) {
             Ok(bytes) => {
                 if let Err(error) = std::fs::write(&out, bytes) {

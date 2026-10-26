@@ -11,8 +11,11 @@ pub mod pdf;
 pub mod range;
 // Marp の文書をスライドとして（v2.4.0 R-07 7d）
 pub mod slides;
-// PPTX とその入れ物（v2.4.0 R-07 7e）
+// PPTX とその入れ物（v2.4.0 R-07 7e）・1 枚の文字を直せる図形（v2.7.0 R-01）
 mod pptx;
+mod pptx_slide;
+// PPTX に埋め込む字体（使った字だけ。v2.8.0 R-04）
+mod font_embed;
 mod zip;
 
 pub use html::export as export_html;

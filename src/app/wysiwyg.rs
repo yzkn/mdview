@@ -42,6 +42,13 @@ impl App {
     /// 原文のブロックの対応（直せないブロックは `None`）
     fn map_of(&self, index: usize) -> Option<(usize, String, BlockMap)> {
         let block = self.document.blocks().get(index)?;
+        // 欄に出している frontmatter には入らない（v2.6.0 R-03）
+        if self
+            .front_hidden_end()
+            .is_some_and(|end| block.bytes.end <= end)
+        {
+            return None;
+        }
         let source = self
             .document
             .text()
@@ -119,14 +126,25 @@ impl App {
                 self.editable_from(index - 1, false)
             };
         };
-        let next = if forward {
-            here.map.after(here.pos)
-        } else {
-            here.map.before(here.pos)
-        };
-        match next {
-            Some(pos) => Some(here.start + here.map.byte_of(pos)),
-            None => self.neighbour(here.index, forward),
+        // **原文の位置が変わるまで進める**（広げたタブの空白のように、同じ位置に当たる字の上では止まらない。v2.8.1 R-02）
+        let here_byte = here.start + here.map.byte_of(here.pos);
+        let mut pos = here.pos;
+        loop {
+            let next = if forward {
+                here.map.after(pos)
+            } else {
+                here.map.before(pos)
+            };
+            match next {
+                Some(found) => {
+                    let byte = here.start + here.map.byte_of(found);
+                    if byte != here_byte {
+                        return Some(byte);
+                    }
+                    pos = found;
+                }
+                None => return self.neighbour(here.index, forward),
+            }
         }
     }
 
@@ -172,10 +190,16 @@ impl App {
                         .get(here.index)
                         .map(|b| b.kind.clone())
                 });
+                // HTML の表も表（v2.8.0 R-05。段落として読んでいる）
+                let html = self.here().is_some_and(|here| here.map.cells)
+                    && kind == Some(crate::parse::BlockKind::Paragraph);
                 match kind {
                     // 表は下のセルへ（v2.5.1 R-01。セルの中では改行しない）
                     Some(crate::parse::BlockKind::Table) if self.table_enter() => {}
                     Some(crate::parse::BlockKind::Table) => {}
+                    _ if html => {
+                        let _ = self.table_enter();
+                    }
                     // リスト・引用の続き、コードの改行は、編集画面と同じ道（v2.5.0 R-01 b で引用も）
                     Some(crate::parse::BlockKind::List | crate::parse::BlockKind::Quote) => {
                         let _ = self.apply(Action::Insert("\n".to_owned()));
@@ -418,7 +442,7 @@ impl App {
         } else {
             here.map.before(here.pos)
         };
-        let table = here.map.columns.is_some();
+        let table = here.map.cells;
         if let Some(pos) = target {
             // 行をまたぐ（リストの項目の境）なら、前の行の終わりからこの行の頭までを消す
             if pos.line != here.pos.line || (forward && pos.index >= here.map.lines[pos.line].len())

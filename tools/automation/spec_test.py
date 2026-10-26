@@ -745,27 +745,28 @@ def settings_screen_opens_and_covers(ctx):
 PAGE_ITEMS = {
     "window": ["window_position", "always_on_top"],
     "editor": ["editor_font", "editor_font_size", "editor_line_spacing", "tab_width",
-               "show_gremlins", "soft_wrap", "editor_syntax", "editor_ruler", "editor_guides",
+               "show_gremlins", "soft_wrap", "editor_syntax", "code_colors", "code_color_limit_kb", "code_color_extensions",
+               "search_match_color", "search_current_color", "editor_ruler", "editor_guides",
                "editor_guide_columns", "minimap", "minimap_width", "wysiwyg", "wysiwyg_limit_kb", "wysiwyg_table_align", "list_marker", "emphasis_marker", "strong_marker"],
     # プレビューから編集の行へ（v2.4.0 R-03）
     # 図の拡大（v2.4.0 R-04）
-    "preview": ["preview_font_size", "preview_jump", "preview_jump_click", "preview_follow_caret",
+    "preview": ["preview_font_size", "frontmatter_panel", "html_tables", "preview_jump", "preview_jump_click", "preview_follow_caret",
                 "figure_zoom", "figure_button", "figure_png_scale", "code_copy_button"],
     # 背景画像（v2.4.0 R-01）は配色と題名の間
     "appearance": ["theme", "window_material", "window_body_tint", "bg_enabled", "bg_area", "bg_fit", "bg_anchor", "bg_scroll",
                    "bg_light_image", "bg_light_opacity", "bg_light_blur",
                    "bg_dark_image", "bg_dark_opacity", "bg_dark_blur",
                    "title_format", "status_format"],
-    "file": ["remember_urls", "remote_images", "recent_limit", "autosave_draft", "autosave", "autosave_seconds",
+    "file": ["remember_urls", "remote_images", "url_system_proxy", "recent_limit", "autosave_draft", "autosave", "autosave_seconds",
              "watch_external", "reload_unmodified"],
     "assist": ["continue_lists", "table_format", "paste_url_as_link", "paste_images",
                "image_markup", "image_folder", "toc_depth", "lint_enabled", "format_tables", "format_bullets", "format_bullet", "format_emphasis", "lint_fix_menu", "lint_fix_key", "lint_fix_save", "lint_fix_close", "format_menu", "format_key", "format_save", "format_close"],
     # v2.3.0 R-02
     # MCP（v2.4.0 R-06 6c）
-    "slides": ["marp_slides", "marp_assist", "marp_present_info", "marp_export_format"],
+    "slides": ["marp_slides", "marp_assist", "marp_present_info", "marp_export_format", "pptx_embed_fonts"],
     "mcp": ["mcp_enabled", "mcp_headless", "mcp_http", "mcp_http_port"],
     "compare": ["diff_layout", "diff_whitespace", "diff_ignore_case", "diff_ignore_eol",
-                "patch_format"],
+                "patch_format", "diff_folder_ignore", "merge_markers", "diff_copy_confirm"],
 }
 
 # 既定から変えるための値（項目ごと）
@@ -783,7 +784,7 @@ CHANGED = {
     "soft_wrap": "true", "title_format": "{path}", "status_format": "{name} {lines}",
     # v2.3.0
     "diff_layout": "unified", "diff_whitespace": "ignore_all", "diff_ignore_case": "true",
-    "diff_ignore_eol": "true", "patch_format": "context", "editor_syntax": "false",
+    "diff_ignore_eol": "true", "patch_format": "context", "diff_folder_ignore": "dist", "merge_markers": "true", "diff_copy_confirm": "false", "editor_syntax": "false", "code_colors": "false", "code_color_limit_kb": "256", "code_color_extensions": "rs", "search_match_color": "#112233", "search_current_color": "#445566",
     "editor_ruler": "true", "editor_guides": "true", "editor_guide_columns": "72, 100",
     "toc_depth": "2", "lint_enabled": "false",
     # v2.4.0（背景画像。画像は無くてもよい: 読めなければ敷かずに理由を出す）
@@ -793,7 +794,7 @@ CHANGED = {
     "bg_dark_blur": "strong",
     "preview_jump": "false", "preview_jump_click": "alt", "preview_follow_caret": "false",
     "figure_zoom": "false", "figure_button": "false", "figure_png_scale": "3",
-    "code_copy_button": "false", "mcp_enabled": "false", "mcp_headless": "false", "mcp_http": "true", "mcp_http_port": "39300", "marp_slides": "false", "marp_assist": "false", "marp_present_info": "true", "marp_export_format": "pptx", "remember_urls": "false", "remote_images": "true", "wysiwyg": "false", "wysiwyg_limit_kb": "2048", "wysiwyg_table_align": "true", "format_tables": "false", "format_bullets": "false", "format_bullet": "+", "format_emphasis": "false", "lint_fix_menu": "false", "lint_fix_key": "false", "lint_fix_save": "true", "lint_fix_close": "true", "format_menu": "false", "format_key": "false", "format_save": "true", "format_close": "true", "list_marker": "second", "emphasis_marker": "second", "strong_marker": "second", "window_material": "opaque", "window_body_tint": "false",
+    "code_copy_button": "false", "mcp_enabled": "false", "mcp_headless": "false", "mcp_http": "true", "mcp_http_port": "39300", "marp_slides": "false", "marp_assist": "false", "marp_present_info": "true", "marp_export_format": "pptx", "pptx_embed_fonts": "false", "remember_urls": "false", "remote_images": "true", "url_system_proxy": "false", "frontmatter_panel": "false", "html_tables": "false", "wysiwyg": "false", "wysiwyg_limit_kb": "2048", "wysiwyg_table_align": "true", "format_tables": "false", "format_bullets": "false", "format_bullet": "+", "format_emphasis": "false", "lint_fix_menu": "false", "lint_fix_key": "false", "lint_fix_save": "true", "lint_fix_close": "true", "format_menu": "false", "format_key": "false", "format_save": "true", "format_close": "true", "list_marker": "second", "emphasis_marker": "second", "strong_marker": "second", "window_material": "opaque", "window_body_tint": "false",
 }
 
 
@@ -1460,8 +1461,10 @@ def dropping_documents(ctx):
 
 @covers("R-09.g", "R-09.h", "R-09.i", "R-09.k", "R-03.c")
 def settings_across_windows(ctx):
-    config = ctx.config()
-    first = ctx.app(config_dir=config, settings={"theme": "light"})
+    # **明るいテーマを置き場に書いてから起こす**（`app` は `config_dir` を渡すと `settings` を使わない。
+    # 既定は OS に合わせるので、OS が暗いときに窓 2 が始めから暗く、見た目の違いを見られなかった。v2.8.1）
+    config = ctx.config({"theme": "light"})
+    first = ctx.app(config_dir=config)
     second = ctx.app(config_dir=config)
     before_theme = ctx.shot(second, "cross-before.png")
     first.key("Ctrl+,")

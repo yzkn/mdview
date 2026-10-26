@@ -143,6 +143,15 @@ pub struct LayoutContext<'a> {
     /// 依頼はアプリ層が行う（ワーカープールは `&mut` を要する）。
     /// レイアウトは「いま何が分かっているか」だけを見て箱の大きさを決める。
     pub embeds: Option<&'a dyn EmbedLookup>,
+    /// Markdown 以外のファイルの色付け（v2.8.0 R-01。`BlockKind::Plain` を着色する。無ければ色無し）
+    pub plain_colors: Option<PlainColors<'a>>,
+}
+
+/// Markdown 以外のファイルの色付け（v2.8.0 R-01）。言語と、色を付けるブロックの大きさの上限（バイト）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlainColors<'a> {
+    pub language: &'a str,
+    pub limit: usize,
 }
 
 /// 埋め込みの状態を引く口。
@@ -206,6 +215,11 @@ pub fn layout_block(block: &Block, source: &str, cx: &LayoutContext) -> LaidOutB
             // テキストとして読む文書（v2.2.0）。**原文をそのまま 1 行ずつ**並べる
             BlockKind::Plain => layout_plain(source, base, cx),
             BlockKind::Table => layout_table(&parse_table(source), base, cx, &mut rules),
+            // HTML の表（v2.8.0 R-05）。読めなければ段落のまま（原文を出す）
+            BlockKind::Paragraph => match html_table_of(source) {
+                Some(table) => layout_html_table(&table, base, cx, &mut rules),
+                None => layout_content(&parse_block(source, &block.kind), base, cx),
+            },
             _ => layout_content(&parse_block(source, &block.kind), base, cx),
         }
     };
@@ -345,13 +359,14 @@ pub fn layout_figure_editor(
         let runs = if text.is_empty() {
             Vec::new()
         } else {
+            let (text, _) = expand_tabs(text, 0);
             vec![TextRun {
-                text: text.to_owned(),
+                width: cx.measurer.width(&text, base),
+                text,
                 style: base,
                 decoration: RunDecoration::None,
                 role: TokenRole::Plain,
                 x: 0.0,
-                width: cx.measurer.width(text, base),
             }]
         };
         lines.push(LineBox {
@@ -662,6 +677,174 @@ fn layout_table(
     lines
 }
 
+/// 段落が HTML の表として描けるなら、その表（設定で切っていれば `None`。v2.8.0 R-05）
+pub fn html_table_of(source: &str) -> Option<crate::parse::html_table::HtmlTable> {
+    if !crate::parse::html_table::enabled() {
+        return None;
+    }
+    crate::parse::html_table::parse(source)
+}
+
+/// HTML の表の格子の並び（v2.8.0 R-05）。**WYSIWYG の対応と同じ順**にする（`crate::edit::wysiwyg`）。
+/// 結合の無い表は格子の全部（足りないセルは `None`）、結合のある表はあるセルだけを、行ごとに左から
+pub fn html_slots(
+    table: &crate::parse::html_table::HtmlTable,
+) -> Vec<(usize, Option<&crate::parse::html_table::HtmlCell>)> {
+    let mut out = Vec::new();
+    for (r, row) in table.rows.iter().enumerate() {
+        if table.spanned {
+            out.extend(row.cells.iter().map(|cell| (r, Some(cell))));
+        } else {
+            for column in 0..table.columns {
+                out.push((r, row.cells.iter().find(|cell| cell.column == column)));
+            }
+        }
+    }
+    out
+}
+
+/// HTML の表をレイアウトする（v2.8.0 R-05）。**結合したセル**は列・行をまたいで置く。`<br>` はセルの中の改行。
+///
+/// 列の幅は結合していないセルから測る（Markdown の表と同じ測り方）。罫線は、結合したセルが縦にまたぐ所には引かない
+fn layout_html_table(
+    table: &crate::parse::html_table::HtmlTable,
+    base: TextStyle,
+    cx: &LayoutContext,
+    rules: &mut Vec<f32>,
+) -> Vec<LineBox> {
+    let columns = table.columns;
+    if columns == 0 {
+        return Vec::new();
+    }
+    // 列の幅（結合していないセルから測る）
+    let measured = TableContent {
+        rows: table
+            .rows
+            .iter()
+            .map(|row| crate::parse::inline::TableRow {
+                header: row.header,
+                cells: (0..columns)
+                    .map(|column| crate::parse::inline::TableCell {
+                        spans: row
+                            .cells
+                            .iter()
+                            .find(|cell| cell.column == column && cell.colspan == 1)
+                            .map(|cell| cell.lines.iter().flatten().cloned().collect())
+                            .unwrap_or_default(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        aligns: Vec::new(),
+    };
+    let (natural, minimum) = measure_columns(&measured, base, cx);
+    let widths = distribute(&natural, &minimum, cx.width);
+    let mut origins = Vec::with_capacity(columns + 1);
+    let mut x = 0.0_f32;
+    for width in &widths {
+        origins.push(x);
+        x += width;
+    }
+    origins.push(x);
+    let line_height = cx.measurer.line_height(base);
+    // セルごとに折り返す（並びは WYSIWYG の対応と同じ）
+    let slots = html_slots(table);
+    // （行・列・横の結合・縦の結合・折り返した行・寄せ方）
+    #[allow(clippy::type_complexity)]
+    let wrapped: Vec<(usize, usize, usize, usize, Vec<Vec<TextRun>>, CellAlign)> = slots
+        .iter()
+        .enumerate()
+        .map(|(index, (r, cell))| {
+            // 足りないセル（結合の無い表だけ）は、格子の順の位置の列
+            let (column, colspan, rowspan, align) = cell
+                .map_or((index % columns, 1, 1, CellAlign::Left), |cell| {
+                    (cell.column, cell.colspan, cell.rowspan, cell.align)
+                });
+            let end = (column + colspan).min(columns);
+            let inner = (origins[end] - origins[column.min(columns)] - CELL_PADDING * 2.0).max(1.0);
+            let header = table.rows[*r].header || cell.is_some_and(|cell| cell.header);
+            let style = if header { TextStyle::Bold } else { base };
+            let lines: Vec<Vec<TextRun>> = cell
+                .map(|cell| {
+                    cell.lines
+                        .iter()
+                        .flat_map(|line| wrap_spans(line, style, inner, cx.measurer))
+                        .filter(|runs| !runs.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (*r, column, colspan, rowspan, lines, align)
+        })
+        .collect();
+    // 行の高さ（結合の無いセルから。縦に結合したセルが収まらなければ、最後の行を伸ばす）
+    let rows = table.rows.len();
+    let mut heights = vec![line_height; rows];
+    for (r, _, _, rowspan, lines, _) in &wrapped {
+        if *rowspan == 1 {
+            heights[*r] = heights[*r].max(lines.len().max(1) as f32 * line_height);
+        }
+    }
+    for (r, _, _, rowspan, lines, _) in &wrapped {
+        if *rowspan > 1 {
+            let last = (*r + rowspan - 1).min(rows - 1);
+            let have: f32 = heights[*r..=last].iter().sum();
+            let need = lines.len().max(1) as f32 * line_height;
+            if need > have {
+                heights[last] += need - have;
+            }
+        }
+    }
+    let mut tops = Vec::with_capacity(rows + 1);
+    let mut top = 0.0_f32;
+    for height in &heights {
+        tops.push(top);
+        top += height;
+    }
+    let mut lines = Vec::new();
+    for (r, column, colspan, _, cell_lines, align) in wrapped {
+        let column = column.min(columns - 1);
+        let end = (column + colspan).min(columns);
+        let left = origins[column];
+        let inner = (origins[end] - left - CELL_PADDING * 2.0).max(1.0);
+        let offset = |used: f32| match align {
+            CellAlign::Left => 0.0,
+            CellAlign::Center => (inner - used).max(0.0) / 2.0,
+            CellAlign::Right => (inner - used).max(0.0),
+        };
+        // **空のセルにも字の無い行を 1 つ置く**（WYSIWYG のキャレットの置き場）
+        if cell_lines.is_empty() {
+            lines.push(LineBox {
+                top: tops[r],
+                height: line_height,
+                left: left + CELL_PADDING + offset(0.0),
+                runs: Vec::new(),
+                source: None,
+            });
+            continue;
+        }
+        for (index, runs) in cell_lines.into_iter().enumerate() {
+            let used: f32 = runs.iter().map(|run| run.width).sum();
+            lines.push(LineBox {
+                top: tops[r] + index as f32 * line_height,
+                height: line_height,
+                left: left + CELL_PADDING + offset(used),
+                runs,
+                source: None,
+            });
+        }
+    }
+    // 罫線（縦に結合したセルがまたぐ境には引かない）
+    for r in 0..rows {
+        let crossed = table.rows.iter().enumerate().any(|(start, row)| {
+            start <= r && row.cells.iter().any(|cell| start + cell.rowspan - 1 > r)
+        });
+        if !crossed || r + 1 == rows {
+            rules.push(tops[r] + heights[r]);
+        }
+    }
+    lines
+}
+
 /// 各列の自然幅と最小幅を測る（§3.3 パス 1）。
 fn measure_columns(
     table: &TableContent,
@@ -789,6 +972,7 @@ fn layout_code(
         let mut runs = Vec::with_capacity(tokens.len());
         let mut x = 0.0_f32;
 
+        let mut column = 0usize;
         for token in tokens {
             let Some(part) = text.get(token.range.clone()) else {
                 continue;
@@ -796,9 +980,12 @@ fn layout_code(
             if part.is_empty() {
                 continue;
             }
-            let width = cx.measurer.width(part, style);
+            // タブは設定の字数に広げる（v2.8.1 R-02）
+            let (part, next) = expand_tabs(part, column);
+            column = next;
+            let width = cx.measurer.width(&part, style);
             runs.push(TextRun {
-                text: part.to_owned(),
+                text: part,
                 style,
                 decoration: RunDecoration::None,
                 role: token.role,
@@ -821,22 +1008,86 @@ fn layout_code(
 }
 
 /// テキストとして読む文書の塊（v2.2.0）。**着色せず、フェンスも探さない**
+/// タブを広げる字数（設定「タブ幅」。v2.8.1 R-02）。組み方と WYSIWYG の対応が同じ答えを使うよう、1 か所に持つ
+static TAB_WIDTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(4);
+
+/// タブ幅を設定に合わせる（アプリが呼ぶ）
+pub fn set_tab_width(width: usize) {
+    TAB_WIDTH.store(width.clamp(1, 16), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn tab_width() -> usize {
+    TAB_WIDTH.load(std::sync::atomic::Ordering::Relaxed).max(1)
+}
+
+/// 行の中のタブを、次のタブ止めまでの空白に広げる（編集画面と同じ。v2.8.1 R-02）。
+/// `column` は区間の頭の桁（字の数）。返すのは広げた字と、区間の終わりの桁
+pub fn expand_tabs(text: &str, column: usize) -> (String, usize) {
+    let width = tab_width();
+    let mut out = String::with_capacity(text.len());
+    let mut column = column;
+    for c in text.chars() {
+        if c == '\t' {
+            let step = width - column % width;
+            out.extend(std::iter::repeat_n(' ', step));
+            column += step;
+        } else {
+            out.push(c);
+            column += 1;
+        }
+    }
+    (out, column)
+}
+
 fn layout_plain(source: &str, style: TextStyle, cx: &LayoutContext) -> Vec<LineBox> {
     let line_height = cx.measurer.line_height(style);
     let mut top = 0.0_f32;
+    // 言語が分かれば着色する（v2.8.0 R-01）。**大きすぎるブロックは色を付けない**（1 度に着色する量を抑える）
+    let colored = cx
+        .plain_colors
+        .filter(|colors| source.len() <= colors.limit)
+        .map(|colors| highlight(source, Some(colors.language)));
     source_lines(source)
-        .map(|(start, raw)| {
+        .enumerate()
+        .map(|(index, (start, raw))| {
             let text = raw.trim_end_matches(['\n', '\r']);
+            let tokens = colored.as_ref().and_then(|lines| lines.get(index));
             let runs = if text.is_empty() {
                 Vec::new()
+            } else if let Some(tokens) = tokens {
+                let mut x = 0.0_f32;
+                let mut column = 0usize;
+                tokens
+                    .iter()
+                    .filter_map(|token| {
+                        let part = text
+                            .get(token.range.clone())
+                            .filter(|part| !part.is_empty())?;
+                        // タブは設定の字数に広げる（v2.8.1 R-02）
+                        let (part, next) = expand_tabs(part, column);
+                        column = next;
+                        let width = cx.measurer.width(&part, style);
+                        let run = TextRun {
+                            text: part,
+                            style,
+                            decoration: RunDecoration::None,
+                            role: token.role,
+                            x,
+                            width,
+                        };
+                        x += width;
+                        Some(run)
+                    })
+                    .collect()
             } else {
+                let (text, _) = expand_tabs(text, 0);
                 vec![TextRun {
-                    text: text.to_owned(),
+                    width: cx.measurer.width(&text, style),
+                    text,
                     style,
                     decoration: RunDecoration::None,
                     role: TokenRole::Plain,
                     x: 0.0,
-                    width: cx.measurer.width(text, style),
                 }]
             };
             let line = LineBox {
@@ -1201,7 +1452,104 @@ mod tests {
             indent_unit: 24.0,
             base_dir: None,
             embeds: None,
+            plain_colors: None,
         }
+    }
+
+    /// タブは次のタブ止めまでの空白に広げる（v2.8.1 R-02。既定のタブ幅は 4）
+    #[test]
+    fn tabs_are_expanded_to_the_tab_width() {
+        assert_eq!(expand_tabs("\tx", 0), ("    x".to_owned(), 5));
+        assert_eq!(expand_tabs("ab\tc", 0), ("ab  c".to_owned(), 5));
+        assert_eq!(
+            expand_tabs("\t", 3),
+            (" ".to_owned(), 4),
+            "区間の頭の桁から数える"
+        );
+        let text = "```rust\nfn a() {\n\tlet x = 1;\n}\n```\n";
+        let laid = layout_first(text, 800.0);
+        let line: String = laid.lines[1].text();
+        assert_eq!(line, "    let x = 1;");
+        let plain = "a\tb\n";
+        let blocks = crate::parse::scan_text(plain, true).blocks;
+        let measurer = FixedMeasurer::default();
+        let cx = context(800.0, &measurer);
+        let laid = layout_block(&blocks[0], plain, &cx);
+        assert_eq!(laid.lines[0].text(), "a   b");
+    }
+
+    /// テキストとして読む文書は、言語が分かれば着色し、無ければ 1 区間のまま（v2.8.0 R-01）
+    #[test]
+    fn plain_blocks_are_colored_by_language() {
+        let text = "fn main() {\n    let x = 1; // 注釈\n}\n";
+        let blocks = crate::parse::scan_text(text, true).blocks;
+        let block = &blocks[0];
+        assert_eq!(block.kind, BlockKind::Plain);
+        let measurer = FixedMeasurer::default();
+        let mut cx = context(800.0, &measurer);
+        let plain = layout_block(block, &text[block.bytes.clone()], &cx);
+        assert!(plain.lines.iter().all(|line| line.runs.len() <= 1));
+        cx.plain_colors = Some(PlainColors {
+            language: "rust",
+            limit: 64 * 1024,
+        });
+        let colored = layout_block(block, &text[block.bytes.clone()], &cx);
+        let roles: Vec<TokenRole> = colored
+            .lines
+            .iter()
+            .flat_map(|line| line.runs.iter().map(|run| run.role))
+            .collect();
+        assert!(roles.contains(&TokenRole::Keyword), "{roles:?}");
+        assert!(roles.contains(&TokenRole::Comment), "{roles:?}");
+        let joined: Vec<String> = colored.lines.iter().map(LineBox::text).collect();
+        assert_eq!(
+            joined,
+            ["fn main() {", "    let x = 1; // 注釈", "}"],
+            "字は変えない"
+        );
+        // 上限を超えたブロックは色無し
+        cx.plain_colors = Some(PlainColors {
+            language: "rust",
+            limit: 8,
+        });
+        let over = layout_block(block, &text[block.bytes.clone()], &cx);
+        assert!(over.lines.iter().all(|line| line.runs.len() <= 1));
+    }
+
+    /// HTML の表は表として組む（v2.8.0 R-05）。並びは WYSIWYG の対応と同じ。縦の結合がまたぐ境に罫線を引かない
+    #[test]
+    fn html_tables_are_laid_out_on_a_grid() {
+        let text = "<table><tr><td rowspan=\"2\">左</td><td>右上</td></tr><tr><td>右下<br>二行目</td></tr><tr><td colspan=\"2\">下</td></tr></table>\n";
+        let blocks = scan_lines(text).blocks;
+        let block = &blocks[0];
+        assert_eq!(block.kind, BlockKind::Paragraph);
+        let measurer = FixedMeasurer::default();
+        let cx = context(800.0, &measurer);
+        let laid = layout_block(block, &text[block.bytes.clone()], &cx);
+        let texts: Vec<String> = laid.lines.iter().map(LineBox::text).collect();
+        assert_eq!(
+            texts,
+            ["左", "右上", "右下", "二行目", "下"],
+            "セルの順・<br> で改行"
+        );
+        let right = laid.lines[1].left;
+        assert!(right > laid.lines[0].left, "右の列");
+        assert_eq!(laid.lines[2].left, right, "縦の結合を避けて右の列");
+        assert!(laid.lines[3].top > laid.lines[2].top);
+        assert_eq!(
+            laid.lines[4].left, laid.lines[0].left,
+            "横に結合したセルは左から"
+        );
+        assert_eq!(
+            laid.rules.len(),
+            2,
+            "1 行目の下（縦の結合がまたぐ）には引かない"
+        );
+        // 対応の表のセルの数と並びが同じ
+        let map = crate::edit::wysiwyg::map_block(block, &text[block.bytes.clone()]).unwrap();
+        assert_eq!(map.lines.len(), 4);
+        assert_eq!(map.columns, None, "結合のある表");
+        assert!(map.cells);
     }
 
     fn layout_first(text: &str, width: f32) -> LaidOutBlock {
@@ -1707,6 +2055,7 @@ mod tests {
             indent_unit: 24.0,
             base_dir: None,
             embeds: Some(&lookup),
+            plain_colors: None,
         };
         let blocks = scan_lines(text).blocks;
         let block = &blocks[0];
@@ -1961,6 +2310,7 @@ fn main() {}
             indent_unit: 24.0,
             base_dir: None,
             embeds: Some(&lookup),
+            plain_colors: None,
         };
         let blocks = scan_lines(text).blocks;
         let block = &blocks[0];

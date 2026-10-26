@@ -413,6 +413,10 @@ pub struct EditorView<'a> {
     diff: Option<&'a DiffMarks>,
     /// 記法の色（v2.3.0 R-05 C-1）。**付けないときは `None`**（1 色で描く）
     syntax: Option<super::syntax::SyntaxColors>,
+    /// Markdown 以外のファイルの言語ごとの色（v2.8.0 R-01。着色の覚えと言語）
+    code: Option<(&'a super::syntax::CodeCache, crate::layout::PlainColors<'a>)>,
+    /// 検索の一致の色・いまの一致の色（v2.8.0 R-02。`None` ならテーマに合わせる）
+    match_colors: (Option<Color>, Option<Color>),
     /// 目 grep（v2.3.0 R-05 C-3）。探すものと塗る色
     eye: &'a [(regex::Regex, Color)],
     /// 縦線を引く桁（v2.3.0 R-07。表示の幅で数える）
@@ -452,6 +456,8 @@ impl<'a> EditorView<'a> {
             segment_x: std::cell::RefCell::new(None),
             diff: None,
             syntax: None,
+            code: None,
+            match_colors: (None, None),
             eye: &[],
             guides: &[],
             lint: &[],
@@ -757,6 +763,62 @@ impl<'a> EditorView<'a> {
     pub fn syntax(mut self, colors: Option<super::syntax::SyntaxColors>) -> Self {
         self.syntax = colors;
         self
+    }
+
+    /// Markdown 以外のファイルを言語ごとに着色する（v2.8.0 R-01）。**テキストとして読む文書でだけ効く**
+    pub fn code_colors(
+        mut self,
+        code: Option<(&'a super::syntax::CodeCache, crate::layout::PlainColors<'a>)>,
+    ) -> Self {
+        self.code = code;
+        self
+    }
+
+    /// 検索の一致の色・いまの一致の色（v2.8.0 R-02）
+    pub fn match_colors(mut self, colors: (Option<Color>, Option<Color>)) -> Self {
+        self.match_colors = colors;
+        self
+    }
+
+    /// 言語ごとの色の区間（表示の文字列のバイト位置）。着色しない行は `None`
+    fn code_pieces(
+        &self,
+        rendered: &Rendered,
+        line: usize,
+        text_color: Color,
+    ) -> Option<Vec<(std::ops::Range<usize>, Color)>> {
+        let (cache, colors) = self.code?;
+        if !self.document.is_plain() {
+            return None;
+        }
+        let blocks = self.document.blocks();
+        let index = blocks
+            .partition_point(|block| block.start_line <= line)
+            .checked_sub(1)?;
+        let block = &blocks[index];
+        if line >= block.start_line + block.line_count.max(1) {
+            return None;
+        }
+        let tokens = cache.tokens(block.revision, colors.language, colors.limit, || {
+            self.document
+                .text()
+                .byte_slice(block.bytes.clone())
+                .to_string()
+        })?;
+        let row = tokens.get(line - block.start_line)?;
+        // もとの行のバイト位置 → 表示の文字列のバイト位置（タブを広げてある）
+        let text = &rendered.text;
+        let to_text = |raw: usize| byte_of_display(text, rendered.column_of_byte(raw));
+        Some(
+            row.iter()
+                .map(|token| {
+                    (
+                        to_text(token.range.start)..to_text(token.range.end),
+                        super::token_color(token.role, text_color),
+                    )
+                })
+                .collect(),
+        )
     }
 
     /// その行のブロックの種類（記法の色を決める）。**ブロックの外（空行）は `None`**
@@ -1222,7 +1284,7 @@ impl<'a> EditorView<'a> {
                         ),
                         ..Default::default()
                     },
-                    CURRENT_MATCH,
+                    MINIMAP_MATCH,
                 );
             }
         }
@@ -1587,6 +1649,11 @@ impl<'a> EditorView<'a> {
         self
     }
 
+    /// `highlight` を組で受ける（比べる画面の面。v2.8.0 R-02）
+    pub fn highlight_matches(self, (matches, current): (&'a [Match], Option<Match>)) -> Self {
+        self.highlight(matches, current)
+    }
+
     /// キーを受け取るか。**検索バーへ入力している間は受け取らない**。
     ///
     /// エディタは焦点の概念を持たず、届いたキーをすべて本文への入力として扱う。
@@ -1877,7 +1944,8 @@ impl<'a> EditorView<'a> {
         left: f32,
         y: f32,
         text_color: Color,
-        colors: super::syntax::SyntaxColors,
+        colors: Option<super::syntax::SyntaxColors>,
+        code: Option<Vec<(std::ops::Range<usize>, Color)>>,
         clip: &Rectangle,
     ) where
         Renderer: text::Renderer<Font = iced::Font>,
@@ -1897,14 +1965,21 @@ impl<'a> EditorView<'a> {
             return;
         }
         // 色の区間で切り、隙間は本文の色
+        let spans: Vec<(std::ops::Range<usize>, Color)> = match code {
+            Some(code) => code,
+            None => super::syntax::spans(text, self.block_kind(line))
+                .into_iter()
+                .map(|(range, role)| (range, colors.map_or(text_color, |c| c.of(role))))
+                .collect(),
+        };
         let mut pieces: Vec<(std::ops::Range<usize>, Color)> = Vec::new();
         let mut at = 0;
-        for (range, role) in super::syntax::spans(text, self.block_kind(line)) {
+        for (range, color) in spans {
             if range.start > at {
                 pieces.push((at..range.start, text_color));
             }
-            at = range.end;
-            pieces.push((range, colors.of(role)));
+            at = range.end.max(at);
+            pieces.push((range, color));
         }
         if at < text.len() {
             pieces.push((at..text.len(), text_color));
@@ -2092,9 +2167,11 @@ impl<'a> EditorView<'a> {
             );
 
             let color = if self.current_match == Some(*found) {
-                CURRENT_MATCH
+                self.match_colors.1.unwrap_or(CURRENT_MATCH)
             } else {
-                match_color(text_color)
+                self.match_colors
+                    .0
+                    .unwrap_or_else(|| match_color(text_color))
             };
             renderer.fill_quad(
                 renderer::Quad {
@@ -3003,9 +3080,10 @@ where
                     }
 
                     // 折り返していれば、その段の文字だけを段の左端から描く
-                    match self.syntax {
-                        // **記法の色**（v2.3.0 R-05）。色の違う区間ごとに切り分けて描く
-                        Some(colors) => self.draw_colored::<Renderer>(
+                    let code = self.code_pieces(&rendered, line_index, text_color);
+                    match (self.syntax, code) {
+                        // **記法の色**（v2.3.0 R-05）・言語ごとの色（v2.8.0 R-01）。色の違う区間ごとに切り分けて描く
+                        (colors, Some(code)) => self.draw_colored::<Renderer>(
                             renderer,
                             &rendered.text,
                             line_index,
@@ -3014,9 +3092,22 @@ where
                             y,
                             text_color,
                             colors,
+                            Some(code),
                             &text_clip,
                         ),
-                        None => draw_text(
+                        (Some(colors), None) => self.draw_colored::<Renderer>(
+                            renderer,
+                            &rendered.text,
+                            line_index,
+                            segment,
+                            left,
+                            y,
+                            text_color,
+                            Some(colors),
+                            None,
+                            &text_clip,
+                        ),
+                        (None, None) => draw_text(
                             renderer,
                             self.segment_text(&rendered.text, line_index, segment),
                             Point::new(left + start, y),
@@ -3255,11 +3346,22 @@ fn match_color(text_color: Color) -> Color {
     }
 }
 
-/// 現在位置の地色。**他の一致とは別色にする**（§8.2）。
-const CURRENT_MATCH: Color = Color {
+/// ミニマップの一致の印（v2.8.1 で本文のいまの一致を青にしたあとも、前の橙のまま。帯の上で目立つ色）
+const MINIMAP_MATCH: Color = Color {
     r: 1.0,
     g: 0.68,
     b: 0.20,
+    a: 0.45,
+};
+
+/// 現在位置の地色。**他の一致とは別色にする**（§8.2）。
+///
+/// **青にする**（v2.8.1 R-03）。前は橙で、比べる画面の違いの色（赤・緑・黄・橙）と見分けにくかった。
+/// 半透明なので、明るいテーマでも暗いテーマでも字は読める
+pub(crate) const CURRENT_MATCH: Color = Color {
+    r: 0.25,
+    g: 0.55,
+    b: 1.0,
     a: 0.45,
 };
 

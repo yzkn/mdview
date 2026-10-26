@@ -449,15 +449,16 @@ pub fn structure(text: &str) -> Value {
     })
 }
 
-/// 先頭の `---` で囲んだ frontmatter（無ければ `null`）。**中身は文字のまま返す**（YAML は読まない）
+/// 先頭の `---`（TOML なら `+++`。v2.7.0）で囲んだ frontmatter（無ければ `null`）。**中身は文字のまま返す**（YAML・TOML は読まない）
 fn frontmatter(text: &str) -> Value {
     let mut lines = text.split('\n');
-    if lines.next().map(str::trim_end) != Some("---") {
-        return Value::Null;
-    }
+    let fence = match lines.next().map(str::trim_end) {
+        Some(fence @ ("---" | "+++")) => fence,
+        _ => return Value::Null,
+    };
     let mut body = Vec::new();
     for line in lines {
-        if line.trim_end() == "---" {
+        if line.trim_end() == fence {
             return json!(body.join("\n"));
         }
         body.push(line);
@@ -1120,6 +1121,7 @@ impl MdviewServer {
                     base_dir.as_deref(),
                     &Quiet,
                     crate::export::range::ExportRange::All,
+                    crate::io::settings::Settings::load().pptx_embed_fonts,
                 )
                 .map_err(|error| error.to_string())?,
                 ("pptx", None) => {
@@ -1472,6 +1474,10 @@ mod tests {
         assert_eq!(value["code_blocks"][0]["language"], "rust");
         assert_eq!(value["frontmatter"], "title: 題");
         assert_eq!(value["stats"]["tables"], 1);
+        assert_eq!(
+            frontmatter("+++\ntitle = \"題\"\n+++\n本文"),
+            "title = \"題\""
+        );
     }
 
     /// 本文で渡したものはそのまま、パスも本文も無ければ理由を返す

@@ -39,6 +39,7 @@ pub use editor::{
     advance_scroll_x, cells_before, take_whole_lines, text_left, Action, CompletionView,
     CursorMove, DiffMarks, EditorState, EditorView, ImeAction, LineMark, RectSelection,
 };
+pub use preview::token_color;
 pub use preview::{
     PreviewAction, PreviewColors, PreviewState, PreviewView, WysiwygCaret,
     BASE_SIZE as PREVIEW_BASE_SIZE,
@@ -183,6 +184,8 @@ pub enum Message {
     BrowserTyped(String),
     /// 打ったものを決める
     BrowserSubmit,
+    /// いまの場所のフォルダーを選ぶ（v2.6.0 R-04 a）
+    BrowserChooseFolder,
     /// やめる
     BrowserCancel,
     /// 自前の選択を明示的に開く（OS のダイアログが使えても使いたいとき）
@@ -226,6 +229,13 @@ pub enum Message {
     OpenAbout,
     /// About を閉じる
     CloseAbout,
+    /// About の「使っているソフトウェア」（v2.6.0 R-01）
+    AboutLicense(crate::app::AboutLicense),
+    /// frontmatter の欄（v2.6.0 R-03）
+    FrontMatter(crate::app::FrontAction),
+    /// フォルダーの比較・3 つのファイルのマージ（v2.6.0 R-04）
+    Folder(crate::app::FolderMessage),
+    Merge(crate::app::MergeMessage),
     /// 目次の開閉
     ToggleToc,
     /// スクロール同期の切替（Split のときだけ効く）

@@ -301,6 +301,19 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
             )
             .enabled(!context.busy)
             .access('D'),
+            // フォルダーの比較・3 つのファイルのマージ（v2.6.0 R-04）
+            Item::action(
+                "フォルダーを比べる…",
+                c(Command::CompareFolders),
+                Message::Folder(crate::app::FolderMessage::Open),
+            )
+            .enabled(!context.busy),
+            Item::action(
+                "3 つのファイルをマージする…",
+                c(Command::MergeFiles),
+                Message::Merge(crate::app::MergeMessage::Open),
+            )
+            .enabled(!context.busy),
             // **パッチを編集中の文書に当てる**（v2.3.0 R-04）
             Item::action(
                 "パッチを当てる…",

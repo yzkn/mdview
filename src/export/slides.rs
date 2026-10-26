@@ -481,10 +481,8 @@ fn draw_block(
     }
 }
 
-/// PPTX の画像を描く倍率（論理の画素の何倍の細かさにするか）
-const PPTX_SCALE: f32 = 2.0;
-
-/// PPTX にする（**1 枚 1 画像で貼る**。PowerPoint で文字は直せない）。発表者のメモはノートへ入れる
+/// PPTX にする（v2.7.0 R-01。**文字を直せる形**。ブロックごとの文字の箱・表・画像で、置き場所は PDF と同じ組み方から）。
+/// 発表者のメモはノートへ入れる。`embed_fonts` なら使った字だけの同梱フォントを埋め込む（v2.8.0 R-04）
 #[allow(clippy::too_many_arguments)]
 pub fn pptx(
     measure: &crate::render::slides::Measure<'_>,
@@ -494,6 +492,7 @@ pub fn pptx(
     base_dir: Option<&Path>,
     watch: &dyn ExportWatch,
     selection: ExportRange,
+    embed_fonts: bool,
 ) -> Result<Vec<u8>, ExportError> {
     let (width, height) = deck.size.dimensions();
     let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(width, height));
@@ -501,7 +500,11 @@ pub fn pptx(
     watch.total(chosen.len());
     let mut cache = LayoutCache::default();
     let mut embeds = Embeds::default();
-    let mut images = Vec::new();
+    let renderers = super::pptx_slide::Renderers {
+        diagram: DiagramRenderer::new(),
+        math: MathRenderer::new(),
+    };
+    let mut slides = Vec::new();
     for (offset, number) in chosen.enumerate() {
         if watch.cancelled() {
             return Err(ExportError::Cancelled);
@@ -516,240 +519,56 @@ pub fn pptx(
             bounds,
             base_dir,
         );
-        let svg = slide_svg(&laid, &embeds, width, height);
-        let picture =
-            crate::embed::diagram::rasterize_scaled(&svg, PPTX_SCALE, 8192).map_err(|error| {
-                ExportError::Write(format!("{} 枚目を描けません: {error}", number + 1))
-            })?;
-        let png = crate::embed::figure::encode_png(&picture)
-            .map_err(|error| ExportError::Write(format!("{error}")))?;
-        images.push(super::pptx::SlideImage {
-            png,
-            notes: deck.slides[number].notes.clone(),
-        });
+        slides.push(super::pptx_slide::slide(
+            &laid,
+            document,
+            &embeds,
+            &renderers,
+            deck.slides[number].notes.clone(),
+        ));
         watch.done(offset + 1);
     }
-    Ok(super::pptx::build(&images, width, height, title))
+    let fonts = if embed_fonts {
+        embedded_faces(&slides)
+    } else {
+        Vec::new()
+    };
+    Ok(super::pptx::build(&slides, width, height, title, &fonts))
 }
 
-/// 1 枚を SVG にする（PPTX の画像のもと）。**PDF と同じ置き方**（`draw_frame`・`draw_block` と同じ数）
-fn slide_svg(
-    laid: &crate::render::slides::Laid,
-    embeds: &Embeds,
-    width: f32,
-    height: f32,
-) -> String {
-    let mut out = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{width}" height="{height}" viewBox="0 0 {width} {height}">"#
-    );
-    let paint = |c: [f32; 4]| {
-        format!(
-            r#"fill="rgb({},{},{})" fill-opacity="{:.3}""#,
-            (c[0] * 255.0).round(),
-            (c[1] * 255.0).round(),
-            (c[2] * 255.0).round(),
-            c[3]
-        )
-    };
-    let picture = |embed: &crate::embed::RenderedEmbed| -> Option<String> {
-        let png = crate::embed::figure::encode_png(embed).ok()?;
-        Some(format!("data:image/png;base64,{}", html::base64(&png)))
-    };
-    let text = |out: &mut String,
-                content: &str,
-                x: f32,
-                y: f32,
-                size: f32,
-                style: TextStyle,
-                color: String| {
-        let (family, weight) = match style {
-            TextStyle::Mono => (crate::render::fonts::MONO, "normal"),
-            TextStyle::Bold | TextStyle::Heading(_) => (crate::render::fonts::BODY, "bold"),
-            TextStyle::Body => (crate::render::fonts::BODY, "normal"),
-        };
-        out.push_str(&format!(
-            r#"<text x="{x:.2}" y="{y:.2}" font-family="{family}" font-size="{size:.2}" font-weight="{weight}" {color} xml:space="preserve">{}</text>"#,
-            html::escape(content)
-        ));
-    };
-
-    if let Some(frame) = laid.frames.first() {
-        let r = frame.rect;
-        out.push_str(&format!(
-            r#"<rect x="{}" y="{}" width="{}" height="{}" {}/>"#,
-            r.x,
-            r.y,
-            r.width,
-            r.height,
-            paint(frame.look.background)
-        ));
-        for (key, fit, cell) in &frame.backgrounds {
-            let Some(JobState::Done(embed)) = embeds.state(key) else {
-                continue;
-            };
-            let Some(uri) = picture(&embed) else {
-                continue;
-            };
-            let (w, h) = (embed.width as f32, embed.height as f32);
-            let (cx, cy) = (r.x + cell.x, r.y + cell.y);
-            // 覆う・収めるは SVG の決まりで、原寸・割合は大きさを決めて真ん中に置く（はみ出しは入れ子の svg が切る）
-            let inner = match fit {
-                Fit::Cover | Fit::Contain => {
-                    let aspect = if *fit == Fit::Cover { "slice" } else { "meet" };
-                    format!(
-                        r#"<image x="0" y="0" width="{}" height="{}" preserveAspectRatio="xMidYMid {aspect}" xlink:href="{uri}"/>"#,
-                        cell.width, cell.height
-                    )
-                }
-                Fit::Auto | Fit::Scale(_) => {
-                    let contain = (cell.width / w).min(cell.height / h);
-                    let factor = match fit {
-                        Fit::Scale(part) => contain * part,
-                        _ => contain.min(frame.scale.max(contain)),
-                    };
-                    let (dw, dh) = (w * factor, h * factor);
-                    format!(
-                        r#"<image x="{}" y="{}" width="{dw}" height="{dh}" preserveAspectRatio="none" xlink:href="{uri}"/>"#,
-                        (cell.width - dw) / 2.0,
-                        (cell.height - dh) / 2.0
-                    )
-                }
-            };
-            out.push_str(&format!(
-                r#"<svg x="{cx}" y="{cy}" width="{}" height="{}">{inner}</svg>"#,
-                cell.width, cell.height
-            ));
+/// 使った字だけの同梱フォントを作る（v2.8.0 R-04）。**作れなかった書体は入れない**（名前だけの指定に戻る）
+fn embedded_faces(slides: &[super::pptx_slide::SlideParts]) -> Vec<super::pptx::EmbeddedFace> {
+    let mut chars: [std::collections::BTreeSet<char>; 4] = Default::default();
+    for slide in slides {
+        for (all, used) in chars
+            .iter_mut()
+            .zip(super::pptx_slide::used_chars(&slide.shapes))
+        {
+            all.extend(used);
         }
     }
-
-    for shown in &laid.shown {
-        let frame = shown.frame.and_then(|index| laid.frames.get(index));
-        let look = frame.map_or_else(
-            || theme::look_of(&crate::marp::SlideStyle::default()),
-            |frame| frame.look,
-        );
-        let mut muted = look.text;
-        muted[3] = 0.6;
-        let block = &shown.laid;
-        if block.quote_bar {
-            out.push_str(&format!(
-                r#"<rect x="{}" y="{}" width="4" height="{}" {}/>"#,
-                shown.x,
-                shown.y,
-                (block.height - 12.0).max(0.0),
-                paint(muted)
-            ));
-        }
-        for rule in &block.rules {
-            let mut color = muted;
-            color[3] = 0.25;
-            out.push_str(&format!(
-                r#"<rect x="{}" y="{}" width="{}" height="1" {}/>"#,
-                shown.x,
-                shown.y + rule,
-                shown.width,
-                paint(color)
-            ));
-        }
-        if let Some(placement) = block.embed {
-            if let Some(JobState::Done(embed)) = embeds.state(&placement.key) {
-                if embed.width > 0 && embed.height > 0 {
-                    if let Some(uri) = picture(&embed) {
-                        let drawn = embed.display_height(placement.width);
-                        let ratio = drawn / embed.height as f32;
-                        out.push_str(&format!(
-                            r#"<image x="{}" y="{}" width="{}" height="{drawn}" preserveAspectRatio="none" xlink:href="{uri}"/>"#,
-                            shown.x,
-                            shown.y + placement.top,
-                            embed.width as f32 * ratio
-                        ));
-                    }
-                }
-            }
-        }
-        for line in &block.lines {
-            let top = shown.y + line.top;
-            for run in &line.runs {
-                if run.text.trim().is_empty() {
-                    continue;
-                }
-                let x = shown.x + line.left + run.x;
-                if run.decoration == RunDecoration::Code {
-                    let mut back = look.text;
-                    back[3] = 0.10;
-                    out.push_str(&format!(
-                        r#"<rect x="{}" y="{top}" width="{}" height="{}" rx="3" {}/>"#,
-                        x - 2.0,
-                        run.width + 4.0,
-                        line.height,
-                        paint(back)
-                    ));
-                }
-                let color = match (run.decoration, run.style) {
-                    (RunDecoration::Link, _) => look.link,
-                    (_, TextStyle::Heading(_)) => look.heading,
-                    _ => look.text,
-                };
-                let size = match run.style {
-                    TextStyle::Mono => shown.size * 0.9,
-                    TextStyle::Heading(_) => shown.size * crate::layout::style_scale(run.style),
-                    _ => shown.size,
-                };
-                text(
-                    &mut out,
-                    &run.text,
-                    x,
-                    top + (line.height + size * 0.72) / 2.0,
-                    size,
-                    run.style,
-                    paint(color),
-                );
-            }
-        }
-    }
-
-    if let Some(frame) = laid.frames.first() {
-        let r = frame.rect;
-        let small = 18.0 * frame.scale;
-        let mut muted = frame.look.text;
-        muted[3] = 0.65;
-        let side = 30.0 * frame.scale;
-        let edge = 21.0 * frame.scale;
-        if let Some(header) = &frame.header {
-            text(
-                &mut out,
-                header,
-                r.x + side,
-                r.y + edge + small * 0.95,
-                small,
-                TextStyle::Body,
-                paint(muted),
-            );
-        }
-        if let Some(footer) = &frame.footer {
-            text(
-                &mut out,
-                footer,
-                r.x + side,
-                r.y + r.height - edge - small * 0.4,
-                small,
-                TextStyle::Body,
-                paint(muted),
-            );
-        }
-        if let Some(page) = &frame.page {
-            out.push_str(&format!(
-                r#"<text x="{}" y="{}" font-family="{}" font-size="{small}" text-anchor="end" {}>{}</text>"#,
-                r.x + r.width - side,
-                r.y + r.height - edge - small * 0.4,
-                crate::render::fonts::BODY,
-                paint(muted),
-                html::escape(page)
-            ));
-        }
-    }
-    out.push_str("</svg>");
-    out
+    let typefaces = [
+        (crate::render::fonts::MONO, false),
+        (crate::render::fonts::MONO, true),
+        (crate::render::fonts::BODY, false),
+        (crate::render::fonts::BODY, true),
+    ];
+    chars
+        .iter()
+        .enumerate()
+        .filter(|(_, used)| !used.is_empty())
+        .filter_map(|(index, used)| {
+            let font = crate::render::fonts::EMBEDDED.get(index)?;
+            let small = super::font_embed::subset(font, used).ok()?;
+            let data = super::font_embed::eot(&small).ok()?;
+            let (typeface, bold) = typefaces[index];
+            Some(super::pptx::EmbeddedFace {
+                typeface,
+                bold,
+                data,
+            })
+        })
+        .collect()
 }
 
 /// HTML にする（1 枚 1 区画。印刷すると 1 枚 1 ページ）
@@ -923,8 +742,9 @@ mod tests {
         (document, deck)
     }
 
+    /// 文字を直せる PPTX（v2.7.0 R-01）。見出し・段落・リストが文字の箱になり、1 枚 1 画像ではない
     #[test]
-    fn pptx_has_one_image_per_slide() {
+    fn pptx_holds_editable_text() {
         let (document, deck) = deck(TEXT);
         let bytes = pptx(
             &fixed_measure,
@@ -934,12 +754,45 @@ mod tests {
             None,
             &super::super::Silent,
             ExportRange::All,
+            false,
         )
         .expect("書き出せる");
         assert_eq!(&bytes[..2], b"PK");
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("ppt/fonts/"),
+            "埋め込まない"
+        );
         let text = String::from_utf8_lossy(&bytes);
-        assert!(text.contains("ppt/media/image2.png"));
-        assert!(!text.contains("ppt/media/image3.png"));
+        assert!(text.contains("ppt/slides/slide2.xml"));
+        assert!(!text.contains("ppt/media/"), "絵の無い文書に画像は無い");
+        assert!(text.contains("<a:t>1 枚目</a:t>"));
+        assert!(text.contains("<a:t>本文</a:t>"));
+        assert!(text.contains(r#"<a:buChar char="•"/>"#), "リストは行頭記号");
+        assert!(text.contains("<a:t>1 / 2</a:t>"), "ページ番号");
+        assert!(
+            text.contains(r#"typeface="IBM Plex Sans JP""#),
+            "字体は名前だけ"
+        );
+        // 字体を埋め込む（v2.8.0 R-04）。使った書体だけ（等幅は使っていない）
+        let bytes = pptx(
+            &fixed_measure,
+            &document,
+            &deck,
+            "題",
+            None,
+            &super::super::Silent,
+            ExportRange::All,
+            true,
+        )
+        .expect("書き出せる");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("ppt/fonts/font1.fntdata"));
+        assert!(text.contains(r#"embedTrueTypeFonts="1""#));
+        assert!(
+            !text.contains(r#"<p:font typeface="PlemolJP""#),
+            "使っていない書体は入れない"
+        );
+        assert!(bytes.len() < 2 * 1024 * 1024, "{} バイト", bytes.len());
     }
 
     const TEXT: &str = "---\nmarp: true\ntheme: gaia\npaginate: true\n---\n\n# 1 枚目\n\n本文\n\n---\n\n<!-- _class: invert -->\n\n## 2 枚目\n\n- 点\n";

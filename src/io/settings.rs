@@ -350,7 +350,7 @@ impl std::fmt::Display for SlideExport {
         f.write_str(match self {
             Self::Pdf => "PDF（1 枚 1 ページ）",
             Self::Html => "HTML（1 枚 1 区画）",
-            Self::Pptx => "PPTX（1 枚 1 画像）",
+            Self::Pptx => "PPTX（文字を直せる）",
         })
     }
 }
@@ -403,21 +403,25 @@ pub enum DiffLayout {
     SideBySide,
     /// 1 列に混ぜる（読むだけ）
     Unified,
+    /// 描いた結果を左右に並べる（読むだけ。v2.6.0 R-04 b）
+    Preview,
 }
 
 impl DiffLayout {
-    pub const ALL: [DiffLayout; 2] = [Self::SideBySide, Self::Unified];
+    pub const ALL: [DiffLayout; 3] = [Self::SideBySide, Self::Unified, Self::Preview];
 
     fn as_str(self) -> &'static str {
         match self {
             Self::SideBySide => "side_by_side",
             Self::Unified => "unified",
+            Self::Preview => "preview",
         }
     }
 
     pub(crate) fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "unified" => Self::Unified,
+            "preview" => Self::Preview,
             _ => Self::SideBySide,
         }
     }
@@ -428,6 +432,7 @@ impl std::fmt::Display for DiffLayout {
         f.write_str(match self {
             Self::SideBySide => "左右に並べる",
             Self::Unified => "1 列に混ぜる（読むだけ）",
+            Self::Preview => "プレビュー（読むだけ）",
         })
     }
 }
@@ -601,6 +606,17 @@ pub struct Settings {
     pub status_format: String,
     /// 編集画面に記法の色を付けるか（v2.3.0 R-05 C-1）
     pub editor_syntax: bool,
+    /// Markdown 以外のファイルに言語ごとの色を付けるか（v2.8.0 R-01。編集画面とプレビュー）
+    pub code_colors: bool,
+    /// HTML の表（`<table>`）を表として描くか（v2.8.0 R-05。切ると原文のまま）
+    pub html_tables: bool,
+    /// 色を付けるブロックの大きさの上限（KB。v2.8.0 R-01。超えたブロックは色無し）
+    pub code_color_limit_kb: u32,
+    /// 色を付ける拡張子（`,` で区切る。`拡張子=言語` で言語を当てる。空なら知っている拡張子は全部。v2.8.0 R-01）
+    pub code_color_extensions: String,
+    /// 検索の一致の色・いまの一致の色（`#rrggbb`。字の下に敷く。空ならテーマに合わせる。v2.8.0 R-02）
+    pub search_match_color: String,
+    pub search_current_color: String,
     /// 編集画面の上に桁の目盛りを出すか（v2.3.0 R-07）
     pub editor_ruler: bool,
     /// 指定した桁に縦線を引くか（v2.3.0 R-07）
@@ -634,6 +650,8 @@ pub struct Settings {
     pub command_recent: Vec<String>,
     /// プレビューを押して編集画面の行へ飛ぶか・その押し方（v2.4.0 R-03）
     pub preview_jump: bool,
+    /// プレビューと WYSIWYG の頭に frontmatter の欄を出すか（v2.6.0 R-03）
+    pub frontmatter_panel: bool,
     pub preview_jump_click: JumpClick,
     /// キャレットを追ってプレビューを送るか（v2.4.0 R-03。スクロール同期を入れているとき）
     pub preview_follow_caret: bool,
@@ -661,10 +679,14 @@ pub struct Settings {
     pub marp_present_info: bool,
     /// 「スライドを書き出す」の既定の形式（v2.4.0 R-07 7e）
     pub marp_export_format: SlideExport,
+    /// PPTX に字体を埋め込むか（使った字だけ。v2.8.0 R-04）
+    pub pptx_embed_fonts: bool,
     /// URL を開く（v2.4.0 R-09）。最近開いた URL を覚えるか・その一覧（新しい順）・画像も URL から取るか
     pub remember_urls: bool,
     pub recent_urls: Vec<String>,
     pub remote_images: bool,
+    /// 中継先を OS に聞くか（v2.6.0 R-02。Windows だけ効く。自動構成スクリプトも OS が評価する）
+    pub url_system_proxy: bool,
     /// WYSIWYG（v2.5.0 R-01）。使うか・入れる文書の大きさの上限（KB）・新しく書くときの記法
     pub wysiwyg: bool,
     pub wysiwyg_limit_kb: u32,
@@ -697,6 +719,12 @@ pub struct Settings {
     pub diff_ignore_eol: bool,
     /// 書き出すパッチの形式（R-03）
     pub patch_format: PatchFormat,
+    /// フォルダーの比較で比べない名前（`,` で区切る。`*` が使える。v2.6.0 R-04 a）
+    pub diff_folder_ignore: String,
+    /// マージの衝突を、結果に記号（`<<<<<<<` …）でも書くか（v2.6.0 R-04 c。切っていれば 3 面だけに印）
+    pub merge_markers: bool,
+    /// フォルダーの比較からまとめて写す前に確かめるか（v2.7.0 R-03）
+    pub diff_copy_confirm: bool,
 
     /// キー割り当て（R-10）。**既定から変えたものだけ**持つ。
     /// 鍵は操作の名前、値は打鍵（`Ctrl+Shift+S`）
@@ -770,6 +798,10 @@ pub const AUTOSAVE_MAX: u32 = 3600;
 pub const MCP_HTTP_PORT: u16 = 39217;
 /// WYSIWYG に入れる文書の大きさの上限（KB）の既定と範囲（v2.5.0 R-01）
 pub const WYSIWYG_LIMIT_KB: u32 = 1024;
+
+/// 色を付けるブロックの大きさの上限の既定（KB。v2.8.0 R-01）と、選べる範囲
+pub const CODE_COLOR_LIMIT_KB: u32 = 64;
+pub const CODE_COLOR_LIMIT_RANGE: std::ops::RangeInclusive<u32> = 4..=4096;
 pub const WYSIWYG_LIMIT_MAX_KB: u32 = 10 * 1024;
 pub const MCP_HTTP_PORT_MIN: u16 = 1024;
 pub const MCP_HTTP_PORT_MAX: u16 = 49151;
@@ -827,6 +859,12 @@ impl Default for Settings {
             status_format: DEFAULT_STATUS_FORMAT.to_owned(),
             // **既定で付ける**（C-1）
             editor_syntax: true,
+            code_colors: true,
+            html_tables: true,
+            code_color_limit_kb: CODE_COLOR_LIMIT_KB,
+            code_color_extensions: String::new(),
+            search_match_color: String::new(),
+            search_current_color: String::new(),
             editor_ruler: false,
             editor_guides: false,
             editor_guide_columns: vec![80],
@@ -845,6 +883,7 @@ impl Default for Settings {
             backdrop: super::backdrop::Backdrop::default(),
             command_recent: Vec::new(),
             preview_jump: true,
+            frontmatter_panel: true,
             preview_jump_click: JumpClick::Double,
             preview_follow_caret: true,
             figure_zoom: true,
@@ -862,9 +901,11 @@ impl Default for Settings {
             marp_assist: true,
             marp_present_info: false,
             marp_export_format: SlideExport::Pdf,
+            pptx_embed_fonts: true,
             remember_urls: true,
             recent_urls: Vec::new(),
             remote_images: false,
+            url_system_proxy: true,
             wysiwyg: true,
             wysiwyg_limit_kb: WYSIWYG_LIMIT_KB,
             wysiwyg_table_align: false,
@@ -888,6 +929,9 @@ impl Default for Settings {
             diff_ignore_case: false,
             diff_ignore_eol: false,
             patch_format: PatchFormat::Unified,
+            diff_folder_ignore: ".git, node_modules, target".to_owned(),
+            merge_markers: false,
+            diff_copy_confirm: true,
             keys: BTreeMap::new(),
         }
     }
@@ -1046,6 +1090,22 @@ impl Settings {
             self.autosave_seconds,
         );
         out.push_str(&format!("editor_syntax = {}\n", self.editor_syntax));
+        out.push_str(&format!("code_colors = {}\n", self.code_colors));
+        out.push_str(&format!("pptx_embed_fonts = {}\n", self.pptx_embed_fonts));
+        out.push_str(&format!("html_tables = {}\n", self.html_tables));
+        out.push_str(&format!(
+            "code_color_limit_kb = {}\n",
+            self.code_color_limit_kb
+        ));
+        for (key, value) in [
+            ("code_color_extensions", &self.code_color_extensions),
+            ("search_match_color", &self.search_match_color),
+            ("search_current_color", &self.search_current_color),
+        ] {
+            if quotable(value) {
+                out.push_str(&format!("{key} = \"{value}\"\n"));
+            }
+        }
         // 列番号（v2.3.0 R-07）
         out.push_str(&format!(
             "editor_ruler = {}\neditor_guides = {}\neditor_guide_columns = \"{}\"\n",
@@ -1081,6 +1141,15 @@ impl Settings {
             self.diff_ignore_eol,
             self.patch_format.as_str(),
         ));
+        // フォルダーの比較とマージ（v2.6.0 R-04）
+        if quotable(&self.diff_folder_ignore) {
+            out.push_str(&format!(
+                "diff_folder_ignore = \"{}\"\n",
+                self.diff_folder_ignore
+            ));
+        }
+        out.push_str(&format!("merge_markers = {}\n", self.merge_markers));
+        out.push_str(&format!("diff_copy_confirm = {}\n", self.diff_copy_confirm));
         if let Some(last) = self.last_window {
             out.push_str(&format!(
                 "last_x = {}\nlast_y = {}\nlast_width = {}\nlast_height = {}\n",
@@ -1130,10 +1199,11 @@ impl Settings {
         out.push_str(&format!("command_recent = \"{}\"\n", recent.join("|")));
         // プレビューから編集の行へ（v2.4.0 R-03）
         out.push_str(&format!(
-            "preview_jump = {}\npreview_jump_click = \"{}\"\npreview_follow_caret = {}\n",
+            "preview_jump = {}\npreview_jump_click = \"{}\"\npreview_follow_caret = {}\nfrontmatter_panel = {}\n",
             self.preview_jump,
             self.preview_jump_click.as_str(),
             self.preview_follow_caret,
+            self.frontmatter_panel,
         ));
         // 図の拡大（v2.4.0 R-04）
         out.push_str(&format!(
@@ -1191,9 +1261,10 @@ impl Settings {
         ));
         // URL を開く（v2.4.0 R-09）。**URL は空白で区切る**（URL に空白は入らない。" は %22 にする）
         out.push_str(&format!(
-            "remember_urls = {}\nremote_images = {}\nrecent_urls = \"{}\"\n",
+            "remember_urls = {}\nremote_images = {}\nurl_system_proxy = {}\nrecent_urls = \"{}\"\n",
             self.remember_urls,
             self.remote_images,
+            self.url_system_proxy,
             self.recent_urls
                 .iter()
                 .map(|url| url.replace('"', "%22").replace('\\', "%5C"))
@@ -1245,7 +1316,7 @@ impl Settings {
     /// 外部クレートを使わない。読むのは平らな数項目だけで、
     /// TOML の全機能は要らない。
     pub fn from_toml(text: &str) -> Self {
-        const BOOL_KEYS: [&str; 51] = [
+        const BOOL_KEYS: [&str; 58] = [
             "toc_visible",
             "scroll_sync",
             "show_invisibles",
@@ -1265,6 +1336,9 @@ impl Settings {
             "diff_ignore_case",
             "diff_ignore_eol",
             "editor_syntax",
+            "code_colors",
+            "pptx_embed_fonts",
+            "html_tables",
             "editor_ruler",
             "editor_guides",
             "lint_enabled",
@@ -1273,6 +1347,7 @@ impl Settings {
             "bg_scroll",
             // プレビューから編集の行へ（v2.4.0 R-03）
             "preview_jump",
+            "frontmatter_panel",
             "preview_follow_caret",
             // 図の拡大（v2.4.0 R-04）
             "figure_zoom",
@@ -1292,6 +1367,9 @@ impl Settings {
             // URL を開く（v2.4.0 R-09）
             "remember_urls",
             "remote_images",
+            "url_system_proxy",
+            "merge_markers",
+            "diff_copy_confirm",
             // WYSIWYG（v2.5.0 R-01）
             "wysiwyg",
             "wysiwyg_table_align",
@@ -1370,6 +1448,29 @@ impl Settings {
                 "paste_images" => settings.paste_images = flag,
                 "image_markup" => settings.image_markup = ImageMarkup::parse(value),
                 "editor_syntax" => settings.editor_syntax = flag,
+                "code_colors" => settings.code_colors = flag,
+                "pptx_embed_fonts" => settings.pptx_embed_fonts = flag,
+                "html_tables" => settings.html_tables = flag,
+                "code_color_limit_kb" => {
+                    if let Some(limit) = ranged(value, CODE_COLOR_LIMIT_RANGE) {
+                        settings.code_color_limit_kb = limit;
+                    }
+                }
+                "code_color_extensions" => settings.code_color_extensions = value.to_owned(),
+                // **読めない色は既定**（テーマに合わせる）
+                "search_match_color" | "search_current_color" => {
+                    let value =
+                        if value.is_empty() || crate::io::palette::parse_hex(value).is_some() {
+                            value.to_owned()
+                        } else {
+                            String::new()
+                        };
+                    if key == "search_match_color" {
+                        settings.search_match_color = value;
+                    } else {
+                        settings.search_current_color = value;
+                    }
+                }
                 "editor_ruler" => settings.editor_ruler = flag,
                 "lint_enabled" => settings.lint_enabled = flag,
                 // 知らない番号は落とす（規則を減らしたとき）
@@ -1413,6 +1514,9 @@ impl Settings {
                 "diff_ignore_case" => settings.diff_ignore_case = flag,
                 "diff_ignore_eol" => settings.diff_ignore_eol = flag,
                 "patch_format" => settings.patch_format = PatchFormat::parse(value),
+                "diff_folder_ignore" => settings.diff_folder_ignore = value.to_owned(),
+                "merge_markers" => settings.merge_markers = flag,
+                "diff_copy_confirm" => settings.diff_copy_confirm = flag,
                 "watch_external" => settings.watch_external = flag,
                 "reload_unmodified" => settings.reload_unmodified = flag,
                 "autosave" => settings.autosave = flag,
@@ -1426,6 +1530,7 @@ impl Settings {
                     }
                 }
                 "preview_jump" => settings.preview_jump = flag,
+                "frontmatter_panel" => settings.frontmatter_panel = flag,
                 "preview_jump_click" => settings.preview_jump_click = JumpClick::parse(value),
                 "preview_follow_caret" => settings.preview_follow_caret = flag,
                 "figure_zoom" => settings.figure_zoom = flag,
@@ -1469,6 +1574,7 @@ impl Settings {
                 "emphasis_marker" => settings.emphasis_marker = Marker::parse(value),
                 "strong_marker" => settings.strong_marker = Marker::parse(value),
                 "remote_images" => settings.remote_images = flag,
+                "url_system_proxy" => settings.url_system_proxy = flag,
                 "recent_urls" => {
                     settings.recent_urls = value
                         .trim()
@@ -1891,6 +1997,12 @@ mod tests {
             title_format: "{path} {date:yyyy-mm-dd}".to_owned(),
             status_format: "{name} ・ {time}".to_owned(),
             editor_syntax: false,
+            code_colors: false,
+            html_tables: false,
+            code_color_limit_kb: 256,
+            code_color_extensions: "rs, conf=sh".to_owned(),
+            search_match_color: "#112233".to_owned(),
+            search_current_color: "#445566".to_owned(),
             editor_ruler: true,
             editor_guides: true,
             editor_guide_columns: vec![72, 100],
@@ -1927,6 +2039,7 @@ mod tests {
                 "ファイル › 新規".to_owned(),
             ],
             preview_jump: false,
+            frontmatter_panel: false,
             preview_jump_click: JumpClick::Alt,
             preview_follow_caret: false,
             figure_zoom: false,
@@ -1949,6 +2062,7 @@ mod tests {
             marp_assist: false,
             marp_present_info: true,
             marp_export_format: SlideExport::Pptx,
+            pptx_embed_fonts: false,
             remember_urls: false,
             wysiwyg: false,
             wysiwyg_limit_kb: 2048,
@@ -1970,11 +2084,15 @@ mod tests {
             strong_marker: Marker::Second,
             recent_urls: vec!["https://example.com/a.md".to_owned()],
             remote_images: true,
+            url_system_proxy: false,
             diff_layout: DiffLayout::Unified,
             diff_whitespace: DiffWhitespace::IgnoreChanges,
             diff_ignore_case: true,
             diff_ignore_eol: true,
             patch_format: PatchFormat::Context,
+            diff_folder_ignore: "dist, *.tmp".to_owned(),
+            merge_markers: true,
+            diff_copy_confirm: false,
             keys,
         };
         assert_eq!(Settings::from_toml(&settings.to_toml()), settings);

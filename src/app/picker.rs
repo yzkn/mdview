@@ -29,6 +29,8 @@ pub struct Picker {
     pub file_name: Option<String>,
     /// 最初に開く場所
     pub directory: Option<PathBuf>,
+    /// フォルダーを選ぶ（v2.6.0 R-04 a。フォルダーの比較）
+    pub folder: bool,
 }
 
 impl Picker {
@@ -48,6 +50,18 @@ impl Picker {
             ],
             file_name: None,
             directory: None,
+            folder: false,
+        }
+    }
+
+    /// フォルダーを選ぶ（v2.6.0 R-04 a）
+    pub fn folder() -> Self {
+        Self {
+            save: false,
+            filters: Vec::new(),
+            file_name: None,
+            directory: None,
+            folder: true,
         }
     }
 
@@ -67,6 +81,7 @@ impl Picker {
             ],
             file_name: None,
             directory: None,
+            folder: false,
         }
     }
 
@@ -77,6 +92,7 @@ impl Picker {
             filters: vec![(label.to_owned(), vec![extension.to_owned()])],
             file_name: Some(file_name),
             directory: None,
+            folder: false,
         }
     }
 
@@ -106,7 +122,10 @@ impl Picker {
         }
 
         // 保存と選択で戻りの型が違うので、ここで同じ形へ包む
-        if self.save {
+        if self.folder {
+            let chosen = dialog.pick_folder();
+            Box::pin(async move { chosen.await.map(|handle| handle.path().to_path_buf()) })
+        } else if self.save {
             let chosen = dialog.save_file();
             Box::pin(async move { chosen.await.map(|handle| handle.path().to_path_buf()) })
         } else {

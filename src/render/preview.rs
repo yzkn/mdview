@@ -96,6 +96,11 @@ impl Palette {
     }
 }
 
+/// 字句の役割の色（本文の色から明るいテーマか暗いテーマかを決める）。PPTX の書き出しも使う（v2.7.0 R-01）
+pub fn token_color(role: TokenRole, text: Color) -> Color {
+    Palette::new(text).of(role, text)
+}
+
 /// 明るさ（ITU-R BT.709）。テーマが明るいか暗いかの判定に使う。
 fn luminance(color: Color) -> f32 {
     0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
@@ -449,6 +454,10 @@ pub struct PreviewView<'a> {
     embeds: Option<&'a dyn EmbedLookup>,
     /// 相対パスの基準（文書の置き場）
     base_dir: Option<&'a std::path::Path>,
+    /// Markdown 以外のファイルの色付け（v2.8.0 R-01）
+    code_language: Option<crate::layout::PlainColors<'a>>,
+    /// 検索の一致の色（v2.8.0 R-02。`None` ならテーマに合わせる）
+    match_color: Option<Color>,
     text_size: f32,
     on_action: Box<dyn Fn(PreviewAction) -> super::Message + 'a>,
     /// 検索語。**表示されている文字を探す**（§8.2）
@@ -476,6 +485,10 @@ pub struct PreviewView<'a> {
     wysiwyg: Option<WysiwygCaret<'a>>,
     /// 原文の小窓を開く図・数式（ブロックの番号と、前に描けた原文。v2.5.1 R-01）
     figure: Option<(usize, &'a str)>,
+    /// 描かない frontmatter の終わり（欄に出しているとき。v2.6.0 R-03）
+    hide_front: Option<usize>,
+    /// ブロックに付ける色の帯（プレビューでの比較。v2.6.0 R-04 b）
+    block_marks: &'a [(usize, Color)],
 }
 
 /// WYSIWYG のキャレット（原文の位置）。選んでいれば、掴んだ所も
@@ -511,6 +524,8 @@ impl<'a> PreviewView<'a> {
             document,
             state,
             embeds: None,
+            code_language: None,
+            match_color: None,
             base_dir: None,
             text_size: Self::BASE_SIZE,
             on_action: Box::new(on_action),
@@ -527,7 +542,21 @@ impl<'a> PreviewView<'a> {
             present_info: None,
             wysiwyg: None,
             figure: None,
+            hide_front: None,
+            block_marks: &[],
         }
+    }
+
+    /// ブロックに色の帯を付ける（プレビューでの比較。v2.6.0 R-04 b）。`(ブロックの番号, 色)`
+    pub fn block_marks(mut self, marks: &'a [(usize, Color)]) -> Self {
+        self.block_marks = marks;
+        self
+    }
+
+    /// frontmatter を描かない（欄に出しているとき。v2.6.0 R-03）。`end` は frontmatter の終わり
+    pub fn hide_front(mut self, end: Option<usize>) -> Self {
+        self.hide_front = end;
+        self
     }
 
     /// 図・数式の下に原文の小窓を開く（v2.5.1 R-01）。`held` は前に描けた原文（書きかけの間はこれを描く）
@@ -826,6 +855,18 @@ impl<'a> PreviewView<'a> {
         self
     }
 
+    /// Markdown 以外のファイルを言語ごとに着色する（v2.8.0 R-01）
+    pub fn code_language(mut self, colors: Option<crate::layout::PlainColors<'a>>) -> Self {
+        self.code_language = colors;
+        self
+    }
+
+    /// 検索の一致の色（v2.8.0 R-02）
+    pub fn match_color(mut self, color: Option<Color>) -> Self {
+        self.match_color = color;
+        self
+    }
+
     /// 検索語を差す（§8.2）。
     ///
     /// **原文ではなく表示された文字を探す。** プレビューでは記法が消えており、
@@ -904,6 +945,7 @@ impl<'a> PreviewView<'a> {
             indent_unit: 24.0 * factor,
             base_dir: self.base_dir,
             embeds: self.embeds,
+            plain_colors: self.code_language,
         };
 
         let doc_y = self.state.anchor.to_doc_y(heights);
@@ -930,7 +972,19 @@ impl<'a> PreviewView<'a> {
                 .figure
                 .filter(|(open, _)| *open == index)
                 .and_then(|(_, held)| layout_figure_editor(block, &peek, held, &cx));
-            let laid_out = if let Some(figure) = figure {
+            let hidden = self.hide_front.is_some_and(|end| block.bytes.end <= end);
+            let laid_out = if hidden {
+                // 欄に出している frontmatter（v2.6.0 R-03）。高さを持たない
+                crate::layout::LaidOutBlock {
+                    height: 0.0,
+                    lines: Vec::new(),
+                    quote_bar: false,
+                    code_background: false,
+                    rules: Vec::new(),
+                    embed: None,
+                    editor: None,
+                }
+            } else if let Some(figure) = figure {
                 requests.extend(figure.requests);
                 state.figure_drawn = figure.drawn;
                 figure.laid
@@ -1830,6 +1884,35 @@ where
                         );
                     }
 
+                    // 比べた違いの色の帯（v2.6.0 R-04 b）。左に太い線、ブロック全体に薄い地
+                    if let Some((_, color)) = self
+                        .block_marks
+                        .iter()
+                        .find(|(block, _)| block == block_index)
+                    {
+                        let height = laid_out.height.max(1.0);
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(left - 6.0, y - 2.0),
+                                    Size::new(shown.width.max(0.0) + 8.0, height),
+                                ),
+                                ..Default::default()
+                            },
+                            *color,
+                        );
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle::new(
+                                    Point::new(left - 6.0, y - 2.0),
+                                    Size::new(3.0, height),
+                                ),
+                                ..Default::default()
+                            },
+                            Color { a: 0.9, ..*color },
+                        );
+                    }
+
                     // 図・数式の原文の小窓の枠（v2.5.1 R-01）
                     if let Some(editor) = laid_out.editor {
                         renderer.fill_quad(
@@ -1994,10 +2077,10 @@ where
                                             ),
                                             ..Default::default()
                                         },
-                                        Color {
+                                        self.match_color.unwrap_or(Color {
                                             a: 0.30,
                                             ..text_color
-                                        },
+                                        }),
                                     );
                                 }
                             }

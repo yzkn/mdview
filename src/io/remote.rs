@@ -4,9 +4,13 @@
 //! - GitHub・GitLab・gist の画面の URL は、中身（raw）の URL に読み替える
 //! - 大きすぎるもの（`TEXT_LIMIT`・`IMAGE_LIMIT` 超）は読まない。待つのは `TIMEOUT` まで
 //! - 証明書は OS の確かめ方に任せる（業務の中継が差し込む証明書も、OS が信じていれば通る）
-//! - 中継（プロキシ）は環境変数 `HTTPS_PROXY`・`HTTP_PROXY`・`NO_PROXY` に従い、無ければ Windows の
-//!   プロキシの設定（手動の設定。自動構成スクリプトは読めない）に従う
+//! - 中継（プロキシ）は環境変数 `HTTPS_PROXY`・`HTTP_PROXY`・`NO_PROXY` に従い、無ければ（設定で入れていれば）
+//!   **OS に聞く**（Windows・macOS は自動構成スクリプト・自動検出・手動の設定のどれでも。Linux は GNOME の手動の設定。
+//!   v2.6.0 R-02・v2.7.0 R-04。`super::system_proxy`）
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use ureq::ResponseExt;
@@ -17,6 +21,48 @@ pub const TEXT_LIMIT: u64 = 20 * 1024 * 1024;
 pub const IMAGE_LIMIT: u64 = 20 * 1024 * 1024;
 /// 待つ長さ（つなぐ・受け取るの合わせて）
 const TIMEOUT: Duration = Duration::from_secs(20);
+
+/// 中継先を OS に聞くか（設定。v2.6.0 R-02）
+static SYSTEM_PROXY: AtomicBool = AtomicBool::new(true);
+
+/// 中継先を OS に聞くか（アプリが設定に合わせて呼ぶ）
+pub fn use_system_proxy(on: bool) {
+    SYSTEM_PROXY.store(on, Ordering::Relaxed);
+}
+
+/// つなぐときの中継先と、その名前（知らせに出す）。直接つなぐなら `(None, None)`
+fn proxy_for(url: &str) -> (Option<ureq::Proxy>, Option<String>) {
+    // 環境変数があれば、それを先に使う（いままでと同じ）
+    if let Some(proxy) = ureq::Proxy::try_from_env() {
+        return (Some(proxy), Some("環境変数の中継".to_owned()));
+    }
+    if !SYSTEM_PROXY.load(Ordering::Relaxed) {
+        return (None, None);
+    }
+    // **相手の名前ごとに覚える。** 自動構成スクリプトは取ってきて評価するので、画像ごとに聞くと遅い
+    type Cache = Mutex<HashMap<(bool, String), Option<String>>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let key = (
+        url.trim().to_ascii_lowercase().starts_with("https://"),
+        super::system_proxy::host_of(url),
+    );
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let known = cache.lock().ok().and_then(|map| map.get(&key).cloned());
+    let address = match known {
+        Some(address) => address,
+        None => {
+            let address = super::system_proxy::proxy_for(url);
+            if let Ok(mut map) = cache.lock() {
+                map.insert(key, address.clone());
+            }
+            address
+        }
+    };
+    match address.and_then(|address| Some((ureq::Proxy::new(&address).ok()?, address))) {
+        Some((proxy, address)) => (Some(proxy), Some(format!("OS の設定の中継 {address}"))),
+        None => (None, None),
+    }
+}
 
 /// URL として読めるか（`http://`・`https://` で始まる）
 pub fn is_url(text: &str) -> bool {
@@ -112,6 +158,12 @@ pub fn fetch(url: &str, limit: u64) -> Result<(Vec<u8>, String), String> {
     if !is_url(url) {
         return Err("http:// か https:// で始まる URL を指定してください".to_owned());
     }
+    let (proxy, via) = proxy_for(url);
+    // つなげなかったときは、どの中継を使ったかも出す
+    let describe = |error: &ureq::Error| match &via {
+        Some(via) => format!("{}（{via}）", describe(error)),
+        None => describe(error),
+    };
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .tls_config(
@@ -120,7 +172,7 @@ pub fn fetch(url: &str, limit: u64) -> Result<(Vec<u8>, String), String> {
                 .build(),
         )
         .user_agent(concat!("mdview/", env!("CARGO_PKG_VERSION")))
-        .proxy(ureq::Proxy::try_from_env())
+        .proxy(proxy)
         .build()
         .into();
     let mut response = agent.get(url).call().map_err(|error| describe(&error))?;

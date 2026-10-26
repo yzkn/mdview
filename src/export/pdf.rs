@@ -179,6 +179,7 @@ fn lay_out_all(
         indent_unit: INDENT_UNIT,
         base_dir,
         embeds: Some(embeds),
+        plain_colors: None,
     };
 
     let span = range::blocks_of(document.blocks(), selection);

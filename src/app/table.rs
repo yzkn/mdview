@@ -15,12 +15,14 @@ use crate::parse::BlockKind;
 use crate::render::TableEdit;
 
 impl App {
-    /// キャレットのある表（ブロックの添字・原文の頭・原文）。表の中でなければ `None`
+    /// キャレットのある表（ブロックの添字・原文の頭・原文）。表の中でなければ `None`。
+    /// HTML の表（v2.8.0 R-05。段落として読んだ `<table>`）も表とみなす
     fn caret_table(&self) -> Option<(usize, usize, String)> {
         let byte = self.caret_byte();
         let index = self.document.block_at_byte(byte)?;
         let block = self.document.blocks().get(index)?;
-        if block.kind != BlockKind::Table || byte > block.bytes.end {
+        if !matches!(block.kind, BlockKind::Table | BlockKind::Paragraph) || byte > block.bytes.end
+        {
             return None;
         }
         let source = self
@@ -28,12 +30,27 @@ impl App {
             .text()
             .byte_slice(block.bytes.clone())
             .to_string();
+        if block.kind == BlockKind::Paragraph && crate::layout::html_table_of(&source).is_none() {
+            return None;
+        }
         Some((index, block.bytes.start, source))
+    }
+
+    /// キャレットが HTML の表の中か（v2.8.0 R-05）
+    fn caret_in_html_table(&self) -> bool {
+        self.caret_table()
+            .is_some_and(|(_, _, source)| crate::layout::html_table_of(&source).is_some())
     }
 
     /// キャレットのあるセル（中身の行・列。区切りの行にいれば見出しの行）
     fn caret_cell(&self, start: usize, source: &str) -> (usize, usize) {
         let byte = self.caret_byte().saturating_sub(start);
+        // HTML の表（v2.8.0 R-05）。行はそのまま、列は格子の列
+        if let Some(table) = crate::layout::html_table_of(source) {
+            return table.cell_at(byte).map_or((0, 0), |(row, cell)| {
+                (row, table.rows[row].cells[cell].column)
+            });
+        }
         let rows = table::rows(source);
         let line = rows
             .iter()
@@ -81,6 +98,46 @@ impl App {
             return;
         };
         let (row, column) = self.caret_cell(start, &source);
+        // HTML の表（v2.8.0 R-05）。結合したセルのある表は足し消ししない（原文を壊さないため）
+        if let Some(html) = crate::layout::html_table_of(&source) {
+            use crate::parse::html_table as h;
+            let result = match edit {
+                TableEdit::InsertRow { below } => {
+                    h::insert_row(&source, row, below).map(|(out, row)| (out, row, column))
+                }
+                TableEdit::DeleteRow => {
+                    h::delete_row(&source, row).map(|(out, row)| (out, row, column))
+                }
+                TableEdit::InsertColumn { right } => {
+                    h::insert_column(&source, column, right).map(|(out, column)| (out, row, column))
+                }
+                TableEdit::DeleteColumn => {
+                    h::delete_column(&source, column).map(|(out, column)| (out, row, column))
+                }
+                TableEdit::Align(align) => {
+                    h::set_align(&source, column, align).map(|out| (out, row, column))
+                }
+            };
+            let Some((out, row, column)) = result else {
+                let reason = if html.spanned {
+                    "結合したセルのある HTML の表は、行・列を足し消しできません（原文で直してください）"
+                } else {
+                    match edit {
+                        TableEdit::DeleteRow => "最後の 1 行は消せません",
+                        TableEdit::DeleteColumn => "列が 1 つしか無いので消せません",
+                        TableEdit::Align(_) => "もうその寄せ方です",
+                        _ => "表として読めません",
+                    }
+                };
+                self.notice = Some(super::notice::Notice::plain(reason.to_owned()));
+                return;
+            };
+            let range = start..start + source.len();
+            self.replace_range(range, source, out);
+            self.editor.anchor = None;
+            self.place_cell(start, row, column);
+            return;
+        }
         let result = match edit {
             TableEdit::InsertRow { below } => {
                 table::insert_row(&source, row, below).map(|(out, row)| (out, row, column))
@@ -169,7 +226,13 @@ impl App {
 
     /// WYSIWYG で表のセルへ打つ字（`|` を逃がし、改行は空白に）。表の外ならそのまま
     pub(super) fn cell_text(&self, text: &str) -> String {
-        if self.mode == crate::render::ViewMode::Wysiwyg && self.caret_table_cell().is_some() {
+        if self.mode != crate::render::ViewMode::Wysiwyg {
+            return text.to_owned();
+        }
+        // HTML の表は `<` `&` を逃がす（v2.8.0 R-05。結合したセルのある表でも）
+        if self.caret_in_html_table() {
+            crate::parse::html_table::escape_cell(text)
+        } else if self.caret_table_cell().is_some() {
             table::escape_cell(text)
         } else {
             text.to_owned()
@@ -187,7 +250,7 @@ impl App {
         let Some((start, source, map)) = self.block_map(index) else {
             return false;
         };
-        if map.columns.is_none() || range.end > start + source.len() {
+        if !map.cells || range.end > start + source.len() {
             return false;
         }
         let from = map.pos_of(range.start - start);
@@ -432,6 +495,83 @@ mod tests {
         assert_eq!(cell(&app), (2, 0));
         wysiwyg(&mut app, WysiwygAction::Insert("3".to_owned()));
         assert!(text(&app).contains("\n| 3  |   |\n"), "{}", text(&app));
+    }
+
+    const HTML: &str =
+        "前\n\n<table>\n  <tr><th>a</th><th>b</th></tr>\n  <tr><td>1</td><td>2</td></tr>\n</table>\n\n後\n";
+
+    /// HTML の表（v2.8.0 R-05）。セルへ打つと `<` `&` を逃がし、Tab・Enter で動き、表の道具が効く
+    #[test]
+    fn html_tables_are_edited_like_tables() {
+        let mut app = app_with(HTML);
+        caret_at(&mut app, "<td>1", true);
+        assert_eq!(cell(&app), (1, 0));
+        wysiwyg(&mut app, WysiwygAction::Insert("<&".to_owned()));
+        assert!(
+            text(&app).contains("<td>1&lt;&amp;</td><td>2</td>"),
+            "{}",
+            text(&app)
+        );
+        // セルの境の後退はタグを消さない
+        caret_at(&mut app, "<td>2", false);
+        let before = text(&app);
+        caret_at(&mut app, "2</td>", false);
+        wysiwyg(&mut app, WysiwygAction::Backspace);
+        assert_eq!(text(&app), before, "境は消さない");
+        wysiwyg(&mut app, WysiwygAction::Tab { shift: true });
+        assert_eq!(cell(&app), (1, 0));
+        // 最後の行の Enter は行を足す
+        wysiwyg(&mut app, WysiwygAction::Enter);
+        assert!(
+            text(&app).contains("</tr>\n  <tr><td></td><td></td></tr>\n</table>"),
+            "{}",
+            text(&app)
+        );
+        assert_eq!(cell(&app), (2, 0));
+        // 表の道具（列を足す・寄せる）
+        app.table_command(TableEdit::InsertColumn { right: true });
+        assert!(
+            text(&app).contains("<th>a</th><th></th><th>b</th>"),
+            "{}",
+            text(&app)
+        );
+        app.table_command(TableEdit::Align(crate::edit::table::Align::Right));
+        assert!(
+            text(&app).contains("<th align=\"right\"></th>"),
+            "{}",
+            text(&app)
+        );
+        assert!(
+            text(&app).starts_with("前\n\n<table>\n") && text(&app).ends_with("</table>\n\n後\n"),
+            "表の外は変えない"
+        );
+    }
+
+    /// WYSIWYG のコードブロックで、→ ← はタブを 1 回でまたぐ（広げた空白の途中に止まらない。v2.8.1 R-02）
+    #[test]
+    fn arrows_jump_over_tabs_in_code() {
+        let doc = "```\na\tb\n```\n";
+        let mut app = app_with(doc);
+        caret_at(&mut app, "a", true);
+        let tab = doc.find('\t').unwrap();
+        assert_eq!(app.caret_byte(), tab, "タブの前");
+        wysiwyg(&mut app, WysiwygAction::Right { select: false });
+        assert_eq!(app.caret_byte(), tab + 1, "1 回でタブの後ろ");
+        wysiwyg(&mut app, WysiwygAction::Left { select: false });
+        assert_eq!(app.caret_byte(), tab, "1 回でタブの前");
+    }
+
+    /// 結合したセルのある HTML の表は、字は直せるが、行・列は足し消ししない
+    #[test]
+    fn spanned_html_tables_refuse_row_edits() {
+        let doc = "<table><tr><td colspan=\"2\">a</td></tr><tr><td>b</td><td>c</td></tr></table>\n";
+        let mut app = app_with(doc);
+        caret_at(&mut app, ">b", true);
+        wysiwyg(&mut app, WysiwygAction::Insert("x".to_owned()));
+        assert!(text(&app).contains("<td>bx</td>"));
+        app.table_command(TableEdit::InsertRow { below: true });
+        assert!(app.notice.is_some(), "断る");
+        assert!(text(&app).contains("<td>bx</td><td>c</td></tr></table>"));
     }
 
     /// Enter は下のセルへ。最後の行なら行を足して同じ列へ（セルの中では改行しない）

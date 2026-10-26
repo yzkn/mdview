@@ -112,6 +112,31 @@ pub mod diff;
 pub use crate::edit::navigate::Seek;
 pub use encoding_dialog::{EncodingAction, EncodingChoice};
 pub use features::{ClipImage, FormatKind};
+// 使っているソフトウェアの著作権表示（v2.6.0 R-01）
+mod licenses;
+pub use licenses::{AboutItem, AboutLicense};
+// frontmatter の欄（v2.6.0 R-03）
+mod front_panel;
+pub use front_panel::FrontAction;
+// フォルダーの比較・3 つのファイルのマージ（v2.6.0 R-04）
+mod folder_compare;
+mod merge_compare;
+pub use folder_compare::FolderMessage;
+pub use merge_compare::MergeMessage;
+
+/// 検索の相手（v2.8.0 R-02）。比べる画面では、いま入力のある面を探す
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SearchTarget {
+    /// 編集中の文書
+    #[default]
+    Main,
+    /// 2 面の比較の左・右
+    Diff(crate::diff::Side),
+    /// 1 列に混ぜた比較
+    Unified,
+    /// マージの面
+    Merge(merge_compare::MergePane),
+}
 pub use settings_view::{SettingChange, SettingsPage};
 pub use window::{initial as initial_window, FileStamp};
 
@@ -276,12 +301,24 @@ pub struct App {
     /// **アプリが持つ。** iced の焦点だけに任せると、本文を触っても
     /// 入力欄が焦点を持ったままになり、打鍵が両方へ届く
     search_focused: bool,
+    /// 検索の相手（v2.8.0 R-02。比べる画面ではいま入力のある面）
+    search_target: SearchTarget,
     /// 開いているファイルメニューの折りたたみ
     open_submenu: Option<menu::Submenu>,
     /// 開いているメニュー。**1 つだけ開く**
     open_menu: Option<menu::Menu>,
     /// About を出しているか
     about_open: bool,
+    /// About の「使っているソフトウェア」の絞り込みと、選んだもの（v2.6.0 R-01）
+    about_filter: String,
+    about_pick: Option<AboutItem>,
+    /// frontmatter の欄（v2.6.0 R-03）
+    front: front_panel::FrontPanel,
+    /// Markdown 以外のファイルの言語（v2.8.0 R-01。設定で切っている・分からないなら `None`）と上限（バイト）、
+    /// 編集画面の着色の覚え
+    code_language: Option<String>,
+    code_limit: usize,
+    code_cache: crate::render::syntax::CodeCache,
     /// ダイアログを出している最中か。
     ///
     /// **UI は止まらない**（§10.31）ので、押しっぱなしで 2 つ開けてしまう。
@@ -323,6 +360,9 @@ pub struct App {
     encoding_dialog: Option<encoding_dialog::EncodingDialog>,
     /// diff の画面（v2.3.0 R-02）
     diff_screen: Option<diff::DiffScreen>,
+    /// フォルダーの比較・3 つのファイルのマージの画面（v2.6.0 R-04）
+    folder_screen: Option<folder_compare::FolderScreen>,
+    merge_screen: Option<merge_compare::MergeScreen>,
     /// 外（ほかの窓・試験の口）から比べ方が変わったか（v2.3.0 R-02）。**`update` の出口で比べ直す**
     diff_resync: bool,
     /// Marp の文書のスライド（v2.4.0 R-07 7a）。**本文の版が変わったら作り直す**（`sync_deck`）
@@ -632,6 +672,9 @@ fn browser_from(picker: &picker::Picker, meta: &DocumentMeta) -> browser::Browse
         .clone()
         .or_else(|| meta.base_dir().map(std::path::Path::to_path_buf));
 
+    if picker.folder {
+        return browser::Browser::folder(start);
+    }
     if picker.save {
         browser::Browser::save(
             start,
@@ -1005,9 +1048,16 @@ impl App {
                 draft_touched: None,
                 goto: None,
                 search_focused: false,
+                search_target: SearchTarget::Main,
                 open_submenu: None,
                 open_menu: None,
                 about_open: false,
+                about_filter: String::new(),
+                about_pick: None,
+                front: front_panel::FrontPanel::default(),
+                code_language: None,
+                code_limit: 0,
+                code_cache: crate::render::syntax::CodeCache::default(),
                 picking: false,
                 keymap,
                 folded: std::collections::BTreeSet::new(),
@@ -1024,6 +1074,8 @@ impl App {
                 pending_goto: None,
                 settings_screen: None,
                 diff_screen: None,
+                folder_screen: None,
+                merge_screen: None,
                 diff_resync: false,
                 deck: None,
                 deck_stamp: None,
@@ -1085,6 +1137,14 @@ impl App {
         );
         app.0.spawned = spawned;
         app.0.rebuild_folds();
+        app.0.code_language = app.0.wanted_code_language();
+        // HTML の表（v2.8.0 R-05）。**試験では変えない**（ほかの試験と同じ置き場を使う）
+        if !cfg!(test) {
+            crate::parse::html_table::set_enabled(app.0.settings.html_tables);
+            // プレビューのタブの幅（v2.8.1 R-02）
+            crate::layout::set_tab_width(app.0.settings.tab_width);
+        }
+        app.0.code_limit = app.0.wanted_code_limit();
         // 目 grep（v2.3.0 R-05）。**最初の描画から塗る**（`update` を待たない）
         app.0.refresh_eye();
         app.0.refresh_lint();
@@ -1345,7 +1405,13 @@ impl App {
             );
         }
 
-        let decide = if browser.save { "保存" } else { "開く" };
+        let decide = if browser.folder {
+            "このフォルダーを選ぶ"
+        } else if browser.save {
+            "保存"
+        } else {
+            "開く"
+        };
 
         let body = column![
             row![
@@ -1373,7 +1439,11 @@ impl App {
                 button(text(decide).size(12))
                     .padding([4, 10])
                     .style(fluent::accent)
-                    .on_press(Message::BrowserSubmit),
+                    .on_press(if browser.folder {
+                        Message::BrowserChooseFolder
+                    } else {
+                        Message::BrowserSubmit
+                    }),
                 button(text("取り消し").size(12))
                     .padding([4, 10])
                     .style(fluent::standard)
@@ -1663,19 +1733,9 @@ impl App {
 
     /// このアプリについて（§7.2 の Help / About）。
     ///
-    /// **同梱フォントのライセンス全文を出す。** 配布の義務があり、
-    /// 実行ファイルには入れてあるが、画面に出す口がこれまで無かった
+    /// **使っているソフトウェア（依存と同梱フォント）のライセンス全文を出す**（v2.6.0 R-01）。
+    /// 配布の義務があり、実行ファイルに埋めてある
     fn about_view(&self) -> Element<'_, Message> {
-        let licenses = column(crate::render::fonts::LICENSES.iter().map(|(name, body)| {
-            column![
-                text(*name).size(13),
-                text(*body).size(10).font(crate::render::fonts::mono()),
-            ]
-            .spacing(4)
-            .into()
-        }))
-        .spacing(12);
-
         container(
             container({
                 // 名前と版数は押せる（見た目は字のまま。v2.5.0 R-04）
@@ -1706,9 +1766,7 @@ impl App {
                     .push(text(ABOUT_SEEK_NOTE).size(12));
                 page = match self.egg_view() {
                     Some(view) => page.push(view),
-                    None => page
-                        .push(text("同梱フォントのライセンス").size(14))
-                        .push(scrollable(licenses).height(Length::Fixed(280.0))),
+                    None => page.push(self.licenses_view()),
                 };
                 page.push(
                     row![
@@ -1982,7 +2040,10 @@ impl App {
         // 編集中の文書を差し替える操作は受け付けない
         if self.diff_screen.is_some() && self.settings_screen.is_none() && self.browser.is_none() {
             match diff::route(&message) {
-                diff::Route::Pane => return self.route_to_pane(message),
+                diff::Route::Pane => {
+                    let task = self.route_to_pane(message);
+                    return self.sync_search(task);
+                }
                 diff::Route::Save => {
                     let focus = self
                         .diff_screen
@@ -1993,6 +2054,47 @@ impl App {
                 diff::Route::Blocked => return Task::none(),
                 diff::Route::Pass => {}
             }
+        }
+        // **マージの画面では、編集の操作を結果の面へ回す**（v2.6.0 R-04 c）。次・前の違いと写すは、衝突を移る・取るに読み替える
+        if self.merge_screen.is_some()
+            && self.diff_screen.is_none()
+            && self.settings_screen.is_none()
+            && self.browser.is_none()
+        {
+            use crate::diff::merge::Take;
+            match &message {
+                Message::Diff(diff::DiffMessage::Next) => {
+                    return self.merge_message(MergeMessage::Next)
+                }
+                Message::Diff(diff::DiffMessage::Previous) => {
+                    return self.merge_message(MergeMessage::Previous)
+                }
+                Message::Diff(diff::DiffMessage::CopyTo(crate::diff::Side::Right)) => {
+                    return self.merge_message(MergeMessage::Take(Take::Left))
+                }
+                Message::Diff(diff::DiffMessage::CopyTo(crate::diff::Side::Left)) => {
+                    return self.merge_message(MergeMessage::Take(Take::Right))
+                }
+                _ => {}
+            }
+            match diff::route(&message) {
+                diff::Route::Pane => {
+                    let task = self.route_to_merge(message);
+                    return self.sync_search(task);
+                }
+                diff::Route::Save => return self.merge_message(MergeMessage::Save),
+                diff::Route::Blocked => return Task::none(),
+                diff::Route::Pass => {}
+            }
+        }
+        // フォルダーの比較の画面では、本文を書き換える操作を受け付けない（v2.6.0 R-04 a）
+        if self.folder_screen.is_some()
+            && self.diff_screen.is_none()
+            && self.settings_screen.is_none()
+            && self.browser.is_none()
+            && diff::route(&message) != diff::Route::Pass
+        {
+            return Task::none();
         }
         let task = self.handle(message);
         // 外から比べ方が変わっていたら、出している diff の画面へ移す（v2.3.0 R-02）
@@ -2022,13 +2124,73 @@ impl App {
         // **編集で一致の位置はずれる。** 走査し直すまで印は出さない（§10.38）。
         // ここ 1 か所で見るのは、編集の入口が入力・後退・取り消し・置換と
         // 複数あり、それぞれで思い出すと必ずどれかを落とすためである
+        self.sync_search(task)
+    }
+
+    /// いまの検索の相手（v2.8.0 R-02）。比べる画面ではいま入力のある面
+    fn search_target_now(&self) -> SearchTarget {
+        if let Some(screen) = &self.diff_screen {
+            if screen.is_unified() {
+                SearchTarget::Unified
+            } else {
+                SearchTarget::Diff(screen.focus)
+            }
+        } else if let Some(screen) = &self.merge_screen {
+            SearchTarget::Merge(screen.focus)
+        } else {
+            SearchTarget::Main
+        }
+    }
+
+    /// 検索を相手に合わせる（v2.8.0 R-02）。比べる画面を開いた・閉じたら検索の欄を閉じ、面が変わったら
+    /// 一致を捨てて探し直す。**編集で一致の位置はずれる**ので、走査し直すまで印は出さない（§10.38）
+    fn sync_search(&mut self, task: Task<Message>) -> Task<Message> {
+        let now = self.search_target_now();
+        if now != self.search_target {
+            let old = std::mem::replace(&mut self.search_target, now);
+            if old == SearchTarget::Main || now == SearchTarget::Main {
+                self.search.open = false;
+                self.search_focused = false;
+                self.search.matches.clear();
+                self.search.searching = false;
+                self.search.generation += 1;
+                self.search.stale = false;
+            } else {
+                self.search.invalidate();
+            }
+        }
+        // ここ 1 か所で見るのは、編集の入口が入力・後退・取り消し・置換と
+        // 複数あり、それぞれで思い出すと必ずどれかを落とすためである
         if std::mem::take(&mut self.search.stale) && self.search.open {
             // **既定では飛ばない。** 打った場所に留まる。
             // 「置換」だけは明示の操作なので、次の一致へ移る
             let jump = self.search.take_jump();
-            return Task::batch([task, self.run_search_with(jump)]);
+            let rescan = self.in_search_target(|app| app.run_search_with(jump));
+            return Task::batch([task, rescan]);
         }
         task
+    }
+
+    /// 検索の相手の文書で `f` を行う（比べる画面の面なら、その面を本文と入れ替えて）
+    fn in_search_target<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
+        match self.search_target {
+            SearchTarget::Main => f(self),
+            SearchTarget::Diff(side) => self.in_pane(side, f),
+            SearchTarget::Unified => self.in_unified_pane(f),
+            SearchTarget::Merge(pane) => self.in_merge_pane(pane, f),
+        }
+    }
+
+    /// 面に塗る検索の一致（その面が検索の相手のときだけ。v2.8.0 R-02）
+    pub(super) fn search_highlight(
+        &self,
+        target: SearchTarget,
+    ) -> (&[crate::search::Match], Option<crate::search::Match>) {
+        if self.search.open && self.search_target == target {
+            (&self.search.matches, self.search.current_match())
+        } else {
+            (&[], None)
+        }
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -2142,6 +2304,13 @@ impl App {
                     }
                 }
             }
+            Message::BrowserChooseFolder => {
+                let chosen = self
+                    .browser
+                    .as_ref()
+                    .map(|browser| browser.directory.clone());
+                self.answer_browser(chosen);
+            }
             Message::BrowserCancel => self.answer_browser(None),
             Message::ZoomIn => self.set_zoom(next_zoom(self.settings.zoom, true)),
             Message::ZoomOut => self.set_zoom(next_zoom(self.settings.zoom, false)),
@@ -2181,6 +2350,10 @@ impl App {
                 self.about_open = false;
                 self.egg_reset();
             }
+            Message::AboutLicense(message) => self.about_license(message),
+            Message::FrontMatter(action) => self.front_action(action),
+            Message::Folder(message) => return self.folder_message(message),
+            Message::Merge(message) => return self.merge_message(message),
             // イースターエッグ（v2.5.0 R-04）
             Message::EggPoke(spot) => self.egg_poke(spot),
             Message::EggKey(key) => self.egg_key(key),
@@ -4321,14 +4494,90 @@ impl App {
         !self.document.is_plain()
     }
 
+    /// Markdown 以外のファイルの言語（v2.8.0 R-01）。設定で切っていれば `None`
+    fn wanted_code_language(&self) -> Option<String> {
+        if !self.settings.code_colors || !self.document.is_plain() {
+            return None;
+        }
+        let only = crate::parse::highlight::parse_extensions(&self.settings.code_color_extensions);
+        crate::parse::highlight::language_of_path(self.meta.path.as_deref()?, &only)
+    }
+
+    /// 色を付けるブロックの上限（バイト。v2.8.0 R-01）
+    fn wanted_code_limit(&self) -> usize {
+        self.settings.code_color_limit_kb as usize * 1024
+    }
+
+    /// 組み方・編集画面へ渡す色付け（v2.8.0 R-01）
+    pub(super) fn plain_colors(&self) -> Option<crate::layout::PlainColors<'_>> {
+        self.code_language
+            .as_deref()
+            .map(|language| crate::layout::PlainColors {
+                language,
+                limit: self.code_limit,
+            })
+    }
+
+    /// 検索の一致の色・いまの一致の色（v2.8.0 R-02。設定が空・読めなければ `None` ＝テーマに合わせる）
+    pub(super) fn match_colors(&self) -> (Option<iced::Color>, Option<iced::Color>) {
+        let color = |text: &str| crate::io::palette::parse_hex(text.trim());
+        (
+            color(&self.settings.search_match_color),
+            color(&self.settings.search_current_color),
+        )
+    }
+
+    /// プレビューのタブの幅を設定に合わせる（v2.8.1 R-02）。**変わったら文書を組み直す**（組み方の覚えを捨てるため）
+    pub(super) fn refresh_tab_width(&mut self) {
+        let width = self.settings.tab_width;
+        // 試験では変えない（ほかの試験と同じ置き場を使うため）
+        if cfg!(test) || crate::layout::tab_width() == width.clamp(1, 16) {
+            return;
+        }
+        crate::layout::set_tab_width(width);
+        self.rebuild_document_kind(self.document.is_plain());
+    }
+
+    /// HTML の表を表として描くかを合わせる（v2.8.0 R-05）。**変わったら文書を組み直す**（組み方の覚えを捨てるため）
+    pub(super) fn refresh_html_tables(&mut self) {
+        // 試験では変えない（ほかの試験と同じ置き場を使うため）
+        if cfg!(test) || crate::parse::html_table::enabled() == self.settings.html_tables {
+            return;
+        }
+        crate::parse::html_table::set_enabled(self.settings.html_tables);
+        self.rebuild_document_kind(self.document.is_plain());
+    }
+
+    /// 着色の言語と上限を決め直す（v2.8.0 R-01）。**変わったら文書を組み直す**（プレビューの組み方の覚えを捨てるため）
+    pub(super) fn refresh_code_language(&mut self) {
+        let wanted = self.wanted_code_language();
+        let limit = self.wanted_code_limit();
+        if wanted == self.code_language && (wanted.is_none() || limit == self.code_limit) {
+            self.code_limit = limit;
+            return;
+        }
+        self.code_language = wanted;
+        self.code_limit = limit;
+        self.rebuild_document_kind(self.document.is_plain());
+    }
+
     /// 保存先の拡張子に合わせて読み方を変える（v2.2.0）。**変わらなければ何もしない**
     ///
     /// 本文は同じなので、カーソルとスクロールはそのまま使える
     fn refresh_kind(&mut self) {
         let plain = reads_as_plain(self.meta.path.as_deref());
         if plain == self.document.is_plain() {
+            // 拡張子だけ変わった（`.py` → `.rs`）なら、色の言語だけを決め直す（v2.8.0 R-01）
+            self.refresh_code_language();
             return;
         }
+        self.rebuild_document_kind(plain);
+        self.code_language = self.wanted_code_language();
+        self.code_limit = self.wanted_code_limit();
+    }
+
+    /// 同じ本文で文書を組み直す（読み方・着色の言語が変わったとき）
+    fn rebuild_document_kind(&mut self, plain: bool) {
         self.document = Document::plain_text(self.document.text().to_string(), plain);
         self.preview = PreviewState::default();
         self.rebuild_toc();
@@ -4356,6 +4605,8 @@ impl App {
         };
         self.preview = PreviewState::default();
         self.meta = meta;
+        self.code_language = self.wanted_code_language();
+        self.code_limit = self.wanted_code_limit();
         // **別の文書の取り消しは当たらない**（§4.7）
         self.history.clear();
         self.rebuild_toc();
@@ -4618,6 +4869,8 @@ impl App {
         let selection = chosen;
         // **Marp の文書はスライドとして書き出す**（v2.4.0 R-07 7d。スライドに分けて見せているときだけ）
         let deck = self.deck.clone();
+        // PPTX に字体を埋め込むか（v2.8.0 R-04）
+        let embed_fonts = self.settings.pptx_embed_fonts;
 
         let (sender, receiver) = iced::futures::channel::oneshot::channel();
         std::thread::spawn(move || {
@@ -4645,6 +4898,7 @@ impl App {
                         base_dir.as_deref(),
                         &watcher,
                         selection,
+                        embed_fonts,
                     )
                     .map(|bytes| (bytes, 0)),
                     (Format::Pptx, None) => Err(crate::export::pdf::ExportError::Write(
@@ -4794,6 +5048,21 @@ impl App {
         if previous.toc_visible != self.settings.toc_visible {
             self.rebuild_toc();
         }
+        // HTML の表（v2.8.0 R-05）。ほかの窓で変えたときも効かせる
+        if previous.html_tables != self.settings.html_tables && !cfg!(test) {
+            self.refresh_html_tables();
+        }
+        // タブの幅（v2.8.1 R-02）
+        if previous.tab_width != self.settings.tab_width {
+            self.refresh_tab_width();
+        }
+        // 言語ごとの色（v2.8.0 R-01）。ほかの窓で変えたときも効かせる
+        if previous.code_colors != self.settings.code_colors
+            || previous.code_color_limit_kb != self.settings.code_color_limit_kb
+            || previous.code_color_extensions != self.settings.code_color_extensions
+        {
+            self.refresh_code_language();
+        }
         // 比べ方（v2.3.0 R-02）。**ここでは比べ直さない**（仕事を返せないので `update` の出口で）
         if previous.diff_layout != self.settings.diff_layout
             || previous.diff_whitespace != self.settings.diff_whitespace
@@ -4810,7 +5079,8 @@ impl App {
             || previous.sun_latitude != self.settings.sun_latitude
             || previous.sun_longitude != self.settings.sun_longitude
             || previous.sun_rise_offset != self.settings.sun_rise_offset
-            || previous.sun_set_offset != self.settings.sun_set_offset;
+            || previous.sun_set_offset != self.settings.sun_set_offset
+            || previous.code_color_limit_kb != self.settings.code_color_limit_kb;
         if let Some(screen) = self.settings_screen.as_mut().filter(|_| outside) {
             screen.refresh(&self.settings);
         }
@@ -5317,13 +5587,19 @@ impl App {
                 escape(|| Message::CloseCommandPalette)
             } else if self.figure.is_some() && self.browser.is_none() {
                 escape(|| Message::Figure(FigureMessage::Close))
-            } else if self.diff_screen.is_some() && self.browser.is_none() {
+            } else if self.diff_screen.is_some() && self.browser.is_none() && !self.search.open {
+                // 検索の欄を出していれば、Esc は検索の欄を閉じる（v2.8.0 R-02）
                 escape(|| Message::Diff(diff::DiffMessage::Close))
+            } else if self.merge_screen.is_some() && self.browser.is_none() && !self.search.open {
+                escape(|| Message::Merge(MergeMessage::Close))
+            } else if self.folder_screen.is_some() && self.browser.is_none() {
+                escape(|| Message::Folder(FolderMessage::Close))
             } else if self.completion.is_some() && self.nothing_on_top() {
                 // 打っている所の候補（v2.4.0 R-07 7b）
                 escape(|| Message::CloseCompletion)
-            } else if self.focus_mode && self.nothing_on_top() {
+            } else if self.focus_mode && self.nothing_on_top() && self.figure_hold.is_none() {
                 // **集中モードは Esc でも出られる**（v2.3.0 R-13）。開いたものを先に閉じる
+                // （WYSIWYG の図・数式の小窓はプレビューの部品が Esc を受けて閉じる。v2.6.0 R-05）
                 escape(|| Message::ToggleFocusMode)
             } else {
                 iced::Subscription::none()
@@ -5396,6 +5672,10 @@ impl App {
             )
             // 記法の色（v2.3.0 R-05 C-1）
             .syntax(self.syntax_colors())
+            // Markdown 以外のファイルの言語ごとの色（v2.8.0 R-01）
+            .code_colors(self.plain_colors().map(|colors| (&self.code_cache, colors)))
+            // 検索の一致の色（v2.8.0 R-02）
+            .match_colors(self.match_colors())
             // 目 grep（v2.3.0 R-05 C-3）
             .eye_marks(eye_marks.as_slice())
             // Markdown の検査の波線（v2.3.0 R-11）
@@ -5482,6 +5762,9 @@ impl App {
         let preview = container(
             PreviewView::new(&self.document, &self.preview, Message::Preview)
                 .zoom(preview_factor(&self.settings))
+                // Markdown 以外のファイルの言語ごとの色（v2.8.0 R-01）
+                .code_language(self.plain_colors())
+                .match_color(self.match_colors().0)
                 // 自分の配色（v2.3.0 R-05）
                 .colors(self.preview_colors())
                 .eye_marks(eye_marks.as_slice())
@@ -5505,6 +5788,12 @@ impl App {
                 .code_copy(self.settings.code_copy_button && !wysiwyg)
                 // Marp の文書はスライドの枠で（v2.4.0 R-07 7a）。**WYSIWYG では普通の文書として直す**（v2.5.0 §0.2）
                 .slides(if wysiwyg { None } else { self.deck.as_ref() })
+                // 欄を出している frontmatter は本文では描かない（v2.6.0 R-03。スライドの枠のときはスライドが扱う）
+                .hide_front(if self.deck.is_some() && !wysiwyg {
+                    None
+                } else {
+                    self.front_hidden_end()
+                })
                 // 描いた文字の上で直す（v2.5.0 R-01 a）
                 // 図・数式の原文の小窓（v2.5.1 R-01）
                 .figure_edit(if wysiwyg {
@@ -5530,11 +5819,16 @@ impl App {
         let preview = container(self.with_backdrop(backdrop_view::Layer::Preview, preview))
             .width(Length::Fill)
             .height(Length::Fill);
+        // frontmatter の欄（v2.6.0 R-03）。プレビューの頭に
+        let preview: Element<'_, Message> = match self.front_panel() {
+            Some(panel) => column![panel, preview].into(),
+            None => preview.into(),
+        };
 
         // 表示モード（§8）
         let main: Element<'_, Message> = match self.mode {
             ViewMode::Edit => editor.into(),
-            ViewMode::Preview => preview.into(),
+            ViewMode::Preview => preview,
             // 描いた文字の上で直す（v2.5.0 R-01 a）。上に書式の道具の帯
             ViewMode::Wysiwyg => column![self.wysiwyg_toolbar(), preview].into(),
             ViewMode::Split => {
@@ -5574,6 +5868,11 @@ impl App {
         } else if let Some(screen) = &self.diff_screen {
             // **diff の画面は本文を覆う**（v2.3.0 R-02。設定画面と同じ扱い）
             self.diff_view(screen)
+        } else if let Some(screen) = &self.merge_screen {
+            // マージ・フォルダーの比較の画面も本文を覆う（v2.6.0 R-04）
+            self.merge_view(screen)
+        } else if let Some(screen) = &self.folder_screen {
+            self.folder_view(screen)
         } else if let Some(draft) = &self.draft {
             // **いちばん先に出す**（§18.3）。起動直後に答えるもの
             self.draft_view(draft)
@@ -5724,6 +6023,8 @@ impl App {
         if self.lint.panel
             && self.settings_screen.is_none()
             && self.diff_screen.is_none()
+            && self.merge_screen.is_none()
+            && self.folder_screen.is_none()
             && !self.focus_mode
         {
             body = body.push(self.lint_panel());

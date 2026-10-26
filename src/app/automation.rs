@@ -315,6 +315,15 @@ impl App {
         if self.figure.is_some() {
             return Some(Message::Figure(super::FigureMessage::Close));
         }
+        // マージ・フォルダーの比較（v2.6.0 R-04）。2 面の比較が上に開いていれば、そちらが先（下で見る）
+        if self.diff_screen.is_none() {
+            if self.merge_screen.is_some() && !self.search.open {
+                return Some(Message::Merge(super::MergeMessage::Close));
+            }
+            if self.folder_screen.is_some() && self.goto.is_none() && self.open_menu.is_none() {
+                return Some(Message::Folder(super::FolderMessage::Close));
+            }
+        }
         if self.goto.is_some() {
             return Some(Message::CloseGoto);
         }
@@ -322,7 +331,7 @@ impl App {
             return Some(Message::CloseMenu);
         }
         // diff の画面（v2.3.0 R-02）
-        if self.diff_screen.is_some() {
+        if self.diff_screen.is_some() && !self.search.open {
             return Some(Message::Diff(super::diff::DiffMessage::Close));
         }
         if self.search.open {
@@ -726,6 +735,14 @@ impl App {
                 if browser.save { "保存" } else { "開く" },
                 Message::BrowserSubmit,
             ));
+            // フォルダーを選ぶときは、いまの場所を選ぶ（v2.6.0 R-04 a）
+            if browser.folder {
+                out.push(Element::button(
+                    "browser.choose_folder",
+                    "このフォルダーを選ぶ",
+                    Message::BrowserChooseFolder,
+                ));
+            }
             out.push(Element::button(
                 "browser.cancel",
                 "取り消し",
@@ -782,6 +799,98 @@ impl App {
                     out.push(line_ending);
                 }
             }
+            return self.with_status(out);
+        }
+        // フォルダーの比較の一覧（v2.6.0 R-04 a。2 面の比較・マージが上に開いていなければ）
+        if let (Some(screen), None, None) =
+            (&self.folder_screen, &self.diff_screen, &self.merge_screen)
+        {
+            for (index, entry) in screen.entries.iter().enumerate() {
+                out.push(
+                    Element::new(
+                        format!("folder.row.{index}"),
+                        "listitem",
+                        entry.path.to_string_lossy().replace('\\', "/"),
+                    )
+                    .invoke(Message::Folder(super::FolderMessage::OpenRow(index))),
+                );
+                // 行の選ぶ印（v2.7.0 R-03）
+                let mut select = Element::new(format!("folder.select.{index}"), "checkbox", "選ぶ")
+                    .checked(screen.selected.get(index).copied().unwrap_or(false))
+                    .enabled(screen.copy.is_none());
+                select.set = Some(Box::new(move |value: &str| {
+                    Some(Message::Folder(super::FolderMessage::Select(
+                        index,
+                        value == "true",
+                    )))
+                }));
+                out.push(select);
+            }
+            let idle = !screen.listing && screen.copy.is_none();
+            let selected = screen.selected_count() > 0;
+            for (id, label, message, on) in [
+                (
+                    "folder.select_all",
+                    "全部選ぶ",
+                    super::FolderMessage::SelectAll,
+                    idle,
+                ),
+                (
+                    "folder.select_different",
+                    "違うものだけ選ぶ",
+                    super::FolderMessage::SelectDifferent,
+                    idle,
+                ),
+                (
+                    "folder.copy_right",
+                    "左 → 右へ写す…",
+                    super::FolderMessage::Copy(crate::diff::folder::Direction::LeftToRight),
+                    idle && selected,
+                ),
+                (
+                    "folder.copy_left",
+                    "右 → 左へ写す…",
+                    super::FolderMessage::Copy(crate::diff::folder::Direction::RightToLeft),
+                    idle && selected,
+                ),
+            ] {
+                out.push(Element::button(id, label, Message::Folder(message)).enabled(on));
+            }
+            if let Some(copy) = &screen.copy {
+                if !copy.running && copy.failures.is_empty() {
+                    out.push(Element::button(
+                        "folder.copy_start",
+                        "写す",
+                        Message::Folder(super::FolderMessage::CopyStart),
+                    ));
+                    let mut delete = Element::new(
+                        "folder.copy_delete",
+                        "checkbox",
+                        "写す先にしか無いものを消す",
+                    )
+                    .checked(copy.delete_extra)
+                    .enabled(!copy.plan.extra.is_empty());
+                    delete.set = Some(Box::new(|value: &str| {
+                        Some(Message::Folder(super::FolderMessage::CopyDeleteExtra(
+                            value == "true",
+                        )))
+                    }));
+                    out.push(delete);
+                }
+                out.push(Element::button(
+                    "folder.copy_cancel",
+                    "やめる・止める・閉じる",
+                    Message::Folder(super::FolderMessage::CopyCancel),
+                ));
+            }
+            out.push(
+                Element::button(
+                    "folder.close",
+                    "閉じる",
+                    Message::Folder(super::FolderMessage::Close),
+                )
+                .enabled(!screen.copying()),
+            );
             return self.with_status(out);
         }
         // 図を拡大して見る画面（v2.4.0 R-04。`view` と同じく、ファイル選択の次）
@@ -1288,6 +1397,10 @@ impl App {
             "figure"
         } else if self.diff_screen.is_some() {
             "diff"
+        } else if self.merge_screen.is_some() {
+            "merge"
+        } else if self.folder_screen.is_some() {
+            "folder"
         } else if self.draft.is_some() {
             "draft"
         } else if self.confirming {
@@ -1405,6 +1518,33 @@ impl App {
         state["egg"] = json!(self.egg_name());
         state["egg_word"] = json!(self.egg_word());
         state["egg_score"] = json!(self.egg_score());
+        // フォルダーの比較・マージ（v2.6.0 R-04。出していなければ null）
+        state["folder"] = self.folder_screen.as_ref().map_or(Value::Null, |screen| {
+            json!({
+                "entries": screen.entries.len(),
+                "pending": screen.pending(),
+                "listing": screen.listing,
+                // まとめて写す（v2.7.0 R-03）
+                "selected": screen.selected_count(),
+                "copy": screen.copy.as_ref().map_or(Value::Null, |copy| json!({
+                    "running": copy.running,
+                    "done": copy.done,
+                    "total": copy.total,
+                    "failures": copy.failures.len(),
+                    "create": copy.plan.create.len(),
+                    "overwrite": copy.plan.overwrite.len(),
+                    "extra": copy.plan.extra.len(),
+                    "delete_extra": copy.delete_extra,
+                })),
+            })
+        });
+        state["merge"] = self.merge_screen.as_ref().map_or(Value::Null, |screen| {
+            json!({
+                "conflicts": screen.conflicts(),
+                "remaining": screen.remaining(),
+                "current": screen.current,
+            })
+        });
         // WYSIWYG のキャレット（v2.5.0 R-01 a。WYSIWYG でなければ null）
         state["wysiwyg"] = if self.mode == ViewMode::Wysiwyg {
             self.wysiwyg_state()

@@ -24,6 +24,8 @@ pub mod format;
 pub mod structure;
 // WYSIWYG で表を直す（v2.5.1 R-01）
 pub mod table;
+// frontmatter の欄（v2.6.0 R-03）
+pub mod frontmatter;
 
 /// 対応する括弧を探す（§4.8）。
 ///

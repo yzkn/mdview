@@ -13,7 +13,7 @@ pub enum Format {
     #[default]
     Pdf,
     Html,
-    /// スライドを 1 枚 1 画像で貼った PPTX（v2.4.0 R-07 7e。Marp の文書だけ）
+    /// 文字を直せる PPTX（v2.4.0 R-07 7e・v2.7.0 R-01。Marp の文書だけ）
     Pptx,
 }
 

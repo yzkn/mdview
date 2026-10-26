@@ -69,12 +69,22 @@ pub struct Browser {
     pub open_encoding: Option<crate::io::Encoding>,
     /// 保存するときの文字コード・BOM・改行コード（v2.1.0 R-04）
     pub save_format: (crate::io::Encoding, bool, crate::io::LineEnding),
+    /// フォルダーを選ぶ（v2.6.0 R-04 a）。フォルダーだけを並べ、いまの場所を選ぶ
+    pub folder: bool,
 }
 
 impl Browser {
     /// 開く用。
     pub fn open(start: Option<PathBuf>, extensions: Vec<String>) -> Self {
         Self::new(start, extensions, false, String::new())
+    }
+
+    /// フォルダーを選ぶ用（v2.6.0 R-04 a）
+    pub fn folder(start: Option<PathBuf>) -> Self {
+        let mut browser = Self::new(start, Vec::new(), false, String::new());
+        browser.folder = true;
+        browser.reload();
+        browser
     }
 
     /// 保存用。既定の名前を入れておく。
@@ -98,6 +108,7 @@ impl Browser {
             error: None,
             open_encoding: None,
             save_format: (crate::io::Encoding::Utf8, false, crate::io::LineEnding::Lf),
+            folder: false,
         };
         browser.reload();
         browser
@@ -145,7 +156,11 @@ impl Browser {
     /// いまの場所を読み直す。
     pub fn reload(&mut self) {
         match read_directory(&self.directory, &self.extensions) {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                // フォルダーを選ぶときは、フォルダーだけ
+                if self.folder {
+                    entries.retain(|entry| entry.directory);
+                }
                 self.entries = entries;
                 self.error = None;
             }
@@ -558,6 +573,7 @@ mod tests {
             error: None,
             open_encoding: None,
             save_format: (crate::io::Encoding::Utf8, false, crate::io::LineEnding::Lf),
+            folder: false,
         }
     }
 }

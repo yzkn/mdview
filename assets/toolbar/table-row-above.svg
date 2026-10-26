@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <!-- 表の上に行を足す（mdview の道具の帯。v2.5.1 R-01） -->
-  <rect x="3" y="12" width="18" height="8" rx="1"/>
+  <!-- 表の上に行を足す（mdview の道具の帯。v2.5.1 R-01・v2.6.0 R-05 で描き直し） -->
+  <rect x="3" y="11" width="18" height="10" rx="1.5"/>
   <path d="M3 16h18"/>
-  <path d="M12 3v6"/>
-  <path d="M9 6h6"/>
+  <path d="M12 11v10"/>
+  <path d="M12 2.5v6"/>
+  <path d="M9 5.5h6"/>
 </svg>

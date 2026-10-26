@@ -48,6 +48,34 @@ fn syntaxes() -> &'static SyntaxSet {
     SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
+/// 既定の構文に無い言語（PowerShell・TOML。v2.8.1 R-01。`super::extra_syntax`）。
+/// **既定の構文とは別の集まりにする**（既定に足すと全部を組み直すことになり、最初の着色で待たせる）
+fn extra_syntaxes() -> &'static SyntaxSet {
+    static EXTRA: OnceLock<SyntaxSet> = OnceLock::new();
+    EXTRA.get_or_init(|| {
+        let mut builder = syntect::parsing::SyntaxSetBuilder::new();
+        for syntax in super::extra_syntax::all() {
+            builder.add(syntax);
+        }
+        builder.build()
+    })
+}
+
+/// 言語の名前から、構文とそれが入っている集まりを引く
+fn find_syntax(
+    name: &str,
+) -> Option<(
+    &'static SyntaxSet,
+    &'static syntect::parsing::SyntaxReference,
+)> {
+    let lookup = |set: &'static SyntaxSet| {
+        set.find_syntax_by_token(name)
+            .or_else(|| set.find_syntax_by_extension(name))
+            .map(|syntax| (set, syntax))
+    };
+    lookup(syntaxes()).or_else(|| lookup(extra_syntaxes()))
+}
+
 /// スコープの照合に使う前置き。**1 度だけ作る。**
 ///
 /// 毎回文字列を組み立てると、字句の数だけ確保が走る。
@@ -154,6 +182,8 @@ fn canonical(name: &str) -> &str {
         // **TypeScript の定義は入っていない。** JavaScript で代用する。
         // 型注釈は素の字になるが、無着色よりは読みやすい（DD-OPEN-12）
         "ts" | "typescript" | "tsx" => "javascript",
+        // PowerShell（v2.8.1 R-01）
+        "ps1" | "ps" | "pwsh" | "psm1" | "psd1" => "powershell",
         other => other,
     }
 }
@@ -168,18 +198,13 @@ fn is_plain_language(name: &str) -> bool {
 /// `language` はフェンスの言語名（`rust` / `python` など）。
 /// **知らない言語でも失敗しない。** 着色せずに素の 1 区間として返す。
 pub fn highlight(source: &str, language: Option<&str>) -> Vec<Vec<Token>> {
-    let set = syntaxes();
-    let syntax = language
+    let found = language
         .map(str::trim)
         .map(str::to_ascii_lowercase)
         .filter(|name| !name.is_empty() && !is_plain_language(name))
-        .and_then(|name| {
-            let name = canonical(&name);
-            set.find_syntax_by_token(name)
-                .or_else(|| set.find_syntax_by_extension(name))
-        });
+        .and_then(|name| find_syntax(canonical(&name)));
 
-    let Some(syntax) = syntax else {
+    let Some((set, syntax)) = found else {
         return plain(source);
     };
 
@@ -217,6 +242,59 @@ pub fn highlight(source: &str, language: Option<&str>) -> Vec<Vec<Token>> {
         lines.push(tokens);
     }
     lines
+}
+
+/// 設定「色を付ける拡張子」を読む（v2.8.0 R-01）。`rs, py, conf=sh` → `[(rs, None), (py, None), (conf, Some(sh))]`。
+/// 拡張子は小文字にし、頭の `.` は外す
+pub fn parse_extensions(setting: &str) -> Vec<(String, Option<String>)> {
+    setting
+        .split([',', ';'])
+        .filter_map(|item| {
+            let (extension, language) = match item.split_once('=') {
+                Some((extension, language)) => (extension, Some(language.trim())),
+                None => (item, None),
+            };
+            let extension = extension
+                .trim()
+                .trim_start_matches('.')
+                .to_ascii_lowercase();
+            (!extension.is_empty()).then(|| {
+                (
+                    extension,
+                    language
+                        .filter(|language| !language.is_empty())
+                        .map(str::to_ascii_lowercase),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Markdown 以外のファイルの言語（v2.8.0 R-01）。拡張子（無ければファイルの名前。`Makefile` など）から決め、
+/// **着色できる言語のときだけ**返す。返す名前は [`highlight`] にそのまま渡せる。
+///
+/// `only` は設定「色を付ける拡張子」（[`parse_extensions`]）。**空でなければ、並べた拡張子だけ**に色を付ける。
+/// `拡張子=言語` なら、その言語で色を付ける（知らない拡張子にも当てられる）
+pub fn language_of_path(
+    path: &std::path::Path,
+    only: &[(String, Option<String>)],
+) -> Option<String> {
+    let set = syntaxes();
+    let known = |name: &str| find_syntax(name).is_some();
+    if !only.is_empty() {
+        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+        let (_, language) = only.iter().find(|(listed, _)| *listed == extension)?;
+        let name = canonical(language.as_deref().unwrap_or(&extension)).to_owned();
+        return (known(&name) && !is_plain_language(&name)).then_some(name);
+    }
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+        let name = extension.to_ascii_lowercase();
+        let name = canonical(&name).to_owned();
+        let known = find_syntax(&name).is_some();
+        return (known && !is_plain_language(&name)).then_some(name);
+    }
+    let name = path.file_name()?.to_str()?;
+    set.find_syntax_by_extension(name).map(|_| name.to_owned())
 }
 
 /// 着色しない場合。行ごとに 1 区間だけ返す。
@@ -258,6 +336,101 @@ mod tests {
             .flatten()
             .map(|token| token.role)
             .collect()
+    }
+
+    /// 足した PowerShell・TOML（v2.8.1 R-01）。1 行の中の決まりで色を付ける
+    #[test]
+    fn powershell_and_toml_are_colored() {
+        let roles = |source: &str, language: &str, part: &str| -> Vec<TokenRole> {
+            let lines: Vec<&str> = source.split_inclusive('\n').collect();
+            let highlighted = highlight(source, Some(language));
+            let mut out = Vec::new();
+            for (line, tokens) in lines.iter().zip(&highlighted) {
+                for token in tokens {
+                    if line[token.range.clone()].contains(part) {
+                        out.push(token.role);
+                    }
+                }
+            }
+            out
+        };
+        let ps = "# 注釈\nfunction Get-Thing([string]$Name) {\n  if ($Name -eq 'a') { Write-Output \"x $Name\" }\n  return $true\n}\n";
+        assert!(roles(ps, "powershell", "注釈").contains(&TokenRole::Comment));
+        assert!(
+            roles(ps, "ps1", "function").contains(&TokenRole::Keyword),
+            "ps1 でも引ける"
+        );
+        assert!(roles(ps, "pwsh", "Write-Output").contains(&TokenRole::Function));
+        assert!(roles(ps, "powershell", "$Name").contains(&TokenRole::Type));
+        assert!(roles(ps, "powershell", "-eq").contains(&TokenRole::Keyword));
+        assert!(roles(ps, "powershell", "'a'").contains(&TokenRole::Str));
+        assert!(roles(ps, "powershell", "$true").contains(&TokenRole::Constant));
+        let toml = "# 注釈\n[package]\nname = \"mdview\"\nversion = '2.8.1'\nfast = true\nsize = 1_024\nwhen = 2026-10-26T10:00:00Z\n";
+        assert!(roles(toml, "toml", "注釈").contains(&TokenRole::Comment));
+        assert!(roles(toml, "toml", "[package]").contains(&TokenRole::Keyword));
+        assert!(roles(toml, "toml", "name").contains(&TokenRole::Function));
+        assert!(roles(toml, "toml", "\"mdview\"").contains(&TokenRole::Str));
+        assert!(roles(toml, "toml", "true").contains(&TokenRole::Constant));
+        assert!(roles(toml, "toml", "1_024").contains(&TokenRole::Number));
+        assert!(roles(toml, "toml", "2026-10-26").contains(&TokenRole::Number));
+        assert_covers(ps, Some("powershell"));
+        assert_covers(toml, Some("toml"));
+        assert_eq!(
+            language_of_path(std::path::Path::new("a.psm1"), &[]).as_deref(),
+            Some("powershell")
+        );
+        assert_eq!(
+            language_of_path(std::path::Path::new("Cargo.toml"), &[]).as_deref(),
+            Some("toml")
+        );
+    }
+
+    /// 構文を足しても、読み込みは重くならない（最初の着色で待たせない）
+    #[test]
+    fn building_the_syntaxes_is_quick() {
+        let started = std::time::Instant::now();
+        let set = {
+            let mut builder = syntect::parsing::SyntaxSetBuilder::new();
+            for syntax in super::super::extra_syntax::all() {
+                builder.add(syntax);
+            }
+            builder.build()
+        };
+        let took = started.elapsed();
+        assert!(set.find_syntax_by_token("toml").is_some());
+        eprintln!("構文の読み込み: {took:?}");
+        assert!(took < std::time::Duration::from_millis(50), "{took:?}");
+    }
+
+    /// ファイルの言語は拡張子から決め、着色できないものは `None`（v2.8.0 R-01）
+    #[test]
+    fn languages_come_from_paths() {
+        use std::path::Path;
+        let of = |name: &str| language_of_path(Path::new(name), &[]);
+        assert_eq!(of("src/main.rs").as_deref(), Some("rust"));
+        assert_eq!(of("tool.PY").as_deref(), Some("python"));
+        assert_eq!(of("a.json").as_deref(), Some("json"));
+        assert_eq!(of("run.sh").as_deref(), Some("bash"));
+        assert_eq!(of("notes.txt"), None, "テキストは着色しない");
+        assert_eq!(of("data.unknownext"), None);
+        assert!(of("Makefile").is_some(), "拡張子の無い名前");
+        // 設定で並べたら、並べたものだけ。`拡張子=言語` で知らない拡張子にも当てる
+        let only = parse_extensions(" .RS ; conf = sh,, py=");
+        assert_eq!(
+            only,
+            [
+                ("rs".to_owned(), None),
+                ("conf".to_owned(), Some("sh".to_owned())),
+                ("py".to_owned(), None)
+            ]
+        );
+        let listed = |name: &str| language_of_path(Path::new(name), &only);
+        assert_eq!(listed("a.rs").as_deref(), Some("rust"));
+        assert_eq!(listed("a.json"), None, "並べていない");
+        assert!(listed("app.conf").is_some(), "知らない拡張子に言語を当てる");
+        assert_eq!(listed("Makefile"), None);
+        let language = of("x.rs").unwrap();
+        assert!(roles_of("fn main() {}\n", &language).contains(&TokenRole::Keyword));
     }
 
     /// 各行の区間が連続し、その行を覆う。**描画がこの対応に依存する。**

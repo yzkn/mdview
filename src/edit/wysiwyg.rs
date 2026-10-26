@@ -47,8 +47,11 @@ impl LineMap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockMap {
     pub lines: Vec<LineMap>,
-    /// 表なら列の数（`lines` はセル。行 `r`・列 `c` のセルは `r * 列の数 + c`。v2.5.1 R-01）
+    /// 表なら列の数（`lines` はセル。行 `r`・列 `c` のセルは `r * 列の数 + c`。v2.5.1 R-01）。
+    /// 結合したセルのある HTML の表は `None`（`lines` はあるセルを行ごとに左から。v2.8.0 R-05）
     pub columns: Option<usize>,
+    /// `lines` が表のセルか（セルの境は消さない。v2.8.0 R-05）
+    pub cells: bool,
 }
 
 /// ブロックの中の位置（行・字）
@@ -61,6 +64,10 @@ pub struct Pos {
 /// ブロックの対応を作る。**直せないブロックは `None`**
 pub fn map_block(block: &Block, source: &str) -> Option<BlockMap> {
     match &block.kind {
+        // HTML の表（v2.8.0 R-05）。描き方と同じ答え（読めなければ段落）
+        BlockKind::Paragraph if crate::layout::html_table_of(source).is_some() => {
+            map_html_table(&crate::layout::html_table_of(source)?)
+        }
         BlockKind::Paragraph | BlockKind::Heading(_) | BlockKind::List | BlockKind::Quote => {
             let content = parse_block(source, &block.kind);
             if content.lone_image.is_some() || content.lines.is_empty() {
@@ -96,6 +103,7 @@ pub fn map_block(block: &Block, source: &str) -> Option<BlockMap> {
             Some(BlockMap {
                 lines,
                 columns: None,
+                cells: false,
             })
         }
         BlockKind::Table => map_table(source),
@@ -108,12 +116,26 @@ pub fn map_block(block: &Block, source: &str) -> Option<BlockMap> {
                 let text = raw.trim_end_matches(['\n', '\r']);
                 let mut chars = Vec::new();
                 let mut bytes = Vec::new();
+                let mut synthetic = Vec::new();
+                // タブは描き方と同じ字数に広げる（v2.8.1 R-02）
+                let width = crate::layout::tab_width();
                 for (byte, c) in text.char_indices() {
-                    chars.push(c);
-                    bytes.push(offset + at + byte);
+                    let at_byte = offset + at + byte;
+                    if c == '\t' {
+                        let step = width - chars.len() % width;
+                        // どの空白もタブの前に当てる（最後の 1 つが原文のタブ。キャレットはタブの前か後ろにだけ止まる）
+                        for index in 0..step {
+                            chars.push(' ');
+                            bytes.push(at_byte);
+                            synthetic.push(index + 1 < step);
+                        }
+                    } else {
+                        chars.push(c);
+                        bytes.push(at_byte);
+                        synthetic.push(false);
+                    }
                 }
                 bytes.push(offset + at + text.len());
-                let synthetic = vec![false; chars.len()];
                 lines.push(LineMap {
                     chars,
                     bytes,
@@ -133,6 +155,7 @@ pub fn map_block(block: &Block, source: &str) -> Option<BlockMap> {
             Some(BlockMap {
                 lines,
                 columns: None,
+                cells: false,
             })
         }
         _ => None,
@@ -189,6 +212,44 @@ fn map_table(source: &str) -> Option<BlockMap> {
     Some(BlockMap {
         lines,
         columns: Some(columns),
+        cells: true,
+    })
+}
+
+/// HTML の表（v2.8.0 R-05）。セル 1 つを 1 行に（並びは `crate::layout::html_slots`）。字の位置は読んだときに持っている
+fn map_html_table(table: &crate::parse::html_table::HtmlTable) -> Option<BlockMap> {
+    let lines = crate::layout::html_slots(table)
+        .into_iter()
+        .map(|(r, cell)| match cell {
+            Some(cell) => LineMap {
+                chars: cell.chars.clone(),
+                bytes: cell.bytes.clone(),
+                synthetic: vec![false; cell.chars.len()],
+                start: 0,
+            },
+            // 足りないセル。行の最後のセルの後ろ（打つと表が読めなくなるので、原文を出す）
+            None => {
+                let row = &table.rows[r];
+                let at = row
+                    .cells
+                    .last()
+                    .map_or(row.range.start, |last| last.range.end);
+                LineMap {
+                    chars: Vec::new(),
+                    bytes: vec![at],
+                    synthetic: Vec::new(),
+                    start: 0,
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(BlockMap {
+        lines,
+        columns: (!table.spanned).then_some(table.columns),
+        cells: true,
     })
 }
 
@@ -354,6 +415,21 @@ mod tests {
         (block, source)
     }
 
+    /// コードのタブは描き方と同じ字数に広げ、どの空白もタブの前に当てる（v2.8.1 R-02）
+    #[test]
+    fn code_tabs_map_to_the_tab() {
+        let text = "```\n\tx\n```\n";
+        let map = assert_exact(text);
+        let line = &map.lines[0];
+        assert_eq!(line.chars.iter().collect::<String>(), "    x");
+        let tab = text.find('\t').unwrap();
+        assert_eq!(&line.bytes[..4], &[tab; 4]);
+        assert_eq!(line.synthetic[..4], [true, true, true, false]);
+        // タブの後ろ（x の前）は、広げた空白の後ろ
+        assert_eq!(map.pos_of(tab + 1), Pos { line: 0, index: 4 });
+        assert_eq!(map.pos_of(tab), Pos { line: 0, index: 0 });
+    }
+
     /// 描いた字の 1 つずつが、原文のその字に当たる
     fn assert_exact(text: &str) -> BlockMap {
         let (block, source) = first_block(text);
@@ -495,6 +571,7 @@ mod tests {
             indent_unit: 16.0,
             base_dir: None,
             embeds: None,
+            plain_colors: None,
         };
         for text in [
             "長い段落を折り返す。長い段落を折り返す。**太字も** 入れて `code` も、そして [リンク](https://example.com/a) も。\n",

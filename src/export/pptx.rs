@@ -1,8 +1,18 @@
-//! PPTX を作る（v2.4.0 R-07 7e）。**1 枚 1 画像で貼る**（Marp CLI と同じ。PowerPoint で文字は直せない）。
+//! PPTX を作る（v2.4.0 R-07 7e。v2.7.0 R-01 で文字を直せる形にした）。
 //!
 //! 中身は PresentationML の最小限: 用紙 1 つ・版下（マスターとレイアウト）1 つずつ・テーマ 1 つと、
-//! スライドごとに画像を 1 枚いっぱいに貼った図形 1 つ。発表者のメモはノートに入れる。
+//! スライドごとの図形（`super::pptx_slide` が作る文字の箱・表・画像）。発表者のメモはノートに入れる。
+//! ここは入れ物（部品の一覧・関係・版下）だけを持ち、1 枚の中身は知らない。
 
+use super::pptx_slide::SlideParts;
+
+/// 埋め込む字体 1 つ（v2.8.0 R-04。EOT に包んだもの）
+pub struct EmbeddedFace {
+    pub typeface: &'static str,
+    pub bold: bool,
+    /// EOT（`.fntdata`）
+    pub data: Vec<u8>,
+}
 use super::zip::Zip;
 
 /// 画素から EMU へ（96 dpi で 1 px = 9525 EMU）
@@ -11,14 +21,6 @@ const EMU_PER_PX: u64 = 9525;
 const NS: &str = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main""#;
 const HEAD: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
 const TREE_HEAD: &str = r#"<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>"#;
-
-/// 1 枚ぶん
-pub struct SlideImage {
-    /// PNG
-    pub png: Vec<u8>,
-    /// 発表者のメモ（無ければ空）
-    pub notes: Vec<String>,
-}
 
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -32,8 +34,15 @@ fn rels(items: &[(String, &str, String)]) -> String {
         r#"{HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#
     );
     for (id, kind, target) in items {
+        // リンクは外を指す
+        let mode = if kind.ends_with("/hyperlink") {
+            r#" TargetMode="External""#
+        } else {
+            ""
+        };
         out.push_str(&format!(
-            r#"<Relationship Id="{id}" Type="{kind}" Target="{target}"/>"#
+            r#"<Relationship Id="{id}" Type="{kind}" Target="{}"{mode}/>"#,
+            escape(target)
         ));
     }
     out.push_str("</Relationships>");
@@ -41,7 +50,13 @@ fn rels(items: &[(String, &str, String)]) -> String {
 }
 
 /// PPTX のバイト列。`width`・`height` はスライドの論理の画素（Marp と同じ）
-pub fn build(slides: &[SlideImage], width: f32, height: f32, title: &str) -> Vec<u8> {
+pub fn build(
+    slides: &[SlideParts],
+    width: f32,
+    height: f32,
+    title: &str,
+    fonts: &[EmbeddedFace],
+) -> Vec<u8> {
     let cx = (width.round() as u64) * EMU_PER_PX;
     let cy = (height.round() as u64) * EMU_PER_PX;
     let mut zip = Zip::default();
@@ -49,7 +64,7 @@ pub fn build(slides: &[SlideImage], width: f32, height: f32, title: &str) -> Vec
 
     // 種類の一覧
     let mut types = format!(
-        r#"{HEAD}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>"#
+        r#"{HEAD}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="fntdata" ContentType="application/x-fontdata"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>"#
     );
     if any_notes {
         types.push_str(r#"<Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/><Override PartName="/ppt/theme/theme2.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>"#);
@@ -112,6 +127,44 @@ pub fn build(slides: &[SlideImage], width: f32, height: f32, title: &str) -> Vec
             format!("slides/slide{}.xml", index + 1),
         ));
     }
+    // 埋め込む字体（v2.8.0 R-04）。書体の名前ごとに、普通と太字を並べる
+    for (order, face) in fonts.iter().enumerate() {
+        zip.add(&format!("ppt/fonts/font{}.fntdata", order + 1), &face.data);
+        presentation_rels.push((
+            format!("rId{}", 500 + order),
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font",
+            format!("fonts/font{}.fntdata", order + 1),
+        ));
+    }
+    let mut font_list = String::new();
+    let mut typefaces: Vec<&str> = fonts.iter().map(|face| face.typeface).collect();
+    typefaces.dedup();
+    for typeface in typefaces {
+        let slot = |bold: bool| {
+            fonts
+                .iter()
+                .position(|face| face.typeface == typeface && face.bold == bold)
+        };
+        font_list.push_str(&format!(
+            r#"<p:embeddedFont><p:font typeface="{}" pitchFamily="34" charset="-128"/>"#,
+            escape(typeface)
+        ));
+        if let Some(order) = slot(false) {
+            font_list.push_str(&format!(r#"<p:regular r:id="rId{}"/>"#, 500 + order));
+        }
+        if let Some(order) = slot(true) {
+            font_list.push_str(&format!(r#"<p:bold r:id="rId{}"/>"#, 500 + order));
+        }
+        font_list.push_str("</p:embeddedFont>");
+    }
+    let (embed_attributes, font_list) = if fonts.is_empty() {
+        ("", String::new())
+    } else {
+        (
+            r#" embedTrueTypeFonts="1" saveSubsetFonts="1""#,
+            format!("<p:embeddedFontLst>{font_list}</p:embeddedFontLst>"),
+        )
+    };
     let notes_master = if any_notes {
         r#"<p:notesMasterIdLst><p:notesMasterId r:id="rId3"/></p:notesMasterIdLst>"#
     } else {
@@ -119,7 +172,7 @@ pub fn build(slides: &[SlideImage], width: f32, height: f32, title: &str) -> Vec
     };
     zip.add(
         "ppt/presentation.xml",
-        format!(r#"{HEAD}<p:presentation {NS}><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>{notes_master}<p:sldIdLst>{ids}</p:sldIdLst><p:sldSz cx="{cx}" cy="{cy}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>"#).as_bytes(),
+        format!(r#"{HEAD}<p:presentation {NS}{embed_attributes}><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>{notes_master}<p:sldIdLst>{ids}</p:sldIdLst><p:sldSz cx="{cx}" cy="{cy}"/><p:notesSz cx="6858000" cy="9144000"/>{font_list}</p:presentation>"#).as_bytes(),
     );
     zip.add(
         "ppt/_rels/presentation.xml.rels",
@@ -181,23 +234,45 @@ pub fn build(slides: &[SlideImage], width: f32, height: f32, title: &str) -> Vec
     // スライド
     for (index, slide) in slides.iter().enumerate() {
         let n = index + 1;
-        zip.add(&format!("ppt/media/image{n}.png"), &slide.png);
+        let background = slide.background.map_or(String::new(), |color| {
+            let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+            format!(
+                r#"<p:bg><p:bgPr><a:solidFill><a:srgbClr val="{:02X}{:02X}{:02X}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>"#,
+                byte(color[0]),
+                byte(color[1]),
+                byte(color[2])
+            )
+        });
         zip.add(
             &format!("ppt/slides/slide{n}.xml"),
-            format!(r#"{HEAD}<p:sld {NS}><p:cSld><p:spTree>{TREE_HEAD}<p:pic><p:nvPicPr><p:cNvPr id="2" name="Slide {n}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#).as_bytes(),
+            format!(
+                r#"{HEAD}<p:sld {NS}><p:cSld>{background}<p:spTree>{TREE_HEAD}{}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#,
+                slide.shapes
+            )
+            .as_bytes(),
         );
-        let mut slide_rels = vec![
-            (
-                "rId1".to_owned(),
-                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout",
-                "../slideLayouts/slideLayout1.xml".to_owned(),
-            ),
-            (
-                "rId2".to_owned(),
+        let mut slide_rels = vec![(
+            "rId1".to_owned(),
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout",
+            "../slideLayouts/slideLayout1.xml".to_owned(),
+        )];
+        // 画像は rId10 から、リンクは rId1000 から（`pptx_slide` の決まり）
+        for (order, png) in slide.media.iter().enumerate() {
+            let name = format!("image{n}_{}.png", order + 1);
+            zip.add(&format!("ppt/media/{name}"), png);
+            slide_rels.push((
+                format!("rId{}", 10 + order),
                 "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-                format!("../media/image{n}.png"),
-            ),
-        ];
+                format!("../media/{name}"),
+            ));
+        }
+        for (order, url) in slide.links.iter().enumerate() {
+            slide_rels.push((
+                format!("rId{}", 1000 + order),
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                url.clone(),
+            ));
+        }
         if !slide.notes.is_empty() {
             slide_rels.push((
                 "rId3".into(),
@@ -271,18 +346,30 @@ mod tests {
     #[test]
     fn package_lists_every_slide() {
         let slides = vec![
-            SlideImage {
-                png: vec![1, 2, 3],
+            SlideParts {
+                media: vec![vec![1, 2, 3]],
+                links: vec!["https://example.com/?a=1&b=2".to_owned()],
                 notes: vec!["話すこと".to_owned()],
+                background: Some([1.0, 1.0, 1.0, 1.0]),
+                ..SlideParts::default()
             },
-            SlideImage {
-                png: vec![4, 5],
-                notes: Vec::new(),
-            },
+            SlideParts::default(),
         ];
-        let bytes = build(&slides, 1280.0, 720.0, "題 & 副題");
+        let fonts = [EmbeddedFace {
+            typeface: "IBM Plex Sans JP",
+            bold: true,
+            data: vec![9, 9],
+        }];
+        let bytes = build(&slides, 1280.0, 720.0, "題 & 副題", &fonts);
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("ppt/slides/slide2.xml"));
+        assert!(text.contains("ppt/media/image1_1.png"));
+        assert!(text.contains(r#"Target="https://example.com/?a=1&amp;b=2" TargetMode="External""#));
+        assert!(text.contains(r#"<a:srgbClr val="FFFFFF"/></a:solidFill><a:effectLst/>"#));
+        assert!(text.contains("ppt/fonts/font1.fntdata"));
+        assert!(text.contains(r#"embedTrueTypeFonts="1""#));
+        assert!(text.contains(r#"<p:embeddedFont><p:font typeface="IBM Plex Sans JP" pitchFamily="34" charset="-128"/><p:bold r:id="rId500"/></p:embeddedFont>"#));
+        assert!(text.contains(r#"Extension="fntdata""#));
         assert!(text.contains(r#"<p:sldSz cx="12192000" cy="6858000"/>"#));
         assert!(text.contains("notesSlide1.xml") && !text.contains("notesSlide2.xml"));
         assert!(text.contains("題 &amp; 副題"));

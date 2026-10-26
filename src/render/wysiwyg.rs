@@ -343,6 +343,7 @@ mod tests {
             indent_unit: 24.0,
             base_dir: None,
             embeds: None,
+            plain_colors: None,
         };
         Shown {
             index,

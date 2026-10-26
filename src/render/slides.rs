@@ -219,6 +219,7 @@ fn lay_out_slide(
         indent_unit: size * 1.2,
         base_dir,
         embeds,
+        plain_colors: None,
     };
 
     let mut content: Vec<(usize, LaidOutBlock)> = Vec::new();

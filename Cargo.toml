@@ -1,6 +1,6 @@
 [package]
 name = "mdview"
-version = "2.5.1"
+version = "2.8.1"
 description = "Markdown viewer and editor"
 authors = []
 edition = "2021"
@@ -99,11 +99,22 @@ krilla = "0.8"
 # 既定の機能は画像の読み書きだけで、ネットワークには出ない
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 similar = { version = "3.2.0", features = ["inline"] }
+# PPTX に埋め込む字体の字と字形の対応を引く（v2.8.0 R-04）。印に使う字の送り幅を測るのにも使う（examples/check-marks.rs）。
+# **新しいクレートは増えない**（resvg が同じ版を使っている）
+ttf-parser = "0.25"
 
 # 窓のハンドルを取る（v2.1.3）。iced は窓の小さいアイコンしか設定しないので、
 # タスクバーの大きいアイコンを自分で設定する。**iced が使っているのと同じ版**
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
+# 中継先を OS（WinHTTP）に聞く（v2.6.0 R-02。自動構成スクリプトも OS が評価する）。
+# ごみ箱へ入れる（v2.7.0 R-03。Win32_UI_Shell）。**新しいクレートは増えない**（ほかの依存がすでに同じ版を使っている）
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_UI_Shell"] }
+
+# 自動構成スクリプト（PAC）を評価する JavaScript の処理系（v2.8.0 R-06）。**Linux 版だけ**（Windows・macOS は OS が評価する）。
+# 純 Rust で C の部品が要らない。暦の拡張などは使わないので切る
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+boa_engine = { version = "0.22", default-features = false }
 
 [build-dependencies]
 # Windows の実行ファイルへアイコンと版数を埋める（B-2）。
@@ -111,9 +122,8 @@ raw-window-handle = "0.6"
 embed-resource = "3"
 
 [dev-dependencies]
-# 印に使う字の送り幅を測る（examples/check-marks.rs）。
-# **実行ファイルには入らない。** resvg が同じ版を使っているので増えない
-ttf-parser = "0.25"
+# PAC の評価（v2.8.0 R-06）を、Linux 以外でも試験する。**Windows・macOS の実行ファイルには入らない**
+boa_engine = { version = "0.22", default-features = false }
 
 
 # 計測は必ずリリース相当の最適化で行う（§9.4）
