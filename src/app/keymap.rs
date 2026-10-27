@@ -417,7 +417,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 117] = [
+    pub const ALL: [Command; 119] = [
         Self::New,
         Self::NewWindow,
         Self::Open,
@@ -516,6 +516,8 @@ impl Command {
         Self::Table(crate::render::TableEdit::ALL[7]),
         Self::Table(crate::render::TableEdit::ALL[8]),
         Self::Table(crate::render::TableEdit::ALL[9]),
+        Self::Table(crate::render::TableEdit::ALL[10]),
+        Self::Table(crate::render::TableEdit::ALL[11]),
         Self::Transform(Transform::Upper),
         Self::Transform(Transform::Lower),
         Self::Transform(Transform::HalfWidth),

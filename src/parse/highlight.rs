@@ -241,7 +241,106 @@ pub fn highlight(source: &str, language: Option<&str>) -> Vec<Vec<Token>> {
         }
         lines.push(tokens);
     }
+    // 足した構文は 1 行の中の決まりだけなので、行をまたぐ文字・注釈をここで補う（v2.8.1・v2.9.0 R-04）
+    if let Some(rules) = super::extra_syntax::multiline_rules(&syntax.name) {
+        span_lines(source, &mut lines, rules, |text| {
+            let mut state = ParseState::new(syntax);
+            let mut stack = ScopeStack::new();
+            let Ok(ops) = state.parse_line(text, set) else {
+                return vec![whole(text)];
+            };
+            let end = text.trim_end_matches(['\n', '\r']).len();
+            let mut tokens = Vec::new();
+            let mut cursor = 0usize;
+            for (index, op) in ops {
+                let index = index.min(end);
+                if index > cursor {
+                    push(&mut tokens, cursor..index, role_of(&stack));
+                    cursor = index;
+                }
+                if stack.apply(&op).is_err() {
+                    break;
+                }
+            }
+            if cursor < end {
+                push(&mut tokens, cursor..end, role_of(&stack));
+            }
+            tokens
+        });
+    }
     lines
+}
+
+/// 行をまたぐ文字・注釈（`"""` など）を、閉じるまで 1 つの役割で塗る（v2.9.0 R-04）。
+/// `retokenize` は行の途中から色を付け直す（足した構文は文脈を持たないので、途中から始めても同じ答え）
+fn span_lines(
+    source: &str,
+    lines: &mut [Vec<Token>],
+    rules: &[super::extra_syntax::Multiline],
+    retokenize: impl Fn(&str) -> Vec<Token>,
+) {
+    use super::extra_syntax::Multiline;
+    // いま開いている決まり
+    let mut open: Option<&Multiline> = None;
+    for (line, tokens) in source.split_inclusive('\n').zip(lines.iter_mut()) {
+        let end = line.trim_end_matches(['\n', '\r']).len();
+        let text = &line[..end];
+        // 開きを探し始める所（閉じた行では、閉じの印の後ろから）
+        let mut scan_from = 0usize;
+        if let Some(rule) = open {
+            let close = if rule.close_at_start {
+                let lead = text.len() - text.trim_start().len();
+                text[lead..]
+                    .starts_with(rule.close)
+                    .then_some(lead + rule.close.len())
+            } else {
+                text.find(rule.close).map(|at| at + rule.close.len())
+            };
+            match close {
+                None => {
+                    *tokens = if text.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![Token {
+                            range: 0..end,
+                            role: rule.role,
+                        }]
+                    };
+                    continue;
+                }
+                Some(stop) => {
+                    let mut out = vec![Token {
+                        range: 0..stop,
+                        role: rule.role,
+                    }];
+                    for token in retokenize(&line[stop..]) {
+                        push(
+                            &mut out,
+                            token.range.start + stop..token.range.end + stop,
+                            token.role,
+                        );
+                    }
+                    *tokens = out;
+                    scan_from = stop;
+                }
+            }
+        }
+        // この行で開いたまま閉じない決まりがあるか
+        open = rules.iter().find(|rule| {
+            tokens
+                .iter()
+                .filter(|token| token.range.start >= scan_from)
+                .any(|token| {
+                    let part = &text[token.range.clone()];
+                    if rule.close_at_start {
+                        // here-string は行の終わりの印で開く
+                        token.range.end == end && part.ends_with(rule.open)
+                    } else {
+                        part.starts_with(rule.open) && !part[rule.open.len()..].contains(rule.close)
+                    }
+                })
+        });
+    }
 }
 
 /// 設定「色を付ける拡張子」を読む（v2.8.0 R-01）。`rs, py, conf=sh` → `[(rs, None), (py, None), (conf, Some(sh))]`。
@@ -383,6 +482,48 @@ mod tests {
             language_of_path(std::path::Path::new("Cargo.toml"), &[]).as_deref(),
             Some("toml")
         );
+    }
+
+    /// 行をまたぐ文字・注釈は、閉じるまで同じ色（v2.9.0 R-04）
+    #[test]
+    fn multiline_strings_and_comments_span_lines() {
+        let role_of_line = |source: &str, language: &str, number: usize| -> Vec<TokenRole> {
+            highlight(source, Some(language))[number]
+                .iter()
+                .map(|token| token.role)
+                .collect()
+        };
+        let toml = "a = \"\"\"\nname = 1\n\"\"\" # 閉じた\nb = 2\n";
+        assert_eq!(
+            role_of_line(toml, "toml", 1),
+            [TokenRole::Str],
+            "中の行は文字"
+        );
+        let closing = role_of_line(toml, "toml", 2);
+        assert_eq!(closing.first(), Some(&TokenRole::Str));
+        assert!(
+            closing.contains(&TokenRole::Comment),
+            "閉じたあとは色を付け直す"
+        );
+        assert!(
+            role_of_line(toml, "toml", 3).contains(&TokenRole::Number),
+            "閉じたあとの行はいつもどおり"
+        );
+        let ps = "<# 注釈の\n  続き if\n#>\nif ($a) { $s = @\"\n  中身 $x\n\"@ }\n";
+        assert_eq!(role_of_line(ps, "powershell", 1), [TokenRole::Comment]);
+        assert_eq!(role_of_line(ps, "powershell", 2), [TokenRole::Comment]);
+        assert!(role_of_line(ps, "powershell", 3).contains(&TokenRole::Keyword));
+        assert_eq!(
+            role_of_line(ps, "powershell", 4),
+            [TokenRole::Str],
+            "here-string の中"
+        );
+        assert_eq!(
+            role_of_line(ps, "powershell", 5).first(),
+            Some(&TokenRole::Str)
+        );
+        assert_covers(toml, Some("toml"));
+        assert_covers(ps, Some("powershell"));
     }
 
     /// 構文を足しても、読み込みは重くならない（最初の着色で待たせない）

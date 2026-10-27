@@ -750,7 +750,7 @@ PAGE_ITEMS = {
                "editor_guide_columns", "minimap", "minimap_width", "wysiwyg", "wysiwyg_limit_kb", "wysiwyg_table_align", "list_marker", "emphasis_marker", "strong_marker"],
     # プレビューから編集の行へ（v2.4.0 R-03）
     # 図の拡大（v2.4.0 R-04）
-    "preview": ["preview_font_size", "frontmatter_panel", "html_tables", "preview_jump", "preview_jump_click", "preview_follow_caret",
+    "preview": ["preview_font_size", "frontmatter_panel", "html_tables", "html_elements", "preview_jump", "preview_jump_click", "preview_follow_caret",
                 "figure_zoom", "figure_button", "figure_png_scale", "code_copy_button"],
     # 背景画像（v2.4.0 R-01）は配色と題名の間
     "appearance": ["theme", "window_material", "window_body_tint", "bg_enabled", "bg_area", "bg_fit", "bg_anchor", "bg_scroll",
@@ -794,7 +794,7 @@ CHANGED = {
     "bg_dark_blur": "strong",
     "preview_jump": "false", "preview_jump_click": "alt", "preview_follow_caret": "false",
     "figure_zoom": "false", "figure_button": "false", "figure_png_scale": "3",
-    "code_copy_button": "false", "mcp_enabled": "false", "mcp_headless": "false", "mcp_http": "true", "mcp_http_port": "39300", "marp_slides": "false", "marp_assist": "false", "marp_present_info": "true", "marp_export_format": "pptx", "pptx_embed_fonts": "false", "remember_urls": "false", "remote_images": "true", "url_system_proxy": "false", "frontmatter_panel": "false", "html_tables": "false", "wysiwyg": "false", "wysiwyg_limit_kb": "2048", "wysiwyg_table_align": "true", "format_tables": "false", "format_bullets": "false", "format_bullet": "+", "format_emphasis": "false", "lint_fix_menu": "false", "lint_fix_key": "false", "lint_fix_save": "true", "lint_fix_close": "true", "format_menu": "false", "format_key": "false", "format_save": "true", "format_close": "true", "list_marker": "second", "emphasis_marker": "second", "strong_marker": "second", "window_material": "opaque", "window_body_tint": "false",
+    "code_copy_button": "false", "mcp_enabled": "false", "mcp_headless": "false", "mcp_http": "true", "mcp_http_port": "39300", "marp_slides": "false", "marp_assist": "false", "marp_present_info": "true", "marp_export_format": "pptx", "pptx_embed_fonts": "false", "remember_urls": "false", "remote_images": "true", "url_system_proxy": "false", "frontmatter_panel": "false", "html_tables": "false", "html_elements": "false", "wysiwyg": "false", "wysiwyg_limit_kb": "2048", "wysiwyg_table_align": "true", "format_tables": "false", "format_bullets": "false", "format_bullet": "+", "format_emphasis": "false", "lint_fix_menu": "false", "lint_fix_key": "false", "lint_fix_save": "true", "lint_fix_close": "true", "format_menu": "false", "format_key": "false", "format_save": "true", "format_close": "true", "list_marker": "second", "emphasis_marker": "second", "strong_marker": "second", "window_material": "opaque", "window_body_tint": "false",
 }
 
 

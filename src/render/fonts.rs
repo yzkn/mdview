@@ -73,6 +73,7 @@ pub fn for_style(style: TextStyle, base: f32) -> (iced::Font, f32) {
             base * crate::layout::style_scale(TextStyle::Heading(level)),
         ),
         TextStyle::Body => (body(), base),
+        TextStyle::Small => (body(), base * crate::layout::SMALL_SCALE),
     }
 }
 

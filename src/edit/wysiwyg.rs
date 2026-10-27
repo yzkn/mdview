@@ -266,6 +266,13 @@ fn align(chars: &[char], synthetic: &[bool], source: &str, from: usize) -> (Vec<
         let here = source[p..].chars().next();
         if here.is_some_and(|s| s != *c && !(c.is_whitespace() && s.is_whitespace())) {
             p = skip_link_target(source, p);
+            // タグ（`<abbr title="…">` など）の中の字を本文と取り違えない（v2.9.0 R-03）
+            while let Some(next) = crate::parse::html_inline::skip_tag(source, p) {
+                if source[p..].starts_with(*c) {
+                    break;
+                }
+                p = next;
+            }
         }
         let limit = (p + WINDOW).min(source.len());
         let found = source[p..limit]
@@ -459,6 +466,20 @@ mod tests {
         let line = &map.lines[0];
         let index = line.chars.iter().position(|c| *c == '太').unwrap();
         assert_eq!(line.bytes[index], "前の **".len());
+    }
+
+    /// 決まった HTML（v2.9.0 R-03）。タグの属性の字を本文と取り違えない。`<br>` で行が分かれる
+    #[test]
+    fn html_tags_are_skipped() {
+        let text = "a <abbr title=\"CSS\">CSS</abbr> <kbd>K</kbd><br>次\n";
+        let map = assert_exact(text);
+        assert_eq!(map.lines.len(), 2);
+        let line = &map.lines[0];
+        let index = line.chars.iter().position(|c| *c == 'C').unwrap();
+        assert_eq!(line.bytes[index], text.find(">CSS").unwrap() + 1);
+        let index = line.chars.iter().position(|c| *c == 'K').unwrap();
+        assert_eq!(line.bytes[index], text.find(">K").unwrap() + 1);
+        assert_eq!(map.lines[1].bytes[0], text.find('次').unwrap());
     }
 
     #[test]

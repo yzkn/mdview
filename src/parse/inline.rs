@@ -26,7 +26,22 @@ pub enum SpanStyle {
     Code,
     /// リンク。本文だけを出し、URL は出さない
     Link,
+    /// キー（`<kbd>`。v2.9.0 R-03）
+    Kbd,
+    /// 上付き（`<sup>`。v2.9.0 R-03）
+    Sup,
+    /// 下付き（`<sub>`。v2.9.0 R-03）
+    Sub,
+    /// 蛍光ペン（`<mark>`。v2.9.0 R-03）
+    Mark,
+    /// 取り消し線（`<del>`・`<s>`・`~~`。v2.9.0 R-03）
+    Strike,
+    /// 下線（`<ins>`。v2.9.0 R-03）
+    Underline,
 }
+
+/// 段落の中の改行（`<br>`。v2.9.0 R-03）の印。`collect_spans` が置き、行を組むときに分ける
+const LINE_BREAK: &str = "\n";
 
 /// 同じ見た目が続く範囲。
 #[derive(Debug, Clone, PartialEq)]
@@ -232,6 +247,12 @@ fn collect_table<'a>(node: &'a AstNode<'a>, out: &mut TableContent) {
                         .map(|cell| {
                             let mut spans = Vec::new();
                             collect_spans(cell, SpanStyle::Normal, &mut spans);
+                            // セルは 1 行。`<br>` は空白に（v2.9.0 R-03）
+                            for span in &mut spans {
+                                if span.synthetic && span.text == LINE_BREAK {
+                                    span.text = " ".to_owned();
+                                }
+                            }
                             TableCell { spans }
                         })
                         .collect();
@@ -345,12 +366,16 @@ fn collect<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut BlockContent) {
     for child in node.children() {
         match &child.data.borrow().value {
             NodeValue::Paragraph | NodeValue::Heading(_) => {
-                let mut line = LogicalLine {
-                    indent: depth.min(MAX_DEPTH),
-                    ..Default::default()
-                };
-                collect_spans(child, SpanStyle::Normal, &mut line.spans);
-                out.lines.push(line);
+                let mut spans = Vec::new();
+                collect_spans(child, SpanStyle::Normal, &mut spans);
+                push_lines(out, spans, depth, None);
+            }
+
+            // `<details>` の頭（v2.9.0 R-03）。見出しに印を付けて 1 行に、同じブロックの中身はその下へ
+            NodeValue::HtmlBlock(html) if super::html_inline::enabled() => {
+                if let Some(head) = super::html_inline::details_head(&html.literal) {
+                    collect_details(&head, depth, out);
+                }
             }
 
             NodeValue::List(_) => collect_list(child, depth, out),
@@ -369,6 +394,59 @@ fn collect<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut BlockContent) {
             _ => collect(child, depth, out),
         }
     }
+}
+
+/// `<details>` の見出しの行頭記号（v2.9.0 R-03）。畳んでいるときはプレビューが `DETAILS_FOLDED` に描き替える
+pub const DETAILS_MARKER: &str = "▼ ";
+/// 畳んだ `<details>` の行頭記号（v2.9.0 R-03）
+pub const DETAILS_FOLDED: &str = "▶ ";
+
+/// `<details>` の見出しと、同じブロックにある中身（v2.9.0 R-03）
+fn collect_details(head: &super::html_inline::DetailsHead, depth: u8, out: &mut BlockContent) {
+    let mut spans = Vec::new();
+    if head.summary.is_empty() {
+        // 見出しの字が無ければ「詳細」と出す（ブラウザーと同じ。原文に無い字）
+        spans.push(Span::synthetic("詳細", SpanStyle::Normal));
+    } else {
+        let arena = Arena::new();
+        let root = parse_document(&arena, &head.summary, &options());
+        for paragraph in root.children() {
+            collect_spans(paragraph, SpanStyle::Normal, &mut spans);
+        }
+        // 見出しは 1 行。中の改行は空白に
+        for span in &mut spans {
+            if span.synthetic && span.text == LINE_BREAK {
+                span.text = " ".to_owned();
+            }
+        }
+    }
+    push_lines(out, spans, depth, Some(DETAILS_MARKER.to_owned()));
+    if !head.rest.is_empty() {
+        let arena = Arena::new();
+        let root = parse_document(&arena, &head.rest, &options());
+        collect(root, depth, out);
+    }
+}
+
+/// 範囲の列を論理行へ。**`<br>` の印で行を分ける**（v2.9.0 R-03）。行頭記号は最初の行だけ
+fn push_lines(out: &mut BlockContent, spans: Vec<Span>, depth: u8, marker: Option<String>) {
+    let mut line = LogicalLine {
+        indent: depth.min(MAX_DEPTH),
+        marker,
+        ..Default::default()
+    };
+    for span in spans {
+        if span.synthetic && span.text == LINE_BREAK {
+            let next = LogicalLine {
+                indent: line.indent,
+                ..Default::default()
+            };
+            out.lines.push(std::mem::replace(&mut line, next));
+            continue;
+        }
+        line.spans.push(span);
+    }
+    out.lines.push(line);
 }
 
 /// リストの項目を、行頭記号を付けて取り込む。
@@ -411,13 +489,9 @@ fn collect_item<'a>(
     for child in item.children() {
         match &child.data.borrow().value {
             NodeValue::Paragraph => {
-                let mut line = LogicalLine {
-                    indent: depth.min(MAX_DEPTH),
-                    marker: if first { marker.clone() } else { None },
-                    ..Default::default()
-                };
-                collect_spans(child, SpanStyle::Normal, &mut line.spans);
-                out.lines.push(line);
+                let mut spans = Vec::new();
+                collect_spans(child, SpanStyle::Normal, &mut spans);
+                push_lines(out, spans, depth, if first { marker.clone() } else { None });
                 first = false;
             }
             // 入れ子のリストは 1 段深くする。**渡すのは入れ子のリストだけ**
@@ -429,10 +503,26 @@ fn collect_item<'a>(
 }
 
 /// インライン要素を平らな範囲の列にする。
-fn collect_spans<'a>(node: &'a AstNode<'a>, inherited: SpanStyle, out: &mut Vec<Span>) {
+fn collect_spans<'a>(node: &'a AstNode<'a>, outer: SpanStyle, out: &mut Vec<Span>) {
+    // 段落の中の決まったタグ（v2.9.0 R-03）。**開きと閉じがそろうときだけ**描く（そろわなければ原文のまま）
+    let tags = super::html_inline::enabled() && balanced(node);
+    let mut stack: Vec<SpanStyle> = Vec::new();
     for child in node.children() {
+        let inherited = stack.last().copied().unwrap_or(outer);
         let value = child.data.borrow();
         match &value.value {
+            NodeValue::HtmlInline(html)
+                if tags && super::html_inline::inline_tag(html).is_some() =>
+            {
+                let tag = super::html_inline::inline_tag(html).expect("いま確かめた");
+                if tag.name == "br" {
+                    out.push(Span::synthetic(LINE_BREAK, inherited));
+                } else if tag.closing {
+                    stack.pop();
+                } else {
+                    stack.push(super::html_inline::style_of(tag.name).unwrap_or(inherited));
+                }
+            }
             NodeValue::Text(text) => push(out, text, inherited),
             NodeValue::Code(code) => push(out, &code.literal, SpanStyle::Code),
 
@@ -469,7 +559,12 @@ fn collect_spans<'a>(node: &'a AstNode<'a>, inherited: SpanStyle, out: &mut Vec<
             }
             NodeValue::Strikethrough => {
                 drop(value);
-                collect_spans(child, inherited, out);
+                let style = if super::html_inline::enabled() {
+                    SpanStyle::Strike
+                } else {
+                    inherited
+                };
+                collect_spans(child, style, out);
                 continue;
             }
             // 生 HTML は表示しない（§3.3）。原文をそのまま出す
@@ -482,6 +577,29 @@ fn collect_spans<'a>(node: &'a AstNode<'a>, inherited: SpanStyle, out: &mut Vec<
             }
         }
     }
+}
+
+/// 子の中の決まったタグの開きと閉じがそろっているか（v2.9.0 R-03）
+pub(crate) fn balanced<'a>(node: &'a AstNode<'a>) -> bool {
+    let mut stack: Vec<&str> = Vec::new();
+    for child in node.children() {
+        if let NodeValue::HtmlInline(html) = &child.data.borrow().value {
+            let Some(tag) = super::html_inline::inline_tag(html) else {
+                continue;
+            };
+            if tag.name == "br" {
+                continue;
+            }
+            if tag.closing {
+                if stack.pop() != Some(tag.name) {
+                    return false;
+                }
+            } else {
+                stack.push(tag.name);
+            }
+        }
+    }
+    stack.is_empty()
 }
 
 /// リンクを出す。**裸の URL は非 ASCII 文字で打ち切る。**
@@ -553,6 +671,56 @@ mod tests {
 
     fn parse(source: &str) -> BlockContent {
         parse_block(source, &BlockKind::Paragraph)
+    }
+
+    /// 決まった HTML（v2.9.0 R-03）。タグは字の見た目になり、原文には出ない
+    #[test]
+    fn known_html_tags_become_styles() {
+        let content =
+            parse("押す <kbd>Ctrl</kbd> と x<sup>2</sup> と H<sub>2</sub>O と <mark>印</mark>");
+        let styles: Vec<(&str, SpanStyle)> = content.lines[0]
+            .spans
+            .iter()
+            .map(|span| (span.text.as_str(), span.style))
+            .collect();
+        assert_eq!(
+            styles,
+            vec![
+                ("押す ", SpanStyle::Normal),
+                ("Ctrl", SpanStyle::Kbd),
+                (" と x", SpanStyle::Normal),
+                ("2", SpanStyle::Sup),
+                (" と H", SpanStyle::Normal),
+                ("2", SpanStyle::Sub),
+                ("O と ", SpanStyle::Normal),
+                ("印", SpanStyle::Mark),
+            ]
+        );
+        let content = parse("<del>古い</del><ins>新しい</ins> ~~線~~ <abbr title=\"x\">CSS</abbr>");
+        assert_eq!(flat(&content), "古い新しい 線 CSS");
+        assert_eq!(content.lines[0].spans[0].style, SpanStyle::Strike);
+        assert_eq!(content.lines[0].spans[1].style, SpanStyle::Underline);
+        // `<br>` は行を分ける
+        assert_eq!(flat(&parse("1 行目<br>2 行目<br/>3")), "1 行目\n2 行目\n3");
+        // そろわないタグ・知らないタグは原文のまま
+        assert_eq!(flat(&parse("<kbd>閉じない")), "<kbd>閉じない");
+        assert_eq!(flat(&parse("<span>x</span>")), "<span>x</span>");
+    }
+
+    /// `<details>` の頭は、印の付いた見出しの行（v2.9.0 R-03）
+    #[test]
+    fn details_heads_become_marked_lines() {
+        let content = parse("<details>\n<summary>見出し <kbd>A</kbd></summary>");
+        assert_eq!(flat(&content), "▼ 見出し A");
+        assert_eq!(content.lines[0].spans[1].style, SpanStyle::Kbd);
+        let content = parse("<details open>\n<summary>a</summary>\n中身\n</details>");
+        assert_eq!(flat(&content), "▼ a\n中身");
+        assert_eq!(
+            flat(&parse("<details>")),
+            "▼ 詳細",
+            "見出しが無ければ「詳細」"
+        );
+        assert!(parse("</details>").lines.is_empty(), "終わりは描かない");
     }
 
     fn flat(content: &BlockContent) -> String {

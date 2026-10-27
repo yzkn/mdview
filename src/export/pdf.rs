@@ -23,8 +23,8 @@ use crate::embed::{
     DiagramRenderer, Dispatch, EmbedKey, ImageRenderer, JobState, MathRenderer, RenderEmbed,
 };
 use crate::layout::{
-    embed_source, layout_block, EmbedLookup, LaidOutBlock, LayoutContext, LineBox, TextMeasurer,
-    TextStyle,
+    embed_source, layout_block, EmbedLookup, LaidOutBlock, LayoutContext, LineBox, RunDecoration,
+    TextMeasurer, TextStyle,
 };
 use crate::paginate::{self, Piece, PieceKind, BODY_WIDTH, MARGIN, PAGE_HEIGHT, PAGE_WIDTH};
 use crate::parse::BlockKind;
@@ -104,6 +104,7 @@ impl Fonts {
                 BODY_SIZE * crate::layout::style_scale(TextStyle::Heading(level)),
             ),
             TextStyle::Body => (&self.body, BODY_SIZE),
+            TextStyle::Small => (&self.body, BODY_SIZE * crate::layout::SMALL_SCALE),
         }
     }
 }
@@ -474,11 +475,41 @@ fn draw_line(
         }
         let (font, size) = fonts.of(run.style);
         let size = size * scale;
+        let left = MARGIN + (line.left + run.x) * scale;
+        let (width, height) = (run.width * scale, line.height * scale);
+        // 決まった HTML（v2.9.0 R-03）。地の色は字より先に
+        match run.decoration {
+            RunDecoration::Mark => fill_rect(surface, left, y, width, height, (255, 230, 120)),
+            RunDecoration::Kbd => fill_rect(
+                surface,
+                left - 2.0,
+                y + 1.0,
+                width + 4.0,
+                height - 2.0,
+                (232, 232, 232),
+            ),
+            _ => {}
+        }
+        // 上付きは上へ、下付きは下へ（基準線をずらす）
+        let shift = match run.decoration {
+            RunDecoration::Sup => -height * 0.18,
+            RunDecoration::Sub => height * 0.18,
+            _ => 0.0,
+        };
+        match run.decoration {
+            RunDecoration::Strike => {
+                fill_rect(surface, left, y + height * 0.52, width, 0.6, (0, 0, 0))
+            }
+            RunDecoration::Underline => {
+                fill_rect(surface, left, y + height * 0.82, width, 0.6, (0, 0, 0))
+            }
+            _ => {}
+        }
         surface.draw_text(
             Point::from_xy(
-                MARGIN + (line.left + run.x) * scale,
+                left,
                 // 上端から基準線へ。0.72 は概ねの上伸部（ascent）の割合
-                y + (line.height * scale + size * 0.72) / 2.0,
+                y + (height + size * 0.72) / 2.0 + shift,
             ),
             font.clone(),
             size,
@@ -487,6 +518,31 @@ fn draw_line(
             TextDirection::Auto,
         );
     }
+}
+
+/// 矩形を塗る（v2.9.0 R-03。蛍光ペン・キーの地・線）。**塗りの色は戻す**（字は既定の黒で描く）
+fn fill_rect(
+    surface: &mut krilla::surface::Surface<'_>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    (r, g, b): (u8, u8, u8),
+) {
+    let Some(rect) = krilla::geom::Rect::from_xywh(x, y, width.max(0.1), height.max(0.1)) else {
+        return;
+    };
+    let mut builder = krilla::geom::PathBuilder::new();
+    builder.push_rect(rect);
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    surface.set_fill(Some(krilla::paint::Fill {
+        paint: krilla::color::rgb::Color::new(r, g, b).into(),
+        ..Default::default()
+    }));
+    surface.draw_path(&path);
+    surface.set_fill(None);
 }
 
 /// 描き終えた埋め込みを置く。

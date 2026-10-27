@@ -115,6 +115,8 @@ pub use features::{ClipImage, FormatKind};
 // 使っているソフトウェアの著作権表示（v2.6.0 R-01）
 mod licenses;
 pub use licenses::{AboutItem, AboutLicense};
+// `<details>` を開く・畳む（v2.9.0 R-03）
+mod details;
 // frontmatter の欄（v2.6.0 R-03）
 mod front_panel;
 pub use front_panel::FrontAction;
@@ -314,6 +316,8 @@ pub struct App {
     about_pick: Option<AboutItem>,
     /// frontmatter の欄（v2.6.0 R-03）
     front: front_panel::FrontPanel,
+    /// `<details>` の開き方（v2.9.0 R-03）
+    details: details::DetailsState,
     /// Markdown 以外のファイルの言語（v2.8.0 R-01。設定で切っている・分からないなら `None`）と上限（バイト）、
     /// 編集画面の着色の覚え
     code_language: Option<String>,
@@ -1055,6 +1059,7 @@ impl App {
                 about_filter: String::new(),
                 about_pick: None,
                 front: front_panel::FrontPanel::default(),
+                details: details::DetailsState::default(),
                 code_language: None,
                 code_limit: 0,
                 code_cache: crate::render::syntax::CodeCache::default(),
@@ -1141,6 +1146,8 @@ impl App {
         // HTML の表（v2.8.0 R-05）。**試験では変えない**（ほかの試験と同じ置き場を使う）
         if !cfg!(test) {
             crate::parse::html_table::set_enabled(app.0.settings.html_tables);
+            // 決まった HTML（v2.9.0 R-03）
+            crate::parse::html_inline::set_enabled(app.0.settings.html_elements);
             // プレビューのタブの幅（v2.8.1 R-02）
             crate::layout::set_tab_width(app.0.settings.tab_width);
         }
@@ -2470,6 +2477,8 @@ impl App {
                 return self.jump_from_preview(block, line)
             }
             Message::Preview(PreviewAction::CopyCode { block }) => return self.copy_code(block),
+            // `<details>` の見出し（v2.9.0 R-03）
+            Message::Preview(PreviewAction::ToggleDetails { block }) => self.toggle_details(block),
             Message::Preview(PreviewAction::OpenFigure { block }) => {
                 return self.open_figure(block)
             }
@@ -3198,7 +3207,7 @@ impl App {
     fn apply_preview(&mut self, action: PreviewAction) {
         match action {
             // `handle` が先に受ける（開くには仕事を返す必要がある）
-            PreviewAction::LinkClicked { .. } => {}
+            PreviewAction::LinkClicked { .. } | PreviewAction::ToggleDetails { .. } => {}
             // `handle` が先に受ける（WYSIWYG。v2.5.0 R-01 a）
             PreviewAction::Wysiwyg(_) | PreviewAction::Ime(_) => {}
             // 写すのは `Ctrl + C`・編集 → コピーのとき（v2.2.0）
@@ -4539,12 +4548,17 @@ impl App {
     }
 
     /// HTML の表を表として描くかを合わせる（v2.8.0 R-05）。**変わったら文書を組み直す**（組み方の覚えを捨てるため）
+    /// 決まった HTML（v2.9.0 R-03）も同じ所で合わせる
     pub(super) fn refresh_html_tables(&mut self) {
         // 試験では変えない（ほかの試験と同じ置き場を使うため）
-        if cfg!(test) || crate::parse::html_table::enabled() == self.settings.html_tables {
+        if cfg!(test)
+            || (crate::parse::html_table::enabled() == self.settings.html_tables
+                && crate::parse::html_inline::enabled() == self.settings.html_elements)
+        {
             return;
         }
         crate::parse::html_table::set_enabled(self.settings.html_tables);
+        crate::parse::html_inline::set_enabled(self.settings.html_elements);
         self.rebuild_document_kind(self.document.is_plain());
     }
 
@@ -5049,7 +5063,10 @@ impl App {
             self.rebuild_toc();
         }
         // HTML の表（v2.8.0 R-05）。ほかの窓で変えたときも効かせる
-        if previous.html_tables != self.settings.html_tables && !cfg!(test) {
+        if (previous.html_tables != self.settings.html_tables
+            || previous.html_elements != self.settings.html_elements)
+            && !cfg!(test)
+        {
             self.refresh_html_tables();
         }
         // タブの幅（v2.8.1 R-02）
@@ -5761,6 +5778,8 @@ impl App {
         let wysiwyg = self.mode == ViewMode::Wysiwyg;
         let preview = container(
             PreviewView::new(&self.document, &self.preview, Message::Preview)
+                // `<details>` の開き方（v2.9.0 R-03）
+                .details(self.details_folds())
                 .zoom(preview_factor(&self.settings))
                 // Markdown 以外のファイルの言語ごとの色（v2.8.0 R-01）
                 .code_language(self.plain_colors())

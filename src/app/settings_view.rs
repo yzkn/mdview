@@ -110,6 +110,8 @@ pub enum SettingChange {
     PptxEmbedFonts(bool),
     /// HTML の表を表として描く（v2.8.0 R-05）
     HtmlTables(bool),
+    /// 決まった HTML を描く（v2.9.0 R-03）
+    HtmlElements(bool),
     CodeColorLimit(String),
     CodeColorExtensions(String),
     /// 検索の一致の色・いまの一致の色（v2.8.0 R-02）
@@ -437,6 +439,8 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "frontmatter_panel",
             // HTML の表（v2.8.0 R-05）
             "html_tables",
+            // 決まった HTML（v2.9.0 R-03）
+            "html_elements",
             // プレビューから編集の行へ（v2.4.0 R-03）
             "preview_jump",
             "preview_jump_click",
@@ -593,6 +597,7 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "code_colors" => SettingChange::CodeColors(flag()?),
         "pptx_embed_fonts" => SettingChange::PptxEmbedFonts(flag()?),
         "html_tables" => SettingChange::HtmlTables(flag()?),
+        "html_elements" => SettingChange::HtmlElements(flag()?),
         "code_color_limit_kb" => SettingChange::CodeColorLimit(value.to_owned()),
         "code_color_extensions" => SettingChange::CodeColorExtensions(value.to_owned()),
         "search_match_color" => SettingChange::SearchMatchColor(value.to_owned()),
@@ -783,6 +788,10 @@ impl App {
             SettingChange::PptxEmbedFonts(on) => self.settings.pptx_embed_fonts = on,
             SettingChange::HtmlTables(on) => {
                 self.settings.html_tables = on;
+                self.refresh_html_tables();
+            }
+            SettingChange::HtmlElements(on) => {
+                self.settings.html_elements = on;
                 self.refresh_html_tables();
             }
             SettingChange::CodeColors(on) => {
@@ -1670,6 +1679,19 @@ impl App {
                     &s.html_tables,
                     &d.html_tables,
                     SettingChange::HtmlTables(d.html_tables)
+                ),
+            ),
+            // 決まった HTML（v2.9.0 R-03）
+            with_reset(
+                toggle(
+                    "<details>・<kbd>・<sup>・<sub>・<mark>・<br>・<ins>・<del>・<s>・<abbr> を描く（ほかの HTML は原文のまま）",
+                    s.html_elements,
+                    SettingChange::HtmlElements
+                ),
+                differs(
+                    &s.html_elements,
+                    &d.html_elements,
+                    SettingChange::HtmlElements(d.html_elements)
                 ),
             ),
             // プレビューから編集の行へ（v2.4.0 R-03）

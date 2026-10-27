@@ -965,7 +965,16 @@ fn html_table(
                                     run.color = look.link;
                                     run.underline = true;
                                 }
-                                SpanStyle::Normal => {}
+                                SpanStyle::Kbd => {
+                                    run.mono = true;
+                                    run.size = size * 0.9;
+                                }
+                                SpanStyle::Underline => run.underline = true,
+                                SpanStyle::Sup
+                                | SpanStyle::Sub
+                                | SpanStyle::Mark
+                                | SpanStyle::Strike
+                                | SpanStyle::Normal => {}
                             }
                             pieces.push(Some((span.text.clone(), run)));
                         }

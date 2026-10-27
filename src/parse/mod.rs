@@ -22,6 +22,8 @@ mod extra_syntax;
 pub mod dollar;
 // HTML の表（v2.8.0 R-05）
 pub mod html_table;
+// 決まった HTML（v2.9.0 R-03）
+pub mod html_inline;
 
 // Rescan は rescan_from の戻り値。呼び出し側は分配するだけなので直接は名指ししない
 #[allow(unused_imports)]

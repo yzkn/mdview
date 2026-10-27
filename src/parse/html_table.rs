@@ -7,7 +7,8 @@
 //! セルの字は、描くときと同じ規則（空白をまとめ、頭と終わりの空白は落とす）で並べ、字ごとに原文の位置を持つ
 //! （WYSIWYG が原文の上で直すため）。`<br>` はセルの中の改行（字は持たない）。
 //!
-//! 結合（`colspan`・`rowspan`）は読んで描くが、**結合したセルのある表の行・列は足し消ししない**（`None`。原文を壊さないため）。
+//! 結合（`colspan`・`rowspan`）は読んで描く。行・列の足し消しは結合の数を直しながら行い、セルをつなぐ・分けることもできる（v2.9.0）。
+//! **書き換えたあと表として読めなければ書き換えない**（原文を壊さないため）。
 //! 位置はどれも段落の頭からのバイト。**画面も文書も知らない。**
 
 use std::ops::Range;
@@ -204,8 +205,9 @@ fn align_of(tag: &Tag) -> CellAlign {
     }
 }
 
-const INLINE: [&str; 13] = [
-    "b", "strong", "i", "em", "code", "a", "br", "s", "del", "u", "span", "small", "sub",
+const INLINE: [&str; 17] = [
+    "b", "strong", "i", "em", "code", "a", "br", "s", "del", "u", "span", "small", "sub", "kbd",
+    "mark", "ins", "abbr",
 ];
 
 /// セルの中身を字に並べる（空白をまとめる。`<br>` で行を分ける）
@@ -254,6 +256,9 @@ fn cell_text(
                         "i" | "em" => SpanStyle::Emphasis,
                         "code" => SpanStyle::Code,
                         "a" => SpanStyle::Link,
+                        // 決まった HTML（v2.9.0 R-03）
+                        name if super::html_inline::enabled() => super::html_inline::style_of(name)
+                            .unwrap_or_else(|| styles.last().copied().unwrap_or_default()),
                         _ => styles.last().copied().unwrap_or_default(),
                     });
                 }
@@ -580,77 +585,203 @@ fn indent_before(source: &str, at: usize) -> Option<&str> {
     lead.chars().all(|c| c == ' ' || c == '\t').then_some(lead)
 }
 
-/// 足す行の原文（`like` の行と同じセルの数・同じタグ。中身は空）
-fn empty_row(source: &str, like: &HtmlRow, header: bool) -> String {
-    let tag = if header { "th" } else { "td" };
-    let cells: String = like
-        .cells
-        .iter()
-        .map(|cell| {
-            // 寄せ方は写す（align・style）。ほかの属性は写さない
-            let open = read_tag(source, cell.open.start);
-            let mut attributes = String::new();
-            if let Some(open) = open {
-                for key in ["align", "style"] {
-                    if let Some(value) = open.attribute(key) {
-                        attributes.push_str(&format!(" {key}=\"{value}\""));
-                    }
-                }
-            }
-            format!("<{tag}{attributes}></{tag}>")
-        })
-        .collect();
-    format!("<tr>{cells}</tr>")
+/// 書き換えの並び（原文の範囲と、そこへ入れる字）を、後ろから当てる。範囲が重なれば `None`
+fn apply_edits(source: &str, mut edits: Vec<(Range<usize>, String)>) -> Option<String> {
+    edits.sort_by_key(|(range, _)| (range.start, range.end));
+    for pair in edits.windows(2) {
+        if pair[0].0.end > pair[1].0.start {
+            return None;
+        }
+    }
+    let mut out = source.to_owned();
+    for (range, text) in edits.into_iter().rev() {
+        out.replace_range(range, &text);
+    }
+    // 書き換えたあとも表として読めること（読めなくなるなら書き換えない。v2.9.0 R-02）
+    parse(&out)?;
+    Some(out)
 }
 
-/// 行を足す（`row` の上か下）。返すのは書き換えた原文と、足した行の番号。結合のある表は `None`
+/// 開きのタグの属性を書き換える（`None` なら消す）。ほかの属性と書き方はそのまま
+fn set_attribute(text: &str, name: &str, value: Option<&str>) -> String {
+    let lower = text.to_ascii_lowercase();
+    let needle = format!(" {name}=");
+    if let Some(start) = lower.find(&needle) {
+        let value_start = start + needle.len();
+        let rest = &text[value_start..];
+        let length = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => rest[1..].find(q).map_or(rest.len(), |index| index + 2),
+            _ => rest
+                .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                .unwrap_or(rest.len()),
+        };
+        let mut out = text.to_owned();
+        match value {
+            Some(value) => {
+                out.replace_range(value_start..value_start + length, &format!("\"{value}\""))
+            }
+            None => out.replace_range(start..value_start + length, ""),
+        }
+        return out;
+    }
+    match value {
+        Some(value) => {
+            let close = text.len() - 1 - usize::from(text.ends_with("/>"));
+            let mut out = text.to_owned();
+            out.insert_str(close, &format!(" {name}=\"{value}\""));
+            out
+        }
+        None => text.to_owned(),
+    }
+}
+
+/// 結合の数を書き換えた開きのタグ（1 なら属性を消す）
+fn with_spans(source: &str, cell: &HtmlCell, colspan: usize, rowspan: usize) -> String {
+    let text = &source[cell.open.clone()];
+    let text = set_attribute(
+        text,
+        "colspan",
+        (colspan > 1).then(|| colspan.to_string()).as_deref(),
+    );
+    set_attribute(
+        &text,
+        "rowspan",
+        (rowspan > 1).then(|| rowspan.to_string()).as_deref(),
+    )
+}
+
+/// 空のセルの原文（見出しなら `th`。寄せ方は `like` から写す）
+fn empty_cell(source: &str, header: bool, like: Option<&HtmlCell>) -> String {
+    let tag = if header { "th" } else { "td" };
+    let mut attributes = String::new();
+    if let Some(open) = like.and_then(|cell| read_tag(source, cell.open.start)) {
+        for key in ["align", "style"] {
+            if let Some(value) = open.attribute(key) {
+                attributes.push_str(&format!(" {key}=\"{value}\""));
+            }
+        }
+    }
+    format!("<{tag}{attributes}></{tag}>")
+}
+
+impl HtmlTable {
+    /// 格子の `(行, 列)` を覆うセル（行の番号・セルの番号）
+    pub fn owner(&self, row: usize, column: usize) -> Option<(usize, usize)> {
+        for (r, cells) in self.rows.iter().enumerate().take(row + 1) {
+            for (c, cell) in cells.cells.iter().enumerate() {
+                if r + cell.rowspan > row
+                    && cell.column <= column
+                    && column < cell.column + cell.colspan
+                {
+                    return Some((r, c));
+                }
+            }
+        }
+        None
+    }
+
+    /// 行 `row` の中で、格子の列 `column` のセルを入れる所（その列より左にある最後のセルの後ろ。無ければ最初のセルの前）
+    fn insert_point(&self, source: &str, row: usize, column: usize) -> Option<usize> {
+        let target = self.rows.get(row)?;
+        if let Some(previous) = target.cells.iter().rev().find(|cell| cell.column < column) {
+            return Some(previous.range.end);
+        }
+        match target.cells.first() {
+            Some(first) => Some(first.range.start),
+            None => Some(target.range.start + source[target.range.clone()].find('>')? + 1),
+        }
+    }
+}
+
+/// 行を足す（`row` の上か下）。返すのは書き換えた原文と、足した行の番号。
+/// **足す所を縦に結合したセルがまたぐなら、その `rowspan` を増やし**、足す行にはそのぶんのセルを作らない（v2.9.0 R-02）
 pub fn insert_row(source: &str, row: usize, below: bool) -> Option<(String, usize)> {
     let table = parse(source)?;
-    if table.spanned {
-        return None;
-    }
     let like = table.rows.get(row)?;
+    let at = if below { row + 1 } else { row };
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    let mut covered = vec![false; table.columns];
+    for (r, cells) in table.rows.iter().enumerate() {
+        for cell in &cells.cells {
+            // 足す境（`at - 1` と `at` の間）をまたぐ
+            if r < at && r + cell.rowspan > at {
+                edits.push((
+                    cell.open.clone(),
+                    with_spans(source, cell, cell.colspan, cell.rowspan + 1),
+                ));
+                for slot in covered.iter_mut().skip(cell.column).take(cell.colspan) {
+                    *slot = true;
+                }
+            }
+        }
+    }
     // 見出しの行の下に足すなら中身の行（td）。上に足すなら同じ種類
     let header = like.header && !below;
-    let text = empty_row(source, like, header);
-    let mut out = source.to_owned();
+    let cells: String = (0..table.columns)
+        .filter(|column| !covered[*column])
+        .map(|column| {
+            let like_cell = like.cells.iter().find(|cell| cell.column == column);
+            empty_cell(source, header, like_cell)
+        })
+        .collect();
+    let text = format!("<tr>{cells}</tr>");
     match indent_before(source, like.range.start) {
         Some(indent) => {
-            let line = format!("{indent}{text}\n");
             if below {
-                // 行の終わりの改行の後ろへ
                 let end = source[like.range.end..]
                     .find('\n')
                     .map_or(source.len(), |index| like.range.end + index + 1);
-                if end == source.len() && !source.ends_with('\n') {
-                    out.insert_str(end, &format!("\n{indent}{text}"));
+                let line = if end == source.len() && !source.ends_with('\n') {
+                    format!("\n{indent}{text}")
                 } else {
-                    out.insert_str(end, &line);
-                }
+                    format!("{indent}{text}\n")
+                };
+                edits.push((end..end, line));
             } else {
                 let start = like.range.start - indent.len();
-                out.insert_str(start, &line);
+                edits.push((start..start, format!("{indent}{text}\n")));
             }
         }
         None => {
-            let at = if below {
+            let point = if below {
                 like.range.end
             } else {
                 like.range.start
             };
-            out.insert_str(at, &text);
+            edits.push((point..point, text));
         }
     }
-    Some((out, if below { row + 1 } else { row }))
+    Some((apply_edits(source, edits)?, at))
 }
 
-/// 行を消す（その行が行の全部を占めるなら、行ごと）。最後の 1 行・結合のある表は `None`
+/// 行を消す（その行が行の全部を占めるなら、行ごと）。最後の 1 行は `None`。
+/// **消す行をまたぐセルは `rowspan` を減らし、消す行から始まる縦に結合したセルは次の行へ移す**（v2.9.0 R-02）
 pub fn delete_row(source: &str, row: usize) -> Option<(String, usize)> {
     let table = parse(source)?;
-    if table.spanned || table.rows.len() <= 1 {
+    if table.rows.len() <= 1 {
         return None;
     }
     let target = table.rows.get(row)?;
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    for (r, cells) in table.rows.iter().enumerate().take(row) {
+        for cell in &cells.cells {
+            if r + cell.rowspan > row {
+                edits.push((
+                    cell.open.clone(),
+                    with_spans(source, cell, cell.colspan, cell.rowspan - 1),
+                ));
+            }
+        }
+    }
+    // 消す行から始まる縦の結合は、次の行の同じ列へ
+    for cell in target.cells.iter().filter(|cell| cell.rowspan > 1) {
+        let point = table.insert_point(source, row + 1, cell.column)?;
+        let mut text = source[cell.range.clone()].to_owned();
+        let open_length = cell.open.end - cell.open.start;
+        let open = with_spans(source, cell, cell.colspan, cell.rowspan - 1);
+        text.replace_range(..open_length, &open);
+        edits.push((point..point, text));
+    }
     let mut range = target.range.clone();
     if let Some(indent) = indent_before(source, range.start) {
         let after = &source[range.end..];
@@ -659,75 +790,166 @@ pub fn delete_row(source: &str, row: usize) -> Option<(String, usize)> {
             range = range.start - indent.len()..(range.end + rest_of_line + 1).min(source.len());
         }
     }
-    let mut out = source.to_owned();
-    out.replace_range(range, "");
-    Some((out, row.min(table.rows.len() - 2)))
+    edits.push((range, String::new()));
+    Some((apply_edits(source, edits)?, row.min(table.rows.len() - 2)))
 }
 
-/// 列を足す（`column` の左か右）。返すのは書き換えた原文と、足した列の番号。結合のある表は `None`
+/// 列を足す（`column` の左か右）。返すのは書き換えた原文と、足した列の番号。
+/// **足す所を横に結合したセルがまたぐなら、その `colspan` を増やす**（v2.9.0 R-02）
 pub fn insert_column(source: &str, column: usize, right: bool) -> Option<(String, usize)> {
     let table = parse(source)?;
-    if table.spanned || column >= table.columns {
+    if column >= table.columns {
         return None;
     }
-    let mut inserts: Vec<(usize, String)> = Vec::new();
-    for row in &table.rows {
-        let tag = if row.header { "th" } else { "td" };
-        let cell = format!("<{tag}></{tag}>");
-        match row.cells.get(column) {
-            Some(found) => inserts.push((
-                if right {
-                    found.range.end
-                } else {
-                    found.range.start
-                },
-                cell,
-            )),
-            // セルの足りない行は、行の終わりの前へ
-            None => {
-                let end = row.cells.last().map_or(
-                    row.range.start + source[row.range.clone()].find('>')? + 1,
-                    |last| last.range.end,
-                );
-                inserts.push((end, cell));
+    let at = if right { column + 1 } else { column };
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    let mut covered = vec![false; table.rows.len()];
+    for (r, cells) in table.rows.iter().enumerate() {
+        for cell in &cells.cells {
+            if cell.column < at && cell.column + cell.colspan > at {
+                edits.push((
+                    cell.open.clone(),
+                    with_spans(source, cell, cell.colspan + 1, cell.rowspan),
+                ));
+                for slot in covered.iter_mut().skip(r).take(cell.rowspan) {
+                    *slot = true;
+                }
             }
         }
     }
-    let mut out = source.to_owned();
-    inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    for (at, text) in inserts {
-        out.insert_str(at, &text);
+    for (r, cells) in table.rows.iter().enumerate() {
+        if covered[r] {
+            continue;
+        }
+        let like = table
+            .owner(r, column)
+            .map(|(row, index)| &table.rows[row].cells[index]);
+        let text = empty_cell(source, cells.header, like);
+        let point = table.insert_point(source, r, at)?;
+        edits.push((point..point, text));
     }
-    Some((out, if right { column + 1 } else { column }))
+    Some((apply_edits(source, edits)?, at))
 }
 
-/// 列を消す。列が 1 つ・結合のある表は `None`
+/// 列を消す。列が 1 つなら `None`。**横に結合したセルは `colspan` を減らす**（v2.9.0 R-02）
 pub fn delete_column(source: &str, column: usize) -> Option<(String, usize)> {
     let table = parse(source)?;
-    if table.spanned || table.columns <= 1 || column >= table.columns {
+    if table.columns <= 1 || column >= table.columns {
         return None;
     }
-    let mut ranges: Vec<Range<usize>> = table
-        .rows
-        .iter()
-        .filter_map(|row| row.cells.get(column).map(|cell| cell.range.clone()))
-        .collect();
-    ranges.sort_by_key(|range| std::cmp::Reverse(range.start));
-    let mut out = source.to_owned();
-    for range in ranges {
-        out.replace_range(range, "");
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    for cells in &table.rows {
+        for cell in &cells.cells {
+            if cell.column <= column && column < cell.column + cell.colspan {
+                if cell.colspan > 1 {
+                    edits.push((
+                        cell.open.clone(),
+                        with_spans(source, cell, cell.colspan - 1, cell.rowspan),
+                    ));
+                } else {
+                    edits.push((cell.range.clone(), String::new()));
+                }
+            }
+        }
     }
-    Some((out, column.min(table.columns - 2)))
+    Some((apply_edits(source, edits)?, column.min(table.columns - 2)))
+}
+
+/// セルをつなぐ（v2.9.0 R-01）。`from` と `to` は格子の `(行, 列)`。長方形に広げ（結合したセルがはみ出すなら含むまで）、
+/// 左上のセルに `colspan`・`rowspan` を付け、ほかのセルの中身を `<br>` で区切って左上へ足す。返すのは原文と左上の `(行, 列)`。
+/// 1 つのセルにしかならなければ `None`
+pub fn merge_cells(
+    source: &str,
+    from: (usize, usize),
+    to: (usize, usize),
+) -> Option<(String, (usize, usize))> {
+    let table = parse(source)?;
+    let (mut top, mut bottom) = (from.0.min(to.0), from.0.max(to.0));
+    let (mut left, mut right) = (from.1.min(to.1), from.1.max(to.1));
+    // 範囲に掛かるセルを含むまで広げる
+    loop {
+        let mut grown = false;
+        for (r, cells) in table.rows.iter().enumerate() {
+            for cell in &cells.cells {
+                let (r0, r1) = (r, r + cell.rowspan - 1);
+                let (c0, c1) = (cell.column, cell.column + cell.colspan - 1);
+                let overlaps = r0 <= bottom && r1 >= top && c0 <= right && c1 >= left;
+                if overlaps && (r0 < top || r1 > bottom || c0 < left || c1 > right) {
+                    top = top.min(r0);
+                    bottom = bottom.max(r1);
+                    left = left.min(c0);
+                    right = right.max(c1);
+                    grown = true;
+                }
+            }
+        }
+        if !grown {
+            break;
+        }
+    }
+    let inside: Vec<(usize, &HtmlCell)> = table
+        .cells()
+        .filter(|(r, cell)| {
+            *r >= top && *r <= bottom && cell.column >= left && cell.column <= right
+        })
+        .collect();
+    if inside.len() < 2 {
+        return None;
+    }
+    let (_, head) = inside
+        .iter()
+        .find(|(r, cell)| *r == top && cell.column == left)
+        .copied()?;
+    // 中身を `<br>` でつなぐ（空のセルは飛ばす）
+    let contents: Vec<&str> = inside
+        .iter()
+        .map(|(_, cell)| source[cell.content.clone()].trim())
+        .filter(|text| !text.is_empty())
+        .collect();
+    let mut edits: Vec<(Range<usize>, String)> = vec![
+        (
+            head.open.clone(),
+            with_spans(source, head, right - left + 1, bottom - top + 1),
+        ),
+        (head.content.clone(), contents.join("<br>")),
+    ];
+    for (_, cell) in inside.iter().filter(|(_, cell)| !std::ptr::eq(*cell, head)) {
+        edits.push((cell.range.clone(), String::new()));
+    }
+    Some((apply_edits(source, edits)?, (top, left)))
+}
+
+/// 結合したセルを分ける（v2.9.0 R-01）。`at` は格子の `(行, 列)`。結合を外し、覆っていた所に空のセルを足す（中身は左上に残る）。
+/// 結合していなければ `None`
+pub fn split_cell(source: &str, at: (usize, usize)) -> Option<String> {
+    let table = parse(source)?;
+    let (row, index) = table.owner(at.0, at.1)?;
+    let cell = &table.rows[row].cells[index];
+    if cell.colspan == 1 && cell.rowspan == 1 {
+        return None;
+    }
+    let header = cell.header;
+    let blank = empty_cell(source, header, Some(cell));
+    let mut edits: Vec<(Range<usize>, String)> =
+        vec![(cell.open.clone(), with_spans(source, cell, 1, 1))];
+    // 頭の行: 右へ
+    if cell.colspan > 1 {
+        let end = cell.range.end;
+        edits.push((end..end, blank.repeat(cell.colspan - 1)));
+    }
+    // 下の行: その列へ
+    for r in row + 1..row + cell.rowspan {
+        let point = table.insert_point(source, r, cell.column)?;
+        edits.push((point..point, blank.repeat(cell.colspan)));
+    }
+    apply_edits(source, edits)
 }
 
 /// 列の寄せ方を変える（開きのタグの `align` を書き換える。`style` の `text-align` があればそちらを）。
-/// 結合のある表・もうその寄せ方なら `None`
+/// **その列から始まるセル**に当てる。もうその寄せ方なら `None`
 pub fn set_align(source: &str, column: usize, align: crate::edit::table::Align) -> Option<String> {
     use crate::edit::table::Align;
     let table = parse(source)?;
-    if table.spanned {
-        return None;
-    }
     let value = match align {
         Align::None => None,
         Align::Left => Some("left"),
@@ -736,7 +958,7 @@ pub fn set_align(source: &str, column: usize, align: crate::edit::table::Align) 
     };
     let mut changes: Vec<(Range<usize>, String)> = Vec::new();
     for row in &table.rows {
-        let Some(cell) = row.cells.get(column) else {
+        let Some(cell) = row.cells.iter().find(|cell| cell.column == column) else {
             continue;
         };
         let tag = read_tag(source, cell.open.start)?;
@@ -749,12 +971,7 @@ pub fn set_align(source: &str, column: usize, align: crate::edit::table::Align) 
     if changes.is_empty() {
         return None;
     }
-    let mut out = source.to_owned();
-    changes.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
-    for (range, text) in changes {
-        out.replace_range(range, &text);
-    }
-    Some(out)
+    apply_edits(source, changes)
 }
 
 /// 開きのタグの寄せ方を書き換える（ほかの属性と書き方はそのまま）
@@ -863,11 +1080,111 @@ mod tests {
         assert_eq!(table.columns, 3);
         assert_eq!(table.rows[1].cells[0].column, 1, "上から伸びるセルを避ける");
         assert_eq!(table.rows[1].cells[1].column, 2);
-        assert!(
-            insert_row(source, 0, true).is_none(),
-            "結合のある表は足し消ししない"
+    }
+
+    /// 結合のある表（2 列目と 3 列目の頭を横に、1 列目を縦に 2 行つないだもの）
+    const SPANNED: &str = "<table>\n  <tr><th>h1</th><th colspan=\"2\">h2</th></tr>\n  <tr><td rowspan=\"2\">a</td><td>b</td><td>c</td></tr>\n  <tr><td>d</td><td>e</td></tr>\n</table>\n";
+
+    #[test]
+    fn rows_are_edited_around_spans() {
+        // 縦の結合の中へ足すと rowspan が増え、その列のセルは作らない
+        let (out, at) = insert_row(SPANNED, 1, true).unwrap();
+        assert_eq!(at, 2);
+        assert_eq!(
+            out,
+            "<table>\n  <tr><th>h1</th><th colspan=\"2\">h2</th></tr>\n  <tr><td rowspan=\"3\">a</td><td>b</td><td>c</td></tr>\n  <tr><td></td><td></td></tr>\n  <tr><td>d</td><td>e</td></tr>\n</table>\n"
         );
-        assert!(delete_column(source, 0).is_none());
+        // 結合の上へ足すときは増やさない
+        let (out, _) = insert_row(SPANNED, 1, false).unwrap();
+        assert!(
+            out.contains("<tr><td></td><td></td><td></td></tr>\n  <tr><td rowspan=\"2\">a</td>")
+        );
+        // 結合をまたぐ行を消すと rowspan が減る（1 なら属性ごと消す）
+        let (out, _) = delete_row(SPANNED, 2).unwrap();
+        assert_eq!(
+            out,
+            "<table>\n  <tr><th>h1</th><th colspan=\"2\">h2</th></tr>\n  <tr><td>a</td><td>b</td><td>c</td></tr>\n</table>\n"
+        );
+        // 結合の始まりの行を消すと、次の行へ移る
+        let (out, _) = delete_row(SPANNED, 1).unwrap();
+        assert_eq!(
+            out,
+            "<table>\n  <tr><th>h1</th><th colspan=\"2\">h2</th></tr>\n  <tr><td>a</td><td>d</td><td>e</td></tr>\n</table>\n"
+        );
+        assert!(parse(&out).is_some());
+    }
+
+    #[test]
+    fn columns_are_edited_around_spans() {
+        // 横の結合の中へ足すと colspan が増える
+        let (out, at) = insert_column(SPANNED, 1, true).unwrap();
+        assert_eq!(at, 2);
+        assert_eq!(
+            out,
+            "<table>\n  <tr><th>h1</th><th colspan=\"3\">h2</th></tr>\n  <tr><td rowspan=\"2\">a</td><td>b</td><td></td><td>c</td></tr>\n  <tr><td>d</td><td></td><td>e</td></tr>\n</table>\n"
+        );
+        // 縦の結合の右へ足すと、結合の下の行も格子の位置に入る
+        let (out, _) = insert_column(SPANNED, 0, true).unwrap();
+        assert_eq!(
+            out,
+            "<table>\n  <tr><th>h1</th><th></th><th colspan=\"2\">h2</th></tr>\n  <tr><td rowspan=\"2\">a</td><td></td><td>b</td><td>c</td></tr>\n  <tr><td></td><td>d</td><td>e</td></tr>\n</table>\n"
+        );
+        // 結合した列を消すと colspan が減る
+        let (out, _) = delete_column(SPANNED, 2).unwrap();
+        assert_eq!(
+            out,
+            "<table>\n  <tr><th>h1</th><th>h2</th></tr>\n  <tr><td rowspan=\"2\">a</td><td>b</td></tr>\n  <tr><td>d</td></tr>\n</table>\n"
+        );
+        // 縦の結合の列を消す
+        let (out, _) = delete_column(SPANNED, 0).unwrap();
+        assert_eq!(
+            out,
+            "<table>\n  <tr><th colspan=\"2\">h2</th></tr>\n  <tr><td>b</td><td>c</td></tr>\n  <tr><td>d</td><td>e</td></tr>\n</table>\n"
+        );
+    }
+
+    #[test]
+    fn cells_are_merged_and_split() {
+        let source = "<table>\n<tr><td>a</td><td>b</td><td>c</td></tr>\n<tr><td>d</td><td></td><td>f</td></tr>\n</table>";
+        // 4 つをつなぐ（空のセルは飛ばす）
+        let (out, at) = merge_cells(source, (1, 1), (0, 0)).unwrap();
+        assert_eq!(at, (0, 0));
+        assert_eq!(
+            out,
+            "<table>\n<tr><td colspan=\"2\" rowspan=\"2\">a<br>b<br>d</td><td>c</td></tr>\n<tr><td>f</td></tr>\n</table>"
+        );
+        // 結合に掛かる範囲は、結合を含むまで広げる
+        let (wider, _) = merge_cells(&out, (0, 1), (0, 2)).unwrap();
+        assert_eq!(
+            wider,
+            "<table>\n<tr><td colspan=\"3\" rowspan=\"2\">a<br>b<br>d<br>c<br>f</td></tr>\n<tr></tr>\n</table>"
+        );
+        // 分けると、覆っていた所に空のセルが戻る（中身は左上）
+        let split = split_cell(&out, (1, 1)).unwrap();
+        assert_eq!(
+            split,
+            "<table>\n<tr><td>a<br>b<br>d</td><td></td><td>c</td></tr>\n<tr><td></td><td></td><td>f</td></tr>\n</table>"
+        );
+        // 1 つのセルだけ・結合していないセルは断る
+        assert!(merge_cells(source, (0, 0), (0, 0)).is_none());
+        assert!(split_cell(source, (0, 0)).is_none());
+    }
+
+    #[test]
+    fn attributes_are_rewritten_in_place() {
+        assert_eq!(
+            set_attribute("<td class=x>", "colspan", Some("2")),
+            "<td class=x colspan=\"2\">"
+        );
+        assert_eq!(
+            set_attribute("<td colspan=3 class=x>", "colspan", Some("2")),
+            "<td colspan=\"2\" class=x>"
+        );
+        assert_eq!(
+            set_attribute("<td colspan='3' class=x>", "colspan", None),
+            "<td class=x>"
+        );
+        assert_eq!(set_attribute("<td>", "rowspan", None), "<td>");
     }
 
     #[test]

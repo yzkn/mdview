@@ -33,6 +33,18 @@ pub enum RunDecoration {
     Code,
     /// リンクの本文
     Link,
+    /// キー（枠と地の色。v2.9.0 R-03）
+    Kbd,
+    /// 上付き（小さい字を上へ。v2.9.0 R-03）
+    Sup,
+    /// 下付き（小さい字を下へ。v2.9.0 R-03）
+    Sub,
+    /// 蛍光ペン（地の色。v2.9.0 R-03）
+    Mark,
+    /// 取り消し線（v2.9.0 R-03）
+    Strike,
+    /// 下線（v2.9.0 R-03）
+    Underline,
 }
 
 /// 同じ見た目が続く、行の中の一区間。
@@ -192,6 +204,13 @@ fn resolve(base: TextStyle, span: SpanStyle) -> (TextStyle, RunDecoration) {
         SpanStyle::Emphasis => (base, RunDecoration::Emphasis),
         SpanStyle::Code => (TextStyle::Mono, RunDecoration::Code),
         SpanStyle::Link => (base, RunDecoration::Link),
+        // 決まった HTML（v2.9.0 R-03）
+        SpanStyle::Kbd => (TextStyle::Mono, RunDecoration::Kbd),
+        SpanStyle::Sup => (TextStyle::Small, RunDecoration::Sup),
+        SpanStyle::Sub => (TextStyle::Small, RunDecoration::Sub),
+        SpanStyle::Mark => (base, RunDecoration::Mark),
+        SpanStyle::Strike => (base, RunDecoration::Strike),
+        SpanStyle::Underline => (base, RunDecoration::Underline),
     }
 }
 

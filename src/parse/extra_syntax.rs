@@ -131,3 +131,56 @@ fn toml() -> SyntaxDefinition {
 pub fn all() -> Vec<SyntaxDefinition> {
     vec![powershell(), toml()]
 }
+
+/// 行をまたぐ文字・注釈（v2.9.0 R-04。開きと閉じの印・塗る役割）
+pub struct Multiline {
+    pub open: &'static str,
+    pub close: &'static str,
+    /// 閉じの印が行の頭にあるときだけ閉じる（PowerShell の here-string）
+    pub close_at_start: bool,
+    pub role: super::highlight::TokenRole,
+}
+
+/// 構文の名前ごとの、行をまたぐ決まり
+pub fn multiline_rules(name: &str) -> Option<&'static [Multiline]> {
+    use super::highlight::TokenRole::{Comment, Str};
+    const POWERSHELL: [Multiline; 3] = [
+        Multiline {
+            open: "<#",
+            close: "#>",
+            close_at_start: false,
+            role: Comment,
+        },
+        Multiline {
+            open: "@\"",
+            close: "\"@",
+            close_at_start: true,
+            role: Str,
+        },
+        Multiline {
+            open: "@'",
+            close: "'@",
+            close_at_start: true,
+            role: Str,
+        },
+    ];
+    const TOML: [Multiline; 2] = [
+        Multiline {
+            open: "\"\"\"",
+            close: "\"\"\"",
+            close_at_start: false,
+            role: Str,
+        },
+        Multiline {
+            open: "'''",
+            close: "'''",
+            close_at_start: false,
+            role: Str,
+        },
+    ];
+    match name {
+        "PowerShell" => Some(&POWERSHELL),
+        "TOML" => Some(&TOML),
+        _ => None,
+    }
+}

@@ -17,6 +17,8 @@ pub enum TextStyle {
     Mono,
     /// 見出し。レベルごとに大きさが変わる
     Heading(u8),
+    /// 小さい字（上付き・下付き。v2.9.0 R-03）。行の高さは本文と同じ
+    Small,
 }
 
 /// テキストの幅を測るもの。
@@ -71,6 +73,9 @@ impl TextMeasurer for FixedMeasurer {
 }
 
 /// 書体ごとの倍率。見出しはレベルが小さいほど大きい。
+/// 小さい字の倍率（v2.9.0 R-03）
+pub const SMALL_SCALE: f32 = 0.75;
+
 pub fn style_scale(style: TextStyle) -> f32 {
     match style {
         TextStyle::Heading(1) => 2.0,
@@ -79,6 +84,7 @@ pub fn style_scale(style: TextStyle) -> f32 {
         TextStyle::Heading(4) => 1.2,
         TextStyle::Heading(5) => 1.1,
         TextStyle::Heading(_) => 1.0,
+        TextStyle::Small => SMALL_SCALE,
         _ => 1.0,
     }
 }

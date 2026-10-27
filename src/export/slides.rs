@@ -105,6 +105,7 @@ impl Fonts {
             TextStyle::Bold => (&self.bold, base),
             TextStyle::Heading(_) => (&self.bold, base * crate::layout::style_scale(style)),
             TextStyle::Body => (&self.body, base),
+            TextStyle::Small => (&self.body, base * crate::layout::SMALL_SCALE),
         }
     }
 }

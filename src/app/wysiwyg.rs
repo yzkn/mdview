@@ -391,6 +391,12 @@ impl App {
             tools.push(table(Icon::AlignLeft, T::Align(Align::Left)));
             tools.push(table(Icon::AlignCenter, T::Align(Align::Center)));
             tools.push(table(Icon::AlignRight, T::Align(Align::Right)));
+            // HTML の表なら、セルをつなぐ・分ける（v2.9.0 R-01）
+            if self.caret_in_html_table() {
+                tools.push(gap());
+                tools.push(table(Icon::Merge, T::MergeCells));
+                tools.push(table(Icon::Split, T::SplitCell));
+            }
         }
         // コードブロックの中なら、言語の欄（v2.5.0 R-01 b）
         if let Some(language) = self.code_language() {
@@ -581,10 +587,13 @@ enum Icon {
     AlignLeft,
     AlignCenter,
     AlignRight,
+    // セルをつなぐ・分ける（v2.9.0 R-01）
+    Merge,
+    Split,
 }
 
 impl Icon {
-    const ALL: [Icon; 20] = [
+    const ALL: [Icon; 22] = [
         Icon::Bold,
         Icon::Italic,
         Icon::Code,
@@ -605,6 +614,8 @@ impl Icon {
         Icon::AlignLeft,
         Icon::AlignCenter,
         Icon::AlignRight,
+        Icon::Merge,
+        Icon::Split,
     ];
 
     fn svg(self) -> &'static str {
@@ -629,6 +640,8 @@ impl Icon {
             Self::AlignLeft => include_str!("../../assets/toolbar/align-left.svg"),
             Self::AlignCenter => include_str!("../../assets/toolbar/align-center.svg"),
             Self::AlignRight => include_str!("../../assets/toolbar/align-right.svg"),
+            Self::Merge => include_str!("../../assets/toolbar/table-merge.svg"),
+            Self::Split => include_str!("../../assets/toolbar/table-split.svg"),
         }
     }
 }

@@ -30,4 +30,4 @@ pub use estimate::{estimate_height, Metrics};
 pub use height_index::HeightIndex;
 // FixedMeasurer は試験用、is_wide は高さ推定が内部で持つ。どちらも層の API として公開しておく
 #[allow(unused_imports)]
-pub use measure::{is_wide, style_scale, FixedMeasurer, TextMeasurer, TextStyle};
+pub use measure::{is_wide, style_scale, FixedMeasurer, TextMeasurer, TextStyle, SMALL_SCALE};

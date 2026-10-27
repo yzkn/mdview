@@ -109,6 +109,46 @@ fn luminance(color: Color) -> f32 {
 /// 本文の左右余白。
 const PADDING: f32 = 24.0;
 
+/// `<details>` の開き方（v2.9.0 R-03）。アプリ層が文書の版ごとに作る（窓の中だけの状態。原文は変えない）
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DetailsFolds {
+    /// 見出しのブロックの番号と、畳んでいるか（番号順）
+    pub heads: Vec<(usize, bool)>,
+    /// 畳んで隠すブロックの範囲（番号順。重ならない）
+    pub hidden: Vec<std::ops::Range<usize>>,
+}
+
+impl DetailsFolds {
+    /// `index` が見出しなら、畳んでいるか
+    pub fn head(&self, index: usize) -> Option<bool> {
+        self.heads
+            .binary_search_by_key(&index, |(head, _)| *head)
+            .ok()
+            .map(|at| self.heads[at].1)
+    }
+
+    /// `index` のブロックを隠すか
+    pub fn hides(&self, index: usize) -> bool {
+        let at = self.hidden.partition_point(|range| range.end <= index);
+        self.hidden
+            .get(at)
+            .is_some_and(|range| range.contains(&index))
+    }
+}
+
+/// 蛍光ペン（`<mark>`。v2.9.0 R-03）の地の色。明るい配色でも暗い配色でも字が読める薄さ
+pub const MARK_BACKGROUND: Color = Color {
+    r: 1.0,
+    g: 0.86,
+    b: 0.2,
+    a: 0.38,
+};
+/// 下付きを下げる量（行の高さとの比。v2.9.0 R-03）
+pub const SUB_DROP: f32 = 0.32;
+/// 取り消し線と下線の高さ（行の頭からの比。v2.9.0 R-03）
+pub const STRIKE_AT: f32 = 0.55;
+pub const UNDERLINE_AT: f32 = 0.92;
+
 /// プレビューの状態（アプリが持つ）。
 #[derive(Debug, Clone, Default)]
 pub struct PreviewState {
@@ -153,6 +193,8 @@ pub enum PreviewAction {
     Wysiwyg(super::WysiwygAction),
     /// WYSIWYG での IME（編集画面と同じ道で当てる）
     Ime(super::ImeAction),
+    /// `<details>` の見出しを押した（v2.9.0 R-03）。開く・畳むはアプリ層が持つ
+    ToggleDetails { block: usize },
     /// リンクを押した（v2.1.0 R-19）。**押した文字しか分からない**ので、
     /// アプリ側がブロックの原文から先を拾い直す
     LinkClicked { block: usize, text: String },
@@ -487,6 +529,8 @@ pub struct PreviewView<'a> {
     figure: Option<(usize, &'a str)>,
     /// 描かない frontmatter の終わり（欄に出しているとき。v2.6.0 R-03）
     hide_front: Option<usize>,
+    /// `<details>` の開き方（v2.9.0 R-03）
+    details: Option<std::rc::Rc<DetailsFolds>>,
     /// ブロックに付ける色の帯（プレビューでの比較。v2.6.0 R-04 b）
     block_marks: &'a [(usize, Color)],
 }
@@ -543,8 +587,15 @@ impl<'a> PreviewView<'a> {
             wysiwyg: None,
             figure: None,
             hide_front: None,
+            details: None,
             block_marks: &[],
         }
+    }
+
+    /// `<details>` の開き方（v2.9.0 R-03）
+    pub fn details(mut self, folds: Option<std::rc::Rc<DetailsFolds>>) -> Self {
+        self.details = folds;
+        self
     }
 
     /// ブロックに色の帯を付ける（プレビューでの比較。v2.6.0 R-04 b）。`(ブロックの番号, 色)`
@@ -675,6 +726,31 @@ impl<'a> PreviewView<'a> {
                     }
                 }
                 return None;
+            }
+        }
+        None
+    }
+
+    /// 押した所の `<details>` の見出し（v2.9.0 R-03）。見出しの行の上なら。**WYSIWYG では印の上だけ**（字の上はキャレットを置く）
+    fn details_under(&self, tree: &widget::Tree, bounds: Rectangle, point: Point) -> Option<usize> {
+        let folds = self.details.as_deref()?;
+        let state = tree.state.downcast_ref::<State>();
+        for shown in &state.visible {
+            if folds.head(shown.index).is_none() {
+                continue;
+            }
+            let Some(line) = shown.laid.lines.first() else {
+                continue;
+            };
+            let top = bounds.y + shown.y + line.top;
+            let left = bounds.x + shown.x + line.left;
+            let right = match (self.wysiwyg.is_some(), line.runs.first()) {
+                (true, Some(run)) => left + run.x + run.width.min(self.text_size * 1.6),
+                _ => left + line.runs.last().map_or(0.0, |run| run.x + run.width),
+            };
+            if point.y >= top && point.y < top + line.height && point.x >= left && point.x <= right
+            {
+                return Some(shown.index);
             }
         }
         None
@@ -830,9 +906,10 @@ impl<'a> PreviewView<'a> {
 
     /// リンクの上か（指の形を変える）。
     fn over_link(&self, tree: &widget::Tree, bounds: Rectangle, cursor: mouse::Cursor) -> bool {
-        cursor
-            .position()
-            .is_some_and(|point| self.link_under(tree, bounds, point).is_some())
+        cursor.position().is_some_and(|point| {
+            self.link_under(tree, bounds, point).is_some()
+                || self.details_under(tree, bounds, point).is_some()
+        })
     }
 
     pub fn zoom(mut self, factor: f32) -> Self {
@@ -972,7 +1049,12 @@ impl<'a> PreviewView<'a> {
                 .figure
                 .filter(|(open, _)| *open == index)
                 .and_then(|(_, held)| layout_figure_editor(block, &peek, held, &cx));
-            let hidden = self.hide_front.is_some_and(|end| block.bytes.end <= end);
+            // 畳んだ `<details>` の中身も高さを持たない（v2.9.0 R-03）
+            let hidden = self.hide_front.is_some_and(|end| block.bytes.end <= end)
+                || self
+                    .details
+                    .as_ref()
+                    .is_some_and(|folds| folds.hides(index));
             let laid_out = if hidden {
                 // 欄に出している frontmatter（v2.6.0 R-03）。高さを持たない
                 crate::layout::LaidOutBlock {
@@ -1006,6 +1088,20 @@ impl<'a> PreviewView<'a> {
                     })
                     .clone()
             };
+
+            // 畳んだ `<details>` の見出しは、見出しの行だけ（同じブロックの中身を隠す。v2.9.0 R-03）
+            let mut laid_out = laid_out;
+            if self
+                .details
+                .as_ref()
+                .is_some_and(|folds| folds.head(index) == Some(true))
+                && laid_out.lines.len() > 1
+            {
+                let bottom = |line: &LineBox| line.top + line.height;
+                let gap = laid_out.height - laid_out.lines.last().map_or(0.0, bottom);
+                laid_out.lines.truncate(1);
+                laid_out.height = bottom(&laid_out.lines[0]) + gap;
+            }
 
             // 推定と実測の差が大きければ索引を直す
             if (heights.height(index) - laid_out.height).abs() > 0.5 {
@@ -1330,6 +1426,13 @@ where
                                 return;
                             }
                         }
+                    }
+                    // `<details>` の見出しを押したら開く・畳む（v2.9.0 R-03）
+                    if let Some(block) = self.details_under(tree, bounds, point) {
+                        shell.publish((self.on_action)(PreviewAction::ToggleDetails { block }));
+                        shell.request_redraw();
+                        shell.capture_event();
+                        return;
                     }
                     // **WYSIWYG では、押した所へキャレットを置く**（v2.5.0 R-01 a）。リンクは Ctrl + 押下で開く
                     if self.wysiwyg.is_some() && bounds.contains(point) {
@@ -2036,6 +2139,35 @@ where
                                     over.code_background.unwrap_or(Color { a: 0.10, ..muted }),
                                 );
                             }
+                            // キーは枠を、蛍光ペンは地の色を（v2.9.0 R-03）
+                            match run.decoration {
+                                RunDecoration::Kbd => renderer.fill_quad(
+                                    renderer::Quad {
+                                        bounds: Rectangle::new(
+                                            Point::new(x - 3.0, line_y + 1.0),
+                                            Size::new(run.width + 6.0, line.height - 2.0),
+                                        ),
+                                        border: iced::Border {
+                                            radius: 3.0.into(),
+                                            width: 1.0,
+                                            color: Color { a: 0.55, ..muted },
+                                        },
+                                        ..Default::default()
+                                    },
+                                    over.code_background.unwrap_or(Color { a: 0.08, ..muted }),
+                                ),
+                                RunDecoration::Mark => renderer.fill_quad(
+                                    renderer::Quad {
+                                        bounds: Rectangle::new(
+                                            Point::new(x, line_y),
+                                            Size::new(run.width, line.height),
+                                        ),
+                                        ..Default::default()
+                                    },
+                                    MARK_BACKGROUND,
+                                ),
+                                _ => {}
+                            }
 
                             // 目 grep（v2.3.0 R-05）。**ランの中だけを探す**（検索と同じ）
                             for (range, color) in crate::io::marks::find_in(&run.text, self.eye) {
@@ -2095,9 +2227,45 @@ where
                             };
 
                             let (font, size) = fonts::for_style(run.style, shown.size);
+                            // 下付きは小さい字を下へ（上付きは上に寄せたまま。v2.9.0 R-03）
+                            let lift = if run.decoration == RunDecoration::Sub {
+                                line.height * SUB_DROP
+                            } else {
+                                0.0
+                            };
+                            // 取り消し線と下線（v2.9.0 R-03）
+                            let stroke = match run.decoration {
+                                RunDecoration::Strike => Some(STRIKE_AT),
+                                RunDecoration::Underline => Some(UNDERLINE_AT),
+                                _ => None,
+                            };
+                            if let Some(at) = stroke {
+                                renderer.fill_quad(
+                                    renderer::Quad {
+                                        bounds: Rectangle::new(
+                                            Point::new(x, line_y + line.height * at),
+                                            Size::new(run.width, 1.0),
+                                        ),
+                                        ..Default::default()
+                                    },
+                                    color,
+                                );
+                            }
                             renderer.fill_text(
                                 Text {
-                                    content: run.text.clone(),
+                                    content: if line_index == 0
+                                        && self.details.as_ref().is_some_and(|folds| {
+                                            folds.head(*block_index) == Some(true)
+                                        }) {
+                                        // 畳んだ `<details>` の印（v2.9.0 R-03）
+                                        run.text.replacen(
+                                            crate::parse::inline::DETAILS_MARKER,
+                                            crate::parse::inline::DETAILS_FOLDED,
+                                            1,
+                                        )
+                                    } else {
+                                        run.text.clone()
+                                    },
                                     bounds: Size::new(f32::INFINITY, line.height),
                                     size: Pixels(size),
                                     line_height: text::LineHeight::Absolute(Pixels(line.height)),
@@ -2107,7 +2275,7 @@ where
                                     shaping: text::Shaping::Advanced,
                                     wrapping: text::Wrapping::None,
                                 },
-                                Point::new(x, line_y),
+                                Point::new(x, line_y + lift),
                                 color,
                                 *viewport,
                             );

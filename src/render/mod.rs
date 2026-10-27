@@ -41,7 +41,7 @@ pub use editor::{
 };
 pub use preview::token_color;
 pub use preview::{
-    PreviewAction, PreviewColors, PreviewState, PreviewView, WysiwygCaret,
+    DetailsFolds, PreviewAction, PreviewColors, PreviewState, PreviewView, WysiwygCaret,
     BASE_SIZE as PREVIEW_BASE_SIZE,
 };
 
@@ -525,10 +525,14 @@ pub enum TableEdit {
     DeleteColumn,
     /// 列の寄せ方
     Align(crate::edit::table::Align),
+    /// 選んだセルをつなぐ（HTML の表だけ。v2.9.0 R-01）
+    MergeCells,
+    /// 結合したセルを分ける（HTML の表だけ。v2.9.0 R-01）
+    SplitCell,
 }
 
 impl TableEdit {
-    pub const ALL: [TableEdit; 10] = [
+    pub const ALL: [TableEdit; 12] = [
         TableEdit::InsertRow { below: false },
         TableEdit::InsertRow { below: true },
         TableEdit::DeleteRow,
@@ -539,6 +543,8 @@ impl TableEdit {
         TableEdit::Align(crate::edit::table::Align::Center),
         TableEdit::Align(crate::edit::table::Align::Right),
         TableEdit::Align(crate::edit::table::Align::None),
+        TableEdit::MergeCells,
+        TableEdit::SplitCell,
     ];
 
     /// 名前（メニュー・コマンドパレット・道具の帯）
@@ -555,6 +561,8 @@ impl TableEdit {
             Self::Align(Align::Center) => "列を中央に寄せる",
             Self::Align(Align::Right) => "列を右に寄せる",
             Self::Align(Align::None) => "列の寄せ方を外す",
+            Self::MergeCells => "表のセルをつなぐ",
+            Self::SplitCell => "表のセルを分ける",
         }
     }
 
@@ -572,6 +580,8 @@ impl TableEdit {
             Self::Align(Align::Center) => "table_align_center",
             Self::Align(Align::Right) => "table_align_right",
             Self::Align(Align::None) => "table_align_none",
+            Self::MergeCells => "table_merge_cells",
+            Self::SplitCell => "table_split_cell",
         }
     }
 }

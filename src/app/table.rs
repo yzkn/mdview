@@ -37,14 +37,19 @@ impl App {
     }
 
     /// キャレットが HTML の表の中か（v2.8.0 R-05）
-    fn caret_in_html_table(&self) -> bool {
+    pub(super) fn caret_in_html_table(&self) -> bool {
         self.caret_table()
             .is_some_and(|(_, _, source)| crate::layout::html_table_of(&source).is_some())
     }
 
     /// キャレットのあるセル（中身の行・列。区切りの行にいれば見出しの行）
     fn caret_cell(&self, start: usize, source: &str) -> (usize, usize) {
-        let byte = self.caret_byte().saturating_sub(start);
+        self.cell_of_byte(start, source, self.caret_byte())
+    }
+
+    /// 原文の位置 `byte` のあるセル（中身の行・列。`caret_cell` と同じ決め方）
+    fn cell_of_byte(&self, start: usize, source: &str, byte: usize) -> (usize, usize) {
+        let byte = byte.saturating_sub(start);
         // HTML の表（v2.8.0 R-05）。行はそのまま、列は格子の列
         if let Some(table) = crate::layout::html_table_of(source) {
             return table.cell_at(byte).map_or((0, 0), |(row, cell)| {
@@ -75,10 +80,32 @@ impl App {
         let Some((block_start, _, map)) = self.block_map(index) else {
             return;
         };
-        let Some(columns) = map.columns else {
+        if map.lines.is_empty() {
             return;
-        };
-        let line = (row * columns + column.min(columns - 1)).min(map.lines.len() - 1);
+        }
+        let line = match map.columns {
+            Some(columns) => row * columns + column.min(columns - 1),
+            // 結合のある HTML の表（v2.9.0 R-01）。その格子の位置を覆うセルの並びの番号
+            None => {
+                let source = self
+                    .document
+                    .text()
+                    .byte_slice(self.document.blocks()[index].bytes.clone())
+                    .to_string();
+                let Some(table) = crate::layout::html_table_of(&source) else {
+                    return;
+                };
+                let Some((r, c)) = table.owner(row, column) else {
+                    return;
+                };
+                let owner = &table.rows[r].cells[c];
+                crate::layout::html_slots(&table)
+                    .iter()
+                    .position(|(_, cell)| cell.is_some_and(|cell| std::ptr::eq(cell, owner)))
+                    .unwrap_or(0)
+            }
+        }
+        .min(map.lines.len() - 1);
         let pos = Pos {
             line,
             index: map.lines[line].len(),
@@ -98,10 +125,23 @@ impl App {
             return;
         };
         let (row, column) = self.caret_cell(start, &source);
-        // HTML の表（v2.8.0 R-05）。結合したセルのある表は足し消ししない（原文を壊さないため）
-        if let Some(html) = crate::layout::html_table_of(&source) {
+        // HTML の表（v2.8.0 R-05）。結合したセルは数を直しながら足し消しする（v2.9.0 R-02）
+        if crate::layout::html_table_of(&source).is_some() {
             use crate::parse::html_table as h;
+            // つなぐ範囲の片方の端（選んだ所の掴んだ側。表の外なら、キャレットのセル）
+            let other = self
+                .editor
+                .anchor
+                .filter(|anchor| (start..=start + source.len()).contains(anchor))
+                .map_or((row, column), |anchor| {
+                    self.cell_of_byte(start, &source, anchor)
+                });
             let result = match edit {
+                TableEdit::MergeCells => h::merge_cells(&source, other, (row, column))
+                    .map(|(out, (row, column))| (out, row, column)),
+                TableEdit::SplitCell => {
+                    h::split_cell(&source, (row, column)).map(|out| (out, row, column))
+                }
                 TableEdit::InsertRow { below } => {
                     h::insert_row(&source, row, below).map(|(out, row)| (out, row, column))
                 }
@@ -119,15 +159,13 @@ impl App {
                 }
             };
             let Some((out, row, column)) = result else {
-                let reason = if html.spanned {
-                    "結合したセルのある HTML の表は、行・列を足し消しできません（原文で直してください）"
-                } else {
-                    match edit {
-                        TableEdit::DeleteRow => "最後の 1 行は消せません",
-                        TableEdit::DeleteColumn => "列が 1 つしか無いので消せません",
-                        TableEdit::Align(_) => "もうその寄せ方です",
-                        _ => "表として読めません",
-                    }
+                let reason = match edit {
+                    TableEdit::DeleteRow => "最後の 1 行は消せません",
+                    TableEdit::DeleteColumn => "列が 1 つしか無いので消せません",
+                    TableEdit::Align(_) => "もうその寄せ方です",
+                    TableEdit::MergeCells => "つなぐセルを 2 つ以上選んでください",
+                    TableEdit::SplitCell => "キャレットのセルは結合していません",
+                    _ => "書き換えると表として読めなくなるので、書き換えませんでした",
                 };
                 self.notice = Some(super::notice::Notice::plain(reason.to_owned()));
                 return;
@@ -153,6 +191,13 @@ impl App {
             }
             TableEdit::Align(align) => {
                 table::set_align(&source, column, align).map(|out| (out, row, column))
+            }
+            // Markdown の表には結合の書き方が無い（v2.9.0 R-01）
+            TableEdit::MergeCells | TableEdit::SplitCell => {
+                self.notice = Some(super::notice::Notice::plain(
+                    "Markdown の表のセルはつなげません（HTML の表だけ）".to_owned(),
+                ));
+                return;
             }
         };
         let Some((out, row, column)) = result else {
@@ -561,17 +606,56 @@ mod tests {
         assert_eq!(app.caret_byte(), tab, "1 回でタブの前");
     }
 
-    /// 結合したセルのある HTML の表は、字は直せるが、行・列は足し消ししない
+    /// 結合したセルのある HTML の表も、字を直し、行・列を足し消しできる（v2.9.0 R-02）
     #[test]
-    fn spanned_html_tables_refuse_row_edits() {
-        let doc = "<table><tr><td colspan=\"2\">a</td></tr><tr><td>b</td><td>c</td></tr></table>\n";
+    fn spanned_html_tables_take_row_edits() {
+        let doc = "<table><tr><td colspan=\"2\">a</td></tr><tr><td>b</td><td>c</td></tr></table>
+";
         let mut app = app_with(doc);
         caret_at(&mut app, ">b", true);
         wysiwyg(&mut app, WysiwygAction::Insert("x".to_owned()));
         assert!(text(&app).contains("<td>bx</td>"));
-        app.table_command(TableEdit::InsertRow { below: true });
-        assert!(app.notice.is_some(), "断る");
-        assert!(text(&app).contains("<td>bx</td><td>c</td></tr></table>"));
+        app.table_command(TableEdit::InsertColumn { right: true });
+        assert_eq!(
+            text(&app),
+            "<table><tr><td colspan=\"3\">a</td></tr><tr><td>bx</td><td></td><td>c</td></tr></table>
+"
+        );
+        app.table_command(TableEdit::DeleteColumn);
+        assert_eq!(
+            text(&app),
+            "<table><tr><td colspan=\"2\">a</td></tr><tr><td>bx</td><td>c</td></tr></table>
+"
+        );
+    }
+
+    /// 選んだセルをつなぎ、分けると戻る（v2.9.0 R-01）。Markdown の表では断る
+    #[test]
+    fn html_cells_are_merged_and_split() {
+        let doc = "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>
+";
+        let mut app = app_with(doc);
+        caret_at(&mut app, ">a", true);
+        let anchor = app.caret_byte();
+        caret_at(&mut app, ">b", true);
+        app.editor.anchor = Some(anchor);
+        app.table_command(TableEdit::MergeCells);
+        assert_eq!(
+            text(&app),
+            "<table><tr><td colspan=\"2\">a<br>b</td></tr><tr><td>c</td><td>d</td></tr></table>
+"
+        );
+        app.table_command(TableEdit::SplitCell);
+        assert_eq!(
+            text(&app),
+            "<table><tr><td>a<br>b</td><td></td></tr><tr><td>c</td><td>d</td></tr></table>
+"
+        );
+        let mut app = app_with(TABLE);
+        caret_at(&mut app, "b", true);
+        app.table_command(TableEdit::MergeCells);
+        assert!(app.notice.is_some(), "Markdown の表は断る");
+        assert_eq!(text(&app), TABLE);
     }
 
     /// Enter は下のセルへ。最後の行なら行を足して同じ列へ（セルの中では改行しない）

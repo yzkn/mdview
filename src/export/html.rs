@@ -98,6 +98,39 @@ pub(super) fn body_html(
     let diagrams = DiagramRenderer::new();
     let math = MathRenderer::new();
 
+    // 段落の中の決まったタグ（v2.9.0 R-03）。**読んだタグだけを書き直す**（属性は出さない）。
+    // 段落の中に置くので、段落では包まない
+    if crate::parse::html_inline::enabled() {
+        // **書き換える前に選ぶ**（書き換えると、残りのタグの開きと閉じがそろわなくなる）
+        let nodes: Vec<_> = root
+            .descendants()
+            .filter_map(|node| {
+                let tag = match &node.data.borrow().value {
+                    NodeValue::HtmlInline(html) => crate::parse::html_inline::inline_tag(html),
+                    _ => None,
+                }?;
+                node.parent()
+                    .is_some_and(crate::parse::inline::balanced)
+                    .then_some((node, tag))
+            })
+            .collect();
+        for (node, tag) in nodes {
+            let html = match (tag.name, tag.closing) {
+                ("br", _) => "<br>".to_owned(),
+                (name, true) => format!("</{name}>"),
+                (name, false) => format!("<{name}>"),
+            };
+            let index = replacements.len();
+            replacements.push((marker(index), html));
+            let text = arena.alloc(AstNode::new(std::cell::RefCell::new(Ast::new(
+                NodeValue::Text(marker(index).into()),
+                LineColumn { line: 0, column: 0 },
+            ))));
+            node.insert_before(text);
+            node.detach();
+        }
+    }
+
     // **先に集めてから変える。** 走査しながら木を変えると comrak が止める
     let nodes: Vec<_> = root.descendants().collect();
 
@@ -135,7 +168,9 @@ pub(super) fn body_html(
                     // HTML の表（v2.8.0 R-05）。**読んだ中身から書き直す**（元の属性は出さない）
                     .or_else(|| {
                         crate::layout::html_table_of(&html.literal).map(|table| table_html(&table))
-                    }),
+                    })
+                    // `<details>`（v2.9.0 R-03）。見出しと開き方だけを書き直す
+                    .or_else(|| details_html(&html.literal, &options)),
                 NodeValue::HtmlInline(html) if alone_in_paragraph(node) => {
                     crate::parse::inline::img_tag(html)
                         .map(|tag| image_html(&tag.src, &tag.alt, tag.width, base_dir, skipped))
@@ -231,9 +266,66 @@ fn alone_in_paragraph<'a>(node: &'a AstNode<'a>) -> bool {
     })
 }
 
+/// `<details>` の頭と終わりを書き直す（v2.9.0 R-03）。見出しは読んだ字の飾りだけ、同じブロックの中身は Markdown として
+fn details_html(literal: &str, options: &Options) -> Option<String> {
+    use crate::parse::html_inline;
+    if !html_inline::enabled() {
+        return None;
+    }
+    if html_inline::is_details_end(literal) {
+        return Some("</details>".to_owned());
+    }
+    let head = html_inline::details_head(literal)?;
+    let mut out = String::from(if head.open {
+        "<details open>"
+    } else {
+        "<details>"
+    });
+    out.push_str("<summary>");
+    if !head.summary.is_empty() {
+        let content =
+            crate::parse::inline::parse_block(&head.summary, &crate::parse::BlockKind::Paragraph);
+        for (index, line) in content.lines.iter().enumerate() {
+            if index > 0 {
+                out.push(' ');
+            }
+            out.push_str(&spans_html(&line.spans));
+        }
+    }
+    out.push_str("</summary>\n");
+    if !head.rest.is_empty() {
+        out.push_str(&comrak::markdown_to_html(&head.rest, options));
+    }
+    if head.closed {
+        out.push_str("</details>");
+    }
+    Some(out)
+}
+
+/// 字の飾りの並びを HTML に（表のセルと `<details>` の見出し）
+fn spans_html(spans: &[crate::parse::inline::Span]) -> String {
+    use crate::parse::inline::SpanStyle;
+    let mut out = String::new();
+    for span in spans {
+        let text = escape(&span.text);
+        out.push_str(&match span.style {
+            SpanStyle::Strong => format!("<strong>{text}</strong>"),
+            SpanStyle::Emphasis => format!("<em>{text}</em>"),
+            SpanStyle::Code => format!("<code>{text}</code>"),
+            SpanStyle::Link => format!("<u>{text}</u>"),
+            SpanStyle::Normal => text,
+            style => match crate::parse::html_inline::tag_of(style) {
+                Some(tag) => format!("<{tag}>{text}</{tag}>"),
+                None => text,
+            },
+        });
+    }
+    out
+}
+
 /// HTML の表を書き直す（v2.8.0 R-05）。字の飾り・結合・寄せ方だけを出す（リンクの行き先は出さない）
 fn table_html(table: &crate::parse::html_table::HtmlTable) -> String {
-    use crate::parse::inline::{CellAlign, SpanStyle};
+    use crate::parse::inline::CellAlign;
     let mut out = String::from("<table>\n");
     for row in &table.rows {
         out.push_str("<tr>");
@@ -260,16 +352,7 @@ fn table_html(table: &crate::parse::html_table::HtmlTable) -> String {
                 if index > 0 {
                     out.push_str("<br>");
                 }
-                for span in line {
-                    let text = escape(&span.text);
-                    out.push_str(&match span.style {
-                        SpanStyle::Strong => format!("<strong>{text}</strong>"),
-                        SpanStyle::Emphasis => format!("<em>{text}</em>"),
-                        SpanStyle::Code => format!("<code>{text}</code>"),
-                        SpanStyle::Link => format!("<u>{text}</u>"),
-                        SpanStyle::Normal => text,
-                    });
-                }
+                out.push_str(&spans_html(line));
             }
             out.push_str(&format!("</{tag}>"));
         }
@@ -580,6 +663,29 @@ mod tests {
         // 表でない HTML は、いままでどおり原文を出す
         let out = html("<div>x</div>\n");
         assert!(out.contains("&lt;div&gt;"));
+    }
+
+    /// 決まった HTML は読んだタグだけを書き直す（v2.9.0 R-03）。属性は出さない
+    #[test]
+    fn known_html_is_rewritten() {
+        let out = html("押す <kbd onclick=\"x()\">Ctrl</kbd> と H<sub>2</sub>O<br>次\n");
+        assert!(
+            out.contains("押す <kbd>Ctrl</kbd> と H<sub>2</sub>O<br>"),
+            "{out}"
+        );
+        assert!(!out.contains("onclick"));
+        let out =
+            html("<details open>\n<summary>見出し <kbd>A</kbd></summary>\n\n中身\n\n</details>\n");
+        assert!(
+            out.contains("<details open><summary>見出し <kbd>A</kbd></summary>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<p>中身</p>") && out.contains("</details>"),
+            "{out}"
+        );
+        // 知らないタグは、いままでどおり原文を出す
+        assert!(html("<span>x</span>\n").contains("&lt;span&gt;"));
     }
 
     /// 図は SVG のまま入る（§17A.2）。**画素にしない**

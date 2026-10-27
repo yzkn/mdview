@@ -610,6 +610,8 @@ pub struct Settings {
     pub code_colors: bool,
     /// HTML の表（`<table>`）を表として描くか（v2.8.0 R-05。切ると原文のまま）
     pub html_tables: bool,
+    /// 決まった HTML（`<details>`・`<kbd>` など）を描くか（v2.9.0 R-03。切ると v2.8.1 までと同じ）
+    pub html_elements: bool,
     /// 色を付けるブロックの大きさの上限（KB。v2.8.0 R-01。超えたブロックは色無し）
     pub code_color_limit_kb: u32,
     /// 色を付ける拡張子（`,` で区切る。`拡張子=言語` で言語を当てる。空なら知っている拡張子は全部。v2.8.0 R-01）
@@ -861,6 +863,7 @@ impl Default for Settings {
             editor_syntax: true,
             code_colors: true,
             html_tables: true,
+            html_elements: true,
             code_color_limit_kb: CODE_COLOR_LIMIT_KB,
             code_color_extensions: String::new(),
             search_match_color: String::new(),
@@ -1093,6 +1096,7 @@ impl Settings {
         out.push_str(&format!("code_colors = {}\n", self.code_colors));
         out.push_str(&format!("pptx_embed_fonts = {}\n", self.pptx_embed_fonts));
         out.push_str(&format!("html_tables = {}\n", self.html_tables));
+        out.push_str(&format!("html_elements = {}\n", self.html_elements));
         out.push_str(&format!(
             "code_color_limit_kb = {}\n",
             self.code_color_limit_kb
@@ -1316,7 +1320,7 @@ impl Settings {
     /// 外部クレートを使わない。読むのは平らな数項目だけで、
     /// TOML の全機能は要らない。
     pub fn from_toml(text: &str) -> Self {
-        const BOOL_KEYS: [&str; 58] = [
+        const BOOL_KEYS: [&str; 59] = [
             "toc_visible",
             "scroll_sync",
             "show_invisibles",
@@ -1339,6 +1343,7 @@ impl Settings {
             "code_colors",
             "pptx_embed_fonts",
             "html_tables",
+            "html_elements",
             "editor_ruler",
             "editor_guides",
             "lint_enabled",
@@ -1451,6 +1456,7 @@ impl Settings {
                 "code_colors" => settings.code_colors = flag,
                 "pptx_embed_fonts" => settings.pptx_embed_fonts = flag,
                 "html_tables" => settings.html_tables = flag,
+                "html_elements" => settings.html_elements = flag,
                 "code_color_limit_kb" => {
                     if let Some(limit) = ranged(value, CODE_COLOR_LIMIT_RANGE) {
                         settings.code_color_limit_kb = limit;
@@ -1999,6 +2005,7 @@ mod tests {
             editor_syntax: false,
             code_colors: false,
             html_tables: false,
+            html_elements: false,
             code_color_limit_kb: 256,
             code_color_extensions: "rs, conf=sh".to_owned(),
             search_match_color: "#112233".to_owned(),
