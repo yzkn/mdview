@@ -312,6 +312,11 @@ pub enum Command {
     Copy,
     Paste,
     SelectAll,
+    /// マルチカーソル（v3 R-11）
+    AddCaretAbove,
+    AddCaretBelow,
+    SelectNextOccurrence,
+    SelectAllOccurrences,
     DuplicateLine,
     DeleteLine,
     JoinLines,
@@ -323,6 +328,8 @@ pub enum Command {
     Link,
     FormatTable,
     Find,
+    /// 単語単位で探すかの切り替え（v3 R-09）
+    FindWholeWord,
     GotoLine,
     MatchBracket,
     ClosingBracket,
@@ -414,10 +421,12 @@ pub enum Command {
     ToggleSync,
     ToggleInvisibles,
     About,
+    /// 打鍵の一覧（v3 R-16）
+    KeyList,
 }
 
 impl Command {
-    pub const ALL: [Command; 119] = [
+    pub const ALL: [Command; 125] = [
         Self::New,
         Self::NewWindow,
         Self::Open,
@@ -433,6 +442,10 @@ impl Command {
         Self::Copy,
         Self::Paste,
         Self::SelectAll,
+        Self::AddCaretAbove,
+        Self::AddCaretBelow,
+        Self::SelectNextOccurrence,
+        Self::SelectAllOccurrences,
         Self::DuplicateLine,
         Self::DeleteLine,
         Self::JoinLines,
@@ -444,6 +457,7 @@ impl Command {
         Self::Link,
         Self::FormatTable,
         Self::Find,
+        Self::FindWholeWord,
         Self::GotoLine,
         Self::MatchBracket,
         Self::ClosingBracket,
@@ -537,6 +551,7 @@ impl Command {
         Self::ToggleSync,
         Self::ToggleInvisibles,
         Self::About,
+        Self::KeyList,
     ];
 
     /// 設定ファイルに書く名前。**変えない**（変えると利用者の割り当てが消える）
@@ -557,6 +572,10 @@ impl Command {
             Self::Copy => "copy",
             Self::Paste => "paste",
             Self::SelectAll => "select_all",
+            Self::AddCaretAbove => "add_caret_above",
+            Self::AddCaretBelow => "add_caret_below",
+            Self::SelectNextOccurrence => "select_next_occurrence",
+            Self::SelectAllOccurrences => "select_all_occurrences",
             Self::DuplicateLine => "duplicate_line",
             Self::DeleteLine => "delete_line",
             Self::JoinLines => "join_lines",
@@ -568,6 +587,7 @@ impl Command {
             Self::Link => "link",
             Self::FormatTable => "format_table",
             Self::Find => "find",
+            Self::FindWholeWord => "find_whole_word",
             Self::GotoLine => "goto_line",
             Self::MatchBracket => "match_bracket",
             Self::ClosingBracket => "closing_bracket",
@@ -654,6 +674,7 @@ impl Command {
             Self::ToggleSync => "toggle_sync",
             Self::ToggleInvisibles => "toggle_invisibles",
             Self::About => "about",
+            Self::KeyList => "key_list",
         }
     }
 
@@ -675,6 +696,10 @@ impl Command {
             Self::Copy => "コピー",
             Self::Paste => "貼り付け",
             Self::SelectAll => "すべて選択",
+            Self::AddCaretAbove => "キャレットを上に足す",
+            Self::AddCaretBelow => "キャレットを下に足す",
+            Self::SelectNextOccurrence => "同じ語を選ぶ（次の 1 つ）",
+            Self::SelectAllOccurrences => "同じ語を選ぶ（全部）",
             Self::DuplicateLine => "行の複製",
             Self::DeleteLine => "行の削除",
             Self::JoinLines => "行の連結",
@@ -686,6 +711,7 @@ impl Command {
             Self::Link => "リンク",
             Self::FormatTable => "表を整形",
             Self::Find => "検索・置換",
+            Self::FindWholeWord => "検索を単語単位にする（切り替え）",
             Self::GotoLine => "指定行へジャンプ",
             Self::MatchBracket => "対応する括弧へ",
             Self::ClosingBracket => "閉じ括弧へ移動",
@@ -760,6 +786,7 @@ impl Command {
             Self::ToggleSync => "スクロール同期",
             Self::ToggleInvisibles => "空白・タブ・改行を表示",
             Self::About => "このアプリについて",
+            Self::KeyList => "打鍵の一覧",
         }
     }
 
@@ -782,6 +809,10 @@ impl Command {
             Self::Copy => &["Ctrl+C"],
             Self::Paste => &["Ctrl+V"],
             Self::SelectAll => &["Ctrl+A"],
+            Self::AddCaretAbove => &["Ctrl+Alt+Up"],
+            Self::AddCaretBelow => &["Ctrl+Alt+Down"],
+            // **既定の打鍵は置かない**（要件定義書 R-11・§0.2）。メニュー・コマンドパレットから。打鍵はキー割り当てで決める
+            Self::SelectNextOccurrence | Self::SelectAllOccurrences => &[],
             Self::DuplicateLine => &["Ctrl+D"],
             Self::DeleteLine => &["Ctrl+L"],
             Self::JoinLines => &["Ctrl+J"],
@@ -793,6 +824,7 @@ impl Command {
             Self::Link => &["Ctrl+K"],
             Self::FormatTable => &["Shift+Alt+F"],
             Self::Find => &["Ctrl+F"],
+            Self::FindWholeWord => &["Alt+W"],
             Self::GotoLine => &["Ctrl+G"],
             Self::MatchBracket => &["Ctrl+]"],
             Self::ClosingBracket => &["Ctrl+Shift+\\"],
@@ -872,6 +904,7 @@ impl Command {
             | Self::ToggleSync
             | Self::ToggleInvisibles
             | Self::About => &[],
+            Self::KeyList => &["F1"],
         }
     }
 
@@ -892,6 +925,7 @@ impl Command {
                 | Self::Encoding
                 | Self::Settings
                 | Self::Find
+                | Self::FindWholeWord
                 | Self::ZoomIn
                 | Self::ZoomOut
                 | Self::ZoomReset
@@ -917,6 +951,7 @@ impl Command {
                 | Self::ToggleSync
                 | Self::ToggleInvisibles
                 | Self::About
+                | Self::KeyList
         )
     }
 
@@ -939,6 +974,10 @@ impl Command {
             Self::Copy => Message::Copy,
             Self::Paste => Message::Paste,
             Self::SelectAll => Message::SelectAll,
+            Self::AddCaretAbove => Message::AddCaret(false),
+            Self::AddCaretBelow => Message::AddCaret(true),
+            Self::SelectNextOccurrence => Message::SelectOccurrence(false),
+            Self::SelectAllOccurrences => Message::SelectOccurrence(true),
             Self::DuplicateLine => Message::DuplicateLine,
             Self::DeleteLine => Message::DeleteLine,
             Self::JoinLines => Message::JoinLines,
@@ -950,6 +989,7 @@ impl Command {
             Self::Link => Message::Format(FormatKind::Link),
             Self::FormatTable => Message::FormatTable,
             Self::Find => Message::OpenSearch,
+            Self::FindWholeWord => Message::ToggleWholeWord,
             Self::GotoLine => Message::OpenGoto,
             Self::MatchBracket => Message::MatchBracket,
             Self::ClosingBracket => Message::ClosingBracket,
@@ -1029,6 +1069,7 @@ impl Command {
             Self::ToggleSync => Message::ToggleSync,
             Self::ToggleInvisibles => Message::ToggleInvisibles,
             Self::About => Message::OpenAbout,
+            Self::KeyList => Message::ToggleKeyList,
         }
     }
 

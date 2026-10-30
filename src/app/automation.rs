@@ -311,6 +311,10 @@ impl App {
         if self.command_palette.is_some() {
             return Some(Message::CloseCommandPalette);
         }
+        // 打鍵の一覧（v3 R-16）
+        if self.key_list.is_some() {
+            return Some(Message::CloseKeyList);
+        }
         // 図を拡大して見る画面（v2.4.0 R-04）
         if self.figure.is_some() {
             return Some(Message::Figure(super::FigureMessage::Close));
@@ -327,7 +331,11 @@ impl App {
         if self.goto.is_some() {
             return Some(Message::CloseGoto);
         }
-        if self.open_menu.is_some() || self.about_open {
+        // メニューは 1 段戻る（v3 R-05。画面と同じ）
+        if self.open_menu.is_some() {
+            return Some(Message::MenuKey(super::MenuKey::Escape));
+        }
+        if self.about_open {
             return Some(Message::CloseMenu);
         }
         // diff の画面（v2.3.0 R-02）
@@ -378,8 +386,31 @@ impl App {
         if let Some(open) = self.open_menu {
             let context = self.menu_context();
             let mut index = 0;
-            for item in menu::expand(menu::items(open, context), context) {
+            // **下の階層の中身も、開いていなくても並べる**（v3 R-05）。名前は `menu.<見出し>.<上の番号>.<番号>`
+            let mut flat: Vec<(String, menu::Item)> = Vec::new();
+            for item in menu::items(open, context) {
                 let id = format!("menu.{}.{index}", menu_key(open));
+                if let menu::Item::Fold {
+                    message: Message::ToggleSubmenu(which),
+                    ..
+                } = &item
+                {
+                    let inner = menu::submenu_items(*which, context);
+                    flat.push((id.clone(), item));
+                    let mut child = 0;
+                    for inside in inner {
+                        if matches!(inside, menu::Item::Separator | menu::Item::Heading(_)) {
+                            continue;
+                        }
+                        flat.push((format!("{id}.{child}"), inside));
+                        child += 1;
+                    }
+                } else {
+                    flat.push((id, item));
+                }
+                index += 1;
+            }
+            for (id, item) in flat {
                 match item {
                     menu::Item::Action {
                         label,
@@ -397,7 +428,6 @@ impl App {
                             element.value = Some(accel);
                         }
                         out.push(element);
-                        index += 1;
                     }
                     menu::Item::Fold {
                         label,
@@ -412,7 +442,6 @@ impl App {
                                 .enabled(enabled)
                                 .checked(open),
                         );
-                        index += 1;
                     }
                     menu::Item::Separator | menu::Item::Heading(_) => {}
                 }
@@ -1105,6 +1134,10 @@ impl App {
                     .checked(self.search.use_regex),
             );
             out.push(
+                Element::button("search.word", "単語", Message::ToggleWholeWord)
+                    .checked(self.search.whole_word),
+            );
+            out.push(
                 Element::button("search.replace_mode", "置換", Message::ToggleReplace)
                     .checked(self.search.replacing),
             );
@@ -1189,6 +1222,46 @@ impl App {
                     element.value = Some(entry.accel);
                 }
                 out.push(element);
+            }
+        }
+        // 打鍵の一覧（v3 R-16）。1 行ずつ、名前と打鍵
+        if let Some(query) = &self.key_list {
+            out.push(Element::textbox(
+                "keys.query",
+                "名前か打鍵で絞り込む",
+                query,
+                |v| Some(Message::KeyListInput(v.to_owned())),
+            ));
+            out.push(Element::button(
+                "keys.close",
+                "閉じる",
+                Message::CloseKeyList,
+            ));
+            for (index, (title, accel)) in self.key_list_shown(query).into_iter().enumerate() {
+                let mut element = Element::new(format!("keys.item.{index}"), "listitem", title);
+                element.value = Some(accel);
+                out.push(element);
+            }
+        }
+        // 大きすぎるファイルの帯（v3 R-12）
+        if self.meta.truncated.is_some() {
+            if self.whole_confirm {
+                out.push(Element::button(
+                    "large.confirm",
+                    "開く",
+                    Message::OpenWhole(true),
+                ));
+                out.push(Element::button(
+                    "large.cancel",
+                    "やめる",
+                    Message::DismissWholeConfirm,
+                ));
+            } else {
+                out.push(Element::button(
+                    "large.open_whole",
+                    "全部を開く",
+                    Message::OpenWhole(false),
+                ));
             }
         }
         if self.watch.changed {
@@ -1432,6 +1505,8 @@ impl App {
             "line_ending": self.meta.format.line_ending.label(),
             "caret": { "line": self.editor.cursor_line, "column": self.editor.cursor_column },
             "selection": selection,
+            // 選択の数（v3 R-11。矩形は行の数、マルチカーソルはキャレットの数）
+            "carets": self.selections().len(),
             "top_line": self.editor.top_line,
             "line_count": self.document.text().len_lines(),
             "bytes": self.document.text().len_bytes(),
@@ -1453,6 +1528,8 @@ impl App {
             "on_top": self.on_top,
             "focus_mode": self.focus_mode,
             "read_only": self.read_only,
+            // 大きすぎるので先頭だけを開いたなら、全体の大きさ（v3 R-12）
+            "truncated": self.meta.truncated,
             "zoom": self.settings.zoom,
             "theme": self.settings.theme.to_string(),
             "toc_visible": self.settings.toc_visible,
@@ -1665,6 +1742,10 @@ impl App {
                     return task;
                 }
                 if chord.key == ChordKey::Named(NamedKey::Escape) {
+                    // 画面ではエディタの部品が受けて、追加のキャレットと矩形を解く（v3 R-11）。購読へも届くので両方
+                    if self.is_multi() && !self.editing_blocked() {
+                        let _ = self.update(Message::Editor(Action::ClearCarets));
+                    }
                     let task = match self.escape_message() {
                         Some(message) => self.update(message),
                         None => Task::none(),
@@ -1676,6 +1757,23 @@ impl App {
                 if let (Some(_), ChordKey::Named(key)) = (&self.presenting, chord.key) {
                     if let Some(message) = super::present::message_for(key) {
                         let task = self.update(message);
+                        reply_ok(&id, Value::Null);
+                        return task;
+                    }
+                }
+                // メニューを開いている間の矢印と Enter は、メニューの中を動く（v3 R-05。画面では購読が受ける）
+                if let (Some(_), false, false) = (self.open_menu, chord.ctrl, chord.alt) {
+                    use super::MenuKey;
+                    let moved = match chord.key {
+                        ChordKey::Named(NamedKey::Up) => Some(MenuKey::Up),
+                        ChordKey::Named(NamedKey::Down) => Some(MenuKey::Down),
+                        ChordKey::Named(NamedKey::Left) => Some(MenuKey::Left),
+                        ChordKey::Named(NamedKey::Right) => Some(MenuKey::Right),
+                        ChordKey::Named(NamedKey::Enter) => Some(MenuKey::Enter),
+                        _ => None,
+                    };
+                    if let Some(moved) = moved {
+                        let task = self.update(Message::MenuKey(moved));
                         reply_ok(&id, Value::Null);
                         return task;
                     }
@@ -1875,6 +1973,9 @@ impl App {
                 let flag = |name: &str| request.get(name).and_then(Value::as_bool).unwrap_or(false);
                 let action = if flag("gutter") {
                     Action::ToggleFold { line }
+                } else if flag("ctrl") && flag("word") {
+                    // `Ctrl` + ダブルクリックの 2 回目（v3 R-11。語を足す）
+                    Action::AddWord { line, column }
                 } else if flag("ctrl") {
                     Action::OpenLinkAt { line, column }
                 } else {

@@ -32,6 +32,11 @@ pub struct SearchState {
     pub use_regex: bool,
     /// 大文字小文字を区別するか。**既定は区別しない**（§8.2）
     pub case_sensitive: bool,
+    /// 単語単位で探すか（v3 R-09）。日本語はダブルクリックの単語選択と同じ区切り。**既定は切る**
+    pub whole_word: bool,
+    /// いまの指定で組み立てた探し方（走査のたびに作り直す）。**プレビューの印も同じ探し方で付ける**
+    /// （描くたびに正規表現を組み立てない）
+    pub compiled: Option<Pattern>,
     /// 正規表現の書き方が誤っているときの理由
     pub error: Option<String>,
     /// 文書が変わったので走査し直す必要がある
@@ -89,6 +94,7 @@ impl SearchState {
     /// 理由を持ち帰って画面に出す
     pub fn pattern(&self) -> Result<Pattern, String> {
         Pattern::compile(&self.query, self.use_regex, self.case_sensitive)
+            .map(|pattern| pattern.whole_words(self.whole_word))
             .map_err(|error| error.to_string())
     }
 

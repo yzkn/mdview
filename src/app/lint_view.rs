@@ -3,11 +3,12 @@
 //! 規則は `crate::edit::lint`。ここでは**書き換えるたびに検査し直し**（`update` の出口）、
 //! 編集画面に波線を引き（`EditorView::lint_marks`）、一覧の窓に並べ、その場で直す。
 //!
-//! **大きい文書（512 KB 超。右端での折り返しと同じ）は、見えているあたりだけを検査する**（要件定義書 R-11。
+//! **大きい文書（512 KB 超）は、見えているあたりだけを検査する**（要件定義書 R-11。v3 R-12 でもこのままと決めた。
 //! 打つたびに全体を見ると重い）。そのときは、見出しの段のように前後を見る規則は
 //! 見えているあたりの中だけで判断する。
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use super::fluent;
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length};
 
 use super::App;
@@ -202,7 +203,7 @@ impl App {
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
                 // 巻き上げのつまみに「直す」が隠れないよう、右を空ける
-                scrollable(container(list).padding(iced::Padding {
+                fluent::scrollable(container(list).padding(iced::Padding {
                     right: 16.0,
                     ..iced::Padding::ZERO
                 }))
@@ -219,7 +220,7 @@ impl App {
     pub(super) fn lint_rules_section(&self) -> Element<'_, Message> {
         let rows = column(lint::RULES.iter().map(|(id, description)| {
             let on = !self.settings.lint_disabled.iter().any(|d| d == id);
-            iced::widget::checkbox(on)
+            fluent::checkbox(on)
                 .label(format!("{id}　{description}"))
                 .text_size(12)
                 .on_toggle(move |on| {

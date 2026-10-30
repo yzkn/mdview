@@ -68,6 +68,21 @@ pub struct EditorState {
     pub anchor: Option<usize>,
     /// 矩形選択（§4.13）。**普通の選択とは同時に持たない**
     pub rect: Option<RectSelection>,
+    /// 追加のキャレット（v3 R-11 マルチカーソル）。**主のキャレットは `cursor_line` / `cursor_column` / `anchor`**。
+    ///
+    /// 選ぶつもりの無い移動（`place_caret`）で消える。位置は編集のたびにアプリが付け直す
+    pub extra: Vec<Caret>,
+}
+
+/// 追加のキャレット 1 つ（v3 R-11）。主のキャレットと同じく、位置は行・桁、掴んだ所はバイトで持つ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caret {
+    pub line: usize,
+    pub column: usize,
+    /// 選択の掴んだ所（バイト）。選んでいなければ `None`
+    pub anchor: Option<usize>,
+    /// 上下に動かすときに保つ桁
+    pub goal_column: Option<usize>,
 }
 
 /// 矩形選択（`Alt` を押しながらの範囲選択）。
@@ -132,6 +147,7 @@ impl EditorState {
         self.goal_column = None;
         self.anchor = None;
         self.rect = None;
+        self.extra.clear();
     }
 
     /// キャレットを置き、**掴んだところは保つ**（`Shift` + 移動・ドラッグ）。
@@ -225,6 +241,13 @@ pub enum Action {
     SelectLine {
         line: usize,
     },
+    /// 語を選んで、選択に足す（`Ctrl` + ダブルクリック。v3 R-11）
+    AddWord {
+        line: usize,
+        column: usize,
+    },
+    /// 追加のキャレットと矩形を解く（`Esc`。v3 R-11）
+    ClearCarets,
     /// スクロール位置が変わった
     /// ホイールによる縦スクロール。**端数のまま渡す。**
     ///
@@ -987,14 +1010,20 @@ impl<'a> EditorView<'a> {
 
     /// キャレットが行の何段目にあるか（v2.2.0）。折り返していなければ 0
     fn caret_segment(&self) -> usize {
+        self.segment_of(
+            self.state.cursor_line,
+            self.state.cursor_column,
+            self.cursor_line_content(),
+        )
+    }
+
+    /// 行・桁が何段目にあるか（折り返していなければ 0。v3 R-11 で主のキャレット以外にも使う）
+    fn segment_of(&self, line: usize, column: usize, content: String) -> usize {
         let Some(wrap) = self.wrap else {
             return 0;
         };
-        let rendered = Rendered::new(self.cursor_line_content(), self.tab_width);
-        wrap.segment_of(
-            self.state.cursor_line,
-            rendered.column_of_char(self.state.cursor_column),
-        )
+        let rendered = Rendered::new(content, self.tab_width);
+        wrap.segment_of(line, rendered.column_of_char(column))
     }
 
     /// キャレットの段（上からの段の番号）。
@@ -1745,10 +1774,43 @@ impl<'a> EditorView<'a> {
     ///
     /// **行をまたぐ選択も、行ごとに切って塗る。** 行末より後ろは、
     /// 改行が選ばれていることが分かるよう少しだけはみ出させる
+    /// 塗る選択（バイトの範囲。前から並べる）。主のキャレットと追加のキャレット（v3 R-11）の分。
+    ///
+    /// **描くたびに 1 回だけ作る**（行ごとに作ると、キャレットの数 × 行の数だけ測る）
+    fn selection_spans(&self) -> Vec<(usize, usize)> {
+        let rope = self.document.text();
+        let byte = |line: usize, column: usize| {
+            rope.try_line_to_byte(line)
+                .unwrap_or(0)
+                .saturating_add(byte_of_column(&self.line_content(line), column))
+        };
+        let primary = (
+            self.state.anchor,
+            (self.state.cursor_line, self.state.cursor_column),
+        );
+        let mut spans: Vec<(usize, usize)> = std::iter::once(primary)
+            .chain(
+                self.state
+                    .extra
+                    .iter()
+                    .map(|caret| (caret.anchor, (caret.line, caret.column))),
+            )
+            .filter_map(|(anchor, (line, column))| {
+                let anchor = anchor?;
+                let caret = byte(line, column);
+                (anchor != caret).then(|| (anchor.min(caret), anchor.max(caret)))
+            })
+            .collect();
+        spans.sort_unstable();
+        spans
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn draw_selection<Renderer>(
         &self,
         renderer: &mut Renderer,
         rendered: &Rendered,
+        spans: &[(usize, usize)],
         line: usize,
         left: f32,
         y: f32,
@@ -1756,31 +1818,48 @@ impl<'a> EditorView<'a> {
     ) where
         Renderer: text::Renderer<Font = iced::Font>,
     {
-        let Some(anchor) = self.state.anchor else {
-            return;
-        };
         let rope = self.document.text();
-        let caret = rope
-            .try_line_to_byte(self.state.cursor_line)
-            .unwrap_or(0)
-            .saturating_add(byte_of_column(
-                &self.line_content(self.state.cursor_line),
-                self.state.cursor_column,
-            ));
-
-        let (from, to) = if anchor <= caret {
-            (anchor, caret)
-        } else {
-            (caret, anchor)
-        };
-        if from == to || line + 1 > rope.len_lines() {
+        if spans.is_empty() || line + 1 > rope.len_lines() {
             return;
         }
 
         let content = &rendered.raw;
         let line_start = rope.line_to_byte(line);
         let line_end = line_start + content.len();
-        // 改行のぶんを含めて判定する（行末まで選ばれているか）
+        // 改行のぶんを含めて判定する（行末まで選ばれているか）。**この行に掛かる所から見る**
+        let first = spans.partition_point(|&(_, to)| to <= line_start);
+        for &(from, to) in spans[first..]
+            .iter()
+            .take_while(|&&(from, _)| from <= line_end)
+        {
+            self.fill_selection::<Renderer>(
+                renderer,
+                rendered,
+                (from, to),
+                line_start,
+                left,
+                y,
+                text_color,
+            );
+        }
+    }
+
+    /// 1 つの選択の、1 行に掛かる分を塗る
+    #[allow(clippy::too_many_arguments)]
+    fn fill_selection<Renderer>(
+        &self,
+        renderer: &mut Renderer,
+        rendered: &Rendered,
+        (from, to): (usize, usize),
+        line_start: usize,
+        left: f32,
+        y: f32,
+        text_color: Color,
+    ) where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let content = &rendered.raw;
+        let line_end = line_start + content.len();
         if to <= line_start || from > line_end {
             return;
         }
@@ -1984,29 +2063,102 @@ impl<'a> EditorView<'a> {
         if at < text.len() {
             pieces.push((at..text.len(), text_color));
         }
+        // `U+FE0F` 付きの字（v3 R-19 C）。**本文の字体では描かず、同じ場所へ絵文字の字体で重ねる**（下で）
+        let presented = super::emoji::presented(text);
         for (range, color) in pieces {
             let (start, end) = (range.start.max(from), range.end.min(to));
             if start >= end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
                 continue;
             }
-            let x = measure_width::<Renderer>(
-                &text[..start],
-                self.font,
-                self.text_size,
-                self.line_height,
-            );
-            draw_text(
-                renderer,
-                &text[start..end],
-                Point::new(left + x, y),
-                self.font,
-                self.text_size,
-                self.line_height,
-                color,
-                text::Alignment::Left,
-                clip,
-            );
+            // 区切りの中の絵文字の所を抜いた部分ごとに描く（位置は行の頭から測る。キャレットの位置と同じ測り方）
+            let mut parts: Vec<std::ops::Range<usize>> = std::iter::once(start..end).collect();
+            for hole in &presented {
+                parts = parts
+                    .into_iter()
+                    .flat_map(|part| {
+                        if hole.end <= part.start || hole.start >= part.end {
+                            vec![part]
+                        } else {
+                            vec![
+                                part.start..hole.start.max(part.start),
+                                hole.end.min(part.end)..part.end,
+                            ]
+                        }
+                    })
+                    .filter(|part| !part.is_empty())
+                    .collect();
+            }
+            for part in parts {
+                let x = measure_width::<Renderer>(
+                    &text[..part.start],
+                    self.font,
+                    self.text_size,
+                    self.line_height,
+                );
+                draw_text(
+                    renderer,
+                    &text[part],
+                    Point::new(left + x, y),
+                    self.font,
+                    self.text_size,
+                    self.line_height,
+                    color,
+                    text::Alignment::Left,
+                    clip,
+                );
+            }
         }
+        for hole in presented {
+            if hole.end <= from || hole.start >= to {
+                continue;
+            }
+            self.draw_emoji_over::<Renderer>(renderer, text, hole, left, y, text_color, clip);
+        }
+    }
+
+    /// 本文の字体で描かなかった `U+FE0F` 付きの字を、**元の字の幅に収まる大きさで**絵文字の字体で描く（v3 R-19 C）。
+    ///
+    /// 編集画面は等幅で、キャレットの位置は本文の字体で測る。絵文字の字体は字の送り幅が広い（1.25 字）ので、
+    /// そのままだと次の字に重なる。元の字の幅に合わせて縮める
+    #[allow(clippy::too_many_arguments)]
+    fn draw_emoji_over<Renderer>(
+        &self,
+        renderer: &mut Renderer,
+        text: &str,
+        hole: std::ops::Range<usize>,
+        left: f32,
+        y: f32,
+        color: Color,
+        clip: &Rectangle,
+    ) where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let x0 = measure_width::<Renderer>(
+            &text[..hole.start],
+            self.font,
+            self.text_size,
+            self.line_height,
+        );
+        let x1 = measure_width::<Renderer>(
+            &text[..hole.end],
+            self.font,
+            self.text_size,
+            self.line_height,
+        );
+        // 絵文字の字体の送り幅は 1 字の約 1.25 倍（Noto Color Emoji: 2550 / 2048）
+        let size = ((x1 - x0) / 1.25).min(self.text_size).max(1.0);
+        draw_text(
+            renderer,
+            &text[hole],
+            // 縮めた分の半分だけ下げる（行の中で縦の真ん中に）
+            Point::new(left + x0, y + (self.text_size - size) / 2.0),
+            iced::Font::with_name(super::fonts::EMOJI_FAMILY),
+            size,
+            self.line_height,
+            color,
+            text::Alignment::Left,
+            clip,
+        );
     }
 
     /// 行の中で違う部分を塗る（v2.3.0 R-02 b）。
@@ -2368,15 +2520,40 @@ impl<'a> EditorView<'a> {
     where
         Renderer: text::Renderer<Font = iced::Font>,
     {
-        let row = self.caret_row().saturating_sub(self.top_row());
-        let y = bounds.y + row as f32 * self.line_height;
-
-        let rendered = Rendered::new(self.cursor_line_content(), self.tab_width);
         // 変換中は未確定文字列の末尾へ置く。ここが候補窓の位置にもなる
         let column = match &self.state.preedit {
             Some(preedit) => self.state.cursor_column + preedit.chars().count(),
             None => self.state.cursor_column,
         };
+        self.caret_point::<Renderer>(
+            bounds,
+            self.state.cursor_line,
+            column,
+            self.cursor_line_content(),
+            self.caret_segment(),
+        )
+    }
+
+    /// 行・桁のキャレットを描く左上（v3 R-11 で主のキャレット以外にも使う）
+    fn caret_point<Renderer>(
+        &self,
+        bounds: Rectangle,
+        line: usize,
+        column: usize,
+        content: String,
+        segment: usize,
+    ) -> (f32, f32)
+    where
+        Renderer: text::Renderer<Font = iced::Font>,
+    {
+        let row = match self.wrap {
+            Some(wrap) => wrap.row_of(line, segment),
+            None => self.folds.row_of(line),
+        }
+        .saturating_sub(self.top_row());
+        let y = bounds.y + row as f32 * self.line_height;
+
+        let rendered = Rendered::new(content, self.tab_width);
         let offset = column_offset::<Renderer>(
             &rendered.text,
             rendered.column_of_char(column),
@@ -2387,11 +2564,7 @@ impl<'a> EditorView<'a> {
 
         // **折り返していれば段の左端から測る**（v2.2.0）。横には送らない
         let shift = if self.wraps() {
-            let (start, _) = self.segment_span::<Renderer>(
-                &rendered.text,
-                self.state.cursor_line,
-                self.caret_segment(),
-            );
+            let (start, _) = self.segment_span::<Renderer>(&rendered.text, line, segment);
             start
         } else {
             self.state.scroll_x
@@ -2649,6 +2822,13 @@ where
                         }));
                         shell.capture_event();
                     }
+                    // **`Esc` で追加のキャレットと矩形を解く**（v3 R-11）。無ければ外へ譲る
+                    keyboard::Key::Named(Named::Escape)
+                        if !self.state.extra.is_empty() || self.state.rect.is_some() =>
+                    {
+                        shell.publish((self.on_action)(Action::ClearCarets));
+                        shell.capture_event();
+                    }
                     _ => {
                         // **`Ctrl` / `Alt` 付きは本文へ入れない。**
                         //
@@ -2707,7 +2887,21 @@ where
                 // **`Ctrl` を押しながらならリンクを開く**（R-19）。
                 // キャレットも動かす（開けなかったときに、どこを見たか分かる）
                 if modifiers.command() && !modifiers.shift() && !modifiers.alt() {
-                    shell.publish((self.on_action)(Action::OpenLinkAt { line, column }));
+                    // **2 回目なら語を足す**（v3 R-11）。1 回目はいままでどおりリンクを開く
+                    // （アプリは 1 回目の前のキャレットを控えておき、足すときに戻す）
+                    let state = tree.state.downcast_mut::<State>();
+                    let now = std::time::Instant::now();
+                    let quick = state
+                        .last_click
+                        .is_some_and(|last| now.duration_since(last) < MULTI_CLICK);
+                    state.clicks = if quick && state.clicks == 1 { 2 } else { 1 };
+                    state.last_click = Some(now);
+                    let action = if state.clicks == 2 {
+                        Action::AddWord { line, column }
+                    } else {
+                        Action::OpenLinkAt { line, column }
+                    };
+                    shell.publish((self.on_action)(action));
                     shell.capture_event();
                     return;
                 }
@@ -2884,6 +3078,8 @@ where
         // **畳んだ行は飛ばして並べる**（R-20）。段と行は一致しない。
         // 折り返していれば 1 行が何段にもなる（v2.2.0）
         let drawn = self.drawn_rows(bounds.height);
+        // 塗る選択（v3 R-11 で複数になった）
+        let spans = self.selection_spans();
 
         let text_color = style.text_color;
         let gutter_color = Color {
@@ -3052,7 +3248,7 @@ where
                     self.draw_inline_diff::<Renderer>(renderer, &rendered, line_index, left, y);
                     // **空行でも選択は描く。** 行末の改行が選ばれていることが分かる
                     self.draw_selection::<Renderer>(
-                        renderer, &rendered, line_index, left, y, text_color,
+                        renderer, &rendered, &spans, line_index, left, y, text_color,
                     );
                     self.draw_rect::<Renderer>(
                         renderer, &rendered, line_index, left, y, text_color,
@@ -3107,6 +3303,20 @@ where
                             None,
                             &text_clip,
                         ),
+                        // `U+FE0F` 付きの字がある行は、色の区切りの道で描く（絵文字の字体で重ねるため。v3 R-19 C）
+                        (None, None) if rendered.text.contains('\u{FE0F}') => self
+                            .draw_colored::<Renderer>(
+                                renderer,
+                                &rendered.text,
+                                line_index,
+                                segment,
+                                left,
+                                y,
+                                text_color,
+                                None,
+                                Some(Vec::new()),
+                                &text_clip,
+                            ),
                         (None, None) => draw_text(
                             renderer,
                             self.segment_text(&rendered.text, line_index, segment),
@@ -3165,6 +3375,38 @@ where
                     },
                     text_color,
                 );
+            }
+            // 追加のキャレット（v3 R-11）。**画面に出ている行のものだけ**測る
+            if self.state.caret_visible && !self.state.extra.is_empty() {
+                let shown = drawn.first().map(|row| row.0).unwrap_or(0)
+                    ..=drawn.last().map(|row| row.0).unwrap_or(0);
+                for caret in &self.state.extra {
+                    if !shown.contains(&caret.line) {
+                        continue;
+                    }
+                    let content = self.line_content(caret.line);
+                    let segment = self.segment_of(caret.line, caret.column, content.clone());
+                    if !drawn.contains(&(caret.line, segment)) {
+                        continue;
+                    }
+                    let (x, y) = self.caret_point::<Renderer>(
+                        bounds,
+                        caret.line,
+                        caret.column,
+                        content,
+                        segment,
+                    );
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(x, y + 1.0),
+                                Size::new(2.0, self.line_height - 2.0),
+                            ),
+                            ..Default::default()
+                        },
+                        text_color,
+                    );
+                }
             }
         });
 

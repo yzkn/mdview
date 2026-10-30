@@ -9,16 +9,19 @@ mod editor;
 // 同梱フォント（§16.11）。描画・測定の双方がここを見る
 // 差分の地図（v2.3.0 R-02 e）
 pub mod diffmap;
-pub mod fonts;
+pub use mdview_core::render::emoji;
+pub use mdview_core::render::fonts;
 mod measure;
 mod preview;
-pub mod slides;
+pub use mdview_core::render::slides;
 // WYSIWYG の見た目の行とキャレット（v2.5.0 R-01）
 pub mod wysiwyg;
 // 背景画像（v2.4.0 R-01）
 pub mod backdrop;
 // 図を拡大して見る（v2.4.0 R-04）
 pub mod figure;
+// 画面の絵文字を同梱の字体で（v3 R-19）
+pub mod emoji_font;
 // 桁の目盛り（v2.3.0 R-07）
 pub mod ruler;
 pub mod scrollbar;
@@ -36,10 +39,11 @@ pub use divider::{Divider, WIDTH as DIVIDER_WIDTH};
 /// 描画器そのものは要らないためである
 pub type PdfMeasurer = measure::IcedMeasurer<iced::Renderer>;
 pub use editor::{
-    advance_scroll_x, cells_before, take_whole_lines, text_left, Action, CompletionView,
+    advance_scroll_x, cells_before, take_whole_lines, text_left, Action, Caret, CompletionView,
     CursorMove, DiffMarks, EditorState, EditorView, ImeAction, LineMark, RectSelection,
 };
-pub use preview::token_color;
+pub use mdview_core::render::palette;
+pub use mdview_core::render::token_color;
 pub use preview::{
     DetailsFolds, PreviewAction, PreviewColors, PreviewState, PreviewView, WysiwygCaret,
     BASE_SIZE as PREVIEW_BASE_SIZE,
@@ -107,6 +111,16 @@ pub enum Message {
     ToggleRegex,
     /// 大文字小文字を区別するかの切り替え
     ToggleCase,
+    /// 単語単位で探すかの切り替え（v3 R-09）
+    ToggleWholeWord,
+    /// 大きすぎるファイルを全部開く（v3 R-12）。`false` は確認を出す・`true` は開く
+    OpenWhole(bool),
+    /// 「全部を開く」の確認をやめる（v3 R-12）
+    DismissWholeConfirm,
+    /// ほかの窓で開いているかの答え（v3 R-15）。`true` ならその窓が前に出た
+    OpenElsewhere(std::path::PathBuf, crate::app::OpenNext, bool),
+    /// 権限を上げて書き終えた（v3 R-14）
+    ElevatedSaved(Box<crate::app::ElevatedSave>),
     /// いま選んでいる 1 件を置き換える
     ReplaceOne,
     /// すべて置き換える
@@ -199,6 +213,10 @@ pub enum Message {
     ZoomReset,
     /// すべて選択
     SelectAll,
+    /// キャレットを下（`true`）・上へ足す（v3 R-11）
+    AddCaret(bool),
+    /// 同じ語を選ぶ。`true` なら全部、でなければ次の 1 つ（v3 R-11）
+    SelectOccurrence(bool),
     /// 選んだ範囲を作り替える（§4.9）
     Transform(crate::edit::transform::Transform),
     /// 字下げを増やす（`true`）／減らす（`false`）
@@ -262,6 +280,8 @@ pub enum Message {
     Diff(crate::app::diff::DiffMessage),
     /// 図を拡大して見る画面（v2.4.0 R-04）
     Figure(crate::app::FigureMessage),
+    /// 図のファイルの絵（v3 R-13）
+    FileFigure(crate::app::FileFigureMessage),
     /// 選んでいる文字に目 grep の印を付ける（v2.3.0 R-05 C-3）
     EyeMarkSelection,
     /// 目次と見出しの番号（v2.3.0 R-10）
@@ -275,6 +295,21 @@ pub enum Message {
     CommandPaletteSubmit,
     CommandPalettePick(usize),
     CloseCommandPalette,
+    /// メニューの行に乗った（v3 R-05。`sub` なら下の階層の欄）
+    MenuHover {
+        sub: bool,
+        index: usize,
+    },
+    /// 下の階層を切り替える待ちの刻み（v3 R-05）
+    MenuTick,
+    /// OS のメニューで押されたものを受け取る刻み（v3 R-06。macOS だけ）
+    NativeMenuPoll,
+    /// メニューを開いている間のキー（v3 R-05）
+    MenuKey(crate::app::MenuKey),
+    /// 打鍵の一覧（v3 R-16。`F1` で出す・閉じる）
+    ToggleKeyList,
+    KeyListInput(String),
+    CloseKeyList,
     OpenSnippetPicker,
     SnippetPickerInput(String),
     SnippetPickerSubmit,

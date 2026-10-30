@@ -26,85 +26,14 @@ use crate::io::settings::JumpClick;
 
 use super::fonts;
 use super::measure::IcedMeasurer;
+use super::palette::Palette;
 use super::slides::{Frame, Shown};
 use crate::document::Document;
 use crate::embed::{EmbedSource, JobState};
 use crate::layout::{
     embed_source, is_embed_block, layout_block, layout_figure_editor, BlockKey, EmbedLookup,
-    LayoutCache, LayoutContext, LineBox, RunDecoration, ScrollAnchor, TextMeasurer, TokenRole,
+    LayoutCache, LayoutContext, LineBox, RunDecoration, ScrollAnchor, TextMeasurer,
 };
-
-/// 字句の役割を色に変える（DEC-211 / §16.10）。
-///
-/// **本文色からの相対ずらしでは作れない。** 最初その方式で書いたところ、
-/// 本文が白に近いテーマで全色が白へ飽和し、型が本文と同じ色になった。
-/// 明暗それぞれに実色を置き、本文色の明度で選び分ける。
-struct Palette {
-    keyword: Color,
-    string: Color,
-    comment: Color,
-    number: Color,
-    kind: Color,
-    function: Color,
-}
-
-/// `#rrggbb` から色を作る。
-const fn rgb(hex: u32) -> Color {
-    Color {
-        r: ((hex >> 16) & 0xff) as f32 / 255.0,
-        g: ((hex >> 8) & 0xff) as f32 / 255.0,
-        b: (hex & 0xff) as f32 / 255.0,
-        a: 1.0,
-    }
-}
-
-impl Palette {
-    fn new(text: Color) -> Self {
-        // 本文が暗い = 背景が明るい
-        if luminance(text) < 0.5 {
-            Self {
-                keyword: rgb(0xaf00db),
-                string: rgb(0xa31515),
-                comment: rgb(0x2e7d32),
-                number: rgb(0x098658),
-                kind: rgb(0x267f99),
-                function: rgb(0x795e26),
-            }
-        } else {
-            Self {
-                keyword: rgb(0xc586c0),
-                string: rgb(0xce9178),
-                comment: rgb(0x7bab68),
-                number: rgb(0xb5cea8),
-                kind: rgb(0x4ec9b0),
-                function: rgb(0xdcdcaa),
-            }
-        }
-    }
-
-    fn of(&self, role: TokenRole, text: Color) -> Color {
-        match role {
-            TokenRole::Keyword => self.keyword,
-            TokenRole::Str => self.string,
-            TokenRole::Comment => self.comment,
-            TokenRole::Number | TokenRole::Constant => self.number,
-            TokenRole::Type => self.kind,
-            TokenRole::Function => self.function,
-            // 約物と素の字は本文色のまま。**塗りすぎると読みにくくなる**
-            TokenRole::Plain | TokenRole::Punctuation => text,
-        }
-    }
-}
-
-/// 字句の役割の色（本文の色から明るいテーマか暗いテーマかを決める）。PPTX の書き出しも使う（v2.7.0 R-01）
-pub fn token_color(role: TokenRole, text: Color) -> Color {
-    Palette::new(text).of(role, text)
-}
-
-/// 明るさ（ITU-R BT.709）。テーマが明るいか暗いかの判定に使う。
-fn luminance(color: Color) -> f32 {
-    0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
-}
 
 /// 本文の左右余白。
 const PADDING: f32 = 24.0;
@@ -502,8 +431,9 @@ pub struct PreviewView<'a> {
     match_color: Option<Color>,
     text_size: f32,
     on_action: Box<dyn Fn(PreviewAction) -> super::Message + 'a>,
-    /// 検索語。**表示されている文字を探す**（§8.2）
-    query: &'a str,
+    /// 検索の探し方。**表示されている文字を探す**（§8.2）。文書の検索と同じ指定
+    /// （大文字小文字・正規表現・単語単位）で塗る（v3。以前は字そのものを、区別せずに探していた）
+    search: Option<&'a crate::search::Pattern>,
     /// 色の上書き（v2.3.0 R-05）
     colors: PreviewColors,
     /// 目 grep（v2.3.0 R-05 C-3）
@@ -573,7 +503,7 @@ impl<'a> PreviewView<'a> {
             base_dir: None,
             text_size: Self::BASE_SIZE,
             on_action: Box::new(on_action),
-            query: "",
+            search: None,
             colors: PreviewColors::default(),
             eye: &[],
             jump: None,
@@ -949,8 +879,8 @@ impl<'a> PreviewView<'a> {
     /// **原文ではなく表示された文字を探す。** プレビューでは記法が消えており、
     /// 原文のバイト位置では強調する場所を決められない。
     /// そのため件数（`3/12`）は原文基準、強調は表示文字基準になる
-    pub fn highlight(mut self, query: &'a str) -> Self {
-        self.query = query;
+    pub fn highlight(mut self, search: Option<&'a crate::search::Pattern>) -> Self {
+        self.search = search.filter(|pattern| !pattern.is_empty());
         self
     }
 
@@ -1061,6 +991,7 @@ impl<'a> PreviewView<'a> {
                     height: 0.0,
                     lines: Vec::new(),
                     quote_bar: false,
+                    alert: None,
                     code_background: false,
                     rules: Vec::new(),
                     embed: None,
@@ -1961,15 +1892,36 @@ where
                 renderer.with_layer(block_clip, |renderer| {
                     // 引用の縦線
                     if laid_out.quote_bar {
+                        let height = (laid_out.height - 12.0).max(0.0);
+                        // GitHub のアラート（v3 R-08）: 種類の色の縦線と、薄い地。字の色が明るければ暗い配色
+                        let dark =
+                            0.2126 * text_color.r + 0.7152 * text_color.g + 0.0722 * text_color.b
+                                > 0.5;
+                        let bar = match laid_out.alert {
+                            Some(kind) => {
+                                renderer.fill_quad(
+                                    renderer::Quad {
+                                        bounds: Rectangle::new(
+                                            Point::new(left, y),
+                                            Size::new(shown.width.max(0.0), height),
+                                        ),
+                                        ..Default::default()
+                                    },
+                                    Color {
+                                        a: crate::parse::alert::TINT,
+                                        ..kind.color(dark)
+                                    },
+                                );
+                                kind.color(dark)
+                            }
+                            None => over.quote_rule.unwrap_or(muted),
+                        };
                         renderer.fill_quad(
                             renderer::Quad {
-                                bounds: Rectangle::new(
-                                    Point::new(left, y),
-                                    Size::new(3.0, (laid_out.height - 12.0).max(0.0)),
-                                ),
+                                bounds: Rectangle::new(Point::new(left, y), Size::new(3.0, height)),
                                 ..Default::default()
                             },
-                            over.quote_rule.unwrap_or(muted),
+                            bar,
                         );
                     }
 
@@ -2195,8 +2147,8 @@ where
                             //
                             // **ラン（同じ体裁の連なり）の中だけを探す。** ランをまたぐ
                             // 一致は強調しない。体裁が変わる境目に語が跨がるのは稀である
-                            if !self.query.is_empty() {
-                                for found in crate::search::find_in_text(&run.text, self.query) {
+                            if let Some(search) = self.search {
+                                for found in search.find_in(&run.text) {
                                     let before =
                                         search_measurer.width(&run.text[..found.start], run.style);
                                     let width = search_measurer
@@ -2222,6 +2174,13 @@ where
                             let color = match (run.decoration, run.style, heading) {
                                 (RunDecoration::Emphasis, ..) => emphasis,
                                 (RunDecoration::Link, ..) => link,
+                                // GitHub のアラートの見出し（v3 R-08）: 種類の色。字の色が明るければ暗い配色
+                                (RunDecoration::AlertTitle(kind), ..) => kind.color(
+                                    0.2126 * text_color.r
+                                        + 0.7152 * text_color.g
+                                        + 0.0722 * text_color.b
+                                        > 0.5,
+                                ),
                                 (_, crate::layout::TextStyle::Heading(_), Some(heading)) => heading,
                                 _ => palette.of(run.role, text_color),
                             };
@@ -2251,34 +2210,81 @@ where
                                     color,
                                 );
                             }
-                            renderer.fill_text(
-                                Text {
-                                    content: if line_index == 0
-                                        && self.details.as_ref().is_some_and(|folds| {
-                                            folds.head(*block_index) == Some(true)
-                                        }) {
-                                        // 畳んだ `<details>` の印（v2.9.0 R-03）
-                                        run.text.replacen(
-                                            crate::parse::inline::DETAILS_MARKER,
-                                            crate::parse::inline::DETAILS_FOLDED,
-                                            1,
-                                        )
-                                    } else {
-                                        run.text.clone()
+                            // `U+FE0F` 付きの字は絵文字の字体で（v3 R-19 C）。**区切りごとに測って横に並べて描く**
+                            // （段落を作って `fill_paragraph` で描くと、描き手が弱い参照しか持たず、描く前に消えた。実際に踏んだ）
+                            if let Some(spans) = super::emoji_font::presented_spans(&run.text, font)
+                            {
+                                let mut at = x;
+                                for span in &spans {
+                                    let part_font = span.font.unwrap_or(font);
+                                    let text = Text {
+                                        content: span.text.to_string(),
+                                        bounds: Size::new(f32::INFINITY, line.height),
+                                        size: Pixels(size),
+                                        line_height: text::LineHeight::Absolute(Pixels(
+                                            line.height,
+                                        )),
+                                        font: part_font,
+                                        align_x: text::Alignment::Left,
+                                        align_y: iced::alignment::Vertical::Top,
+                                        shaping: text::Shaping::Advanced,
+                                        wrapping: text::Wrapping::None,
+                                    };
+                                    let width = text::Paragraph::min_width(
+                                        &<Renderer::Paragraph as text::Paragraph>::with_text(
+                                            Text {
+                                                content: text.content.as_str(),
+                                                bounds: text.bounds,
+                                                size: text.size,
+                                                line_height: text.line_height,
+                                                font: text.font,
+                                                align_x: text.align_x,
+                                                align_y: text.align_y,
+                                                shaping: text.shaping,
+                                                wrapping: text.wrapping,
+                                            },
+                                        ),
+                                    );
+                                    renderer.fill_text(
+                                        text,
+                                        Point::new(at, line_y + lift),
+                                        color,
+                                        *viewport,
+                                    );
+                                    at += width;
+                                }
+                            } else {
+                                renderer.fill_text(
+                                    Text {
+                                        content: if line_index == 0
+                                            && self.details.as_ref().is_some_and(|folds| {
+                                                folds.head(*block_index) == Some(true)
+                                            }) {
+                                            // 畳んだ `<details>` の印（v2.9.0 R-03）
+                                            run.text.replacen(
+                                                crate::parse::inline::DETAILS_MARKER,
+                                                crate::parse::inline::DETAILS_FOLDED,
+                                                1,
+                                            )
+                                        } else {
+                                            run.text.clone()
+                                        },
+                                        bounds: Size::new(f32::INFINITY, line.height),
+                                        size: Pixels(size),
+                                        line_height: text::LineHeight::Absolute(Pixels(
+                                            line.height,
+                                        )),
+                                        font,
+                                        align_x: text::Alignment::Left,
+                                        align_y: iced::alignment::Vertical::Top,
+                                        shaping: text::Shaping::Advanced,
+                                        wrapping: text::Wrapping::None,
                                     },
-                                    bounds: Size::new(f32::INFINITY, line.height),
-                                    size: Pixels(size),
-                                    line_height: text::LineHeight::Absolute(Pixels(line.height)),
-                                    font,
-                                    align_x: text::Alignment::Left,
-                                    align_y: iced::alignment::Vertical::Top,
-                                    shaping: text::Shaping::Advanced,
-                                    wrapping: text::Wrapping::None,
-                                },
-                                Point::new(x, line_y + lift),
-                                color,
-                                *viewport,
-                            );
+                                    Point::new(x, line_y + lift),
+                                    color,
+                                    *viewport,
+                                );
+                            }
                         }
                     }
 

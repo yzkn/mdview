@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 出力を共有するときに置く所（DocumentsPlugin.kt の cacheDir/mdview/share） -->
+    <cache-path name="share" path="mdview/share/" />
+</paths>

@@ -225,10 +225,18 @@ class Mdview:
             return self.request("set_clipboard", image=str(image))
         return self.request("set_clipboard", text=text)
 
-    def editor_click(self, line, column=0, ctrl=False, gutter=False, shift=False):
-        """本文を押す。``ctrl`` でリンクを開き、``gutter`` で行番号の欄の開閉の印を押す。"""
+    def editor_click(self, line, column=0, ctrl=False, gutter=False, shift=False, word=False):
+        """本文を押す。``ctrl`` でリンクを開き、``gutter`` で行番号の欄の開閉の印を押す。
+
+        ``ctrl`` と ``word`` で、``Ctrl`` + ダブルクリックの 2 回目（語を足す。v3）。"""
         return self.request(
-            "editor_click", line=line, column=column, ctrl=ctrl, gutter=gutter, shift=shift
+            "editor_click",
+            line=line,
+            column=column,
+            ctrl=ctrl,
+            gutter=gutter,
+            shift=shift,
+            word=word,
         )
 
     def window(self):
@@ -242,7 +250,10 @@ class Mdview:
         return [e for e in self.elements() if e["id"].startswith(f"menu.{heading}.")]
 
     def close_menu(self):
-        if self.state()["open_menu"]:
+        """メニューを閉じる。**下の階層を開いていれば、閉じるまで `Esc` を押す**（v3 から `Esc` は 1 段戻る）"""
+        for _ in range(3):
+            if not self.state()["open_menu"]:
+                return
             self.key("Escape")
 
     def quit(self):

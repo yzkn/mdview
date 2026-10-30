@@ -9,9 +9,10 @@
 //! 行を選んで**まとめて写す**（v2.7.0 R-03）。写す前に作る・上書きする・消すものを見せて確かめ、写す先にしか
 //! 無いものを消すのは、そこで選んだときだけ（OS のごみ箱へ）。写すのも少しずつ裏で行い、途中で止められる。
 
+use super::fluent;
 use std::path::{Path, PathBuf};
 
-use iced::widget::{button, checkbox, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, Task};
 
 use super::App;
@@ -29,7 +30,7 @@ const COPY_CHUNK: usize = 16;
 pub struct CopyState {
     pub direction: Direction,
     pub plan: Plan,
-    /// 写す先にしか無いものを消すか（確かめの窓で選ぶ。既定は消さない）
+    /// 写す先にしか無いものを消すか（確認の窓で選ぶ。既定は消さない）
     pub delete_extra: bool,
     /// 写し始めたか（`false` なら確かめている）
     pub running: bool,
@@ -67,7 +68,7 @@ pub struct FolderScreen {
     pub opened: Option<usize>,
     /// 選んだ行（一覧と同じ並び。v2.7.0 R-03）
     pub selected: Vec<bool>,
-    /// まとめて写す（確かめ・最中・失敗の一覧）
+    /// まとめて写す（確認・最中・失敗の一覧）
     pub copy: Option<CopyState>,
 }
 
@@ -138,13 +139,13 @@ pub enum FolderMessage {
     SelectAll,
     SelectDifferent,
     SelectNone,
-    /// まとめて写す（向き）。確かめる設定なら確かめの窓を出す
+    /// まとめて写す（向き）。確かめる設定なら確認の窓を出す
     Copy(Direction),
     /// 写す先にしか無いものを消すか
     CopyDeleteExtra(bool),
-    /// 確かめの窓の「写す」
+    /// 確認の窓の「写す」
     CopyStart,
-    /// 確かめの窓の「やめる」・写している最中の「止める」・失敗の一覧の「閉じる」
+    /// 確認の窓の「やめる」・写している最中の「止める」・失敗の一覧の「閉じる」
     CopyCancel,
     /// 写した・消した（行の番号・消したか・結果）
     Copied {
@@ -411,6 +412,7 @@ impl App {
                             .unwrap_or_default(),
                         oversized: false,
                         lossy: false,
+                        truncated: None,
                     })
                 };
                 let left_file = a.clone().unwrap_or_else(|| empty(left.clone(), &b));
@@ -446,7 +448,7 @@ impl App {
         });
     }
 
-    /// まとめて写す（v2.7.0 R-03）。選んだ行から中身を決め、確かめる設定なら確かめの窓を出す
+    /// まとめて写す（v2.7.0 R-03）。選んだ行から中身を決め、確かめる設定なら確認の窓を出す
     fn folder_copy(&mut self, direction: Direction) -> Task<Message> {
         let confirm = self.settings.diff_copy_confirm;
         let Some(screen) = self.folder_screen.as_mut() else {
@@ -672,7 +674,7 @@ impl App {
         }
     }
 
-    /// まとめて写すの確かめの窓・進み具合・失敗の一覧
+    /// まとめて写すの確認の窓・進み具合・失敗の一覧
     fn folder_copy_panel<'a>(
         &'a self,
         screen: &'a FolderScreen,
@@ -730,7 +732,7 @@ impl App {
                     .size(11),
                 );
             }
-            body = body.push(scrollable(list).height(Length::Fixed(120.0)));
+            body = body.push(fluent::scrollable(list).height(Length::Fixed(120.0)));
         } else {
             let plan = &copy.plan;
             body = body.push(
@@ -745,7 +747,7 @@ impl App {
             );
             if !plan.extra.is_empty() {
                 body = body.push(
-                    checkbox(copy.delete_extra)
+                    fluent::checkbox(copy.delete_extra)
                         .label(format!(
                             "写す先にしか無い {} 件を消す（OS のごみ箱へ）",
                             plan.extra.len()
@@ -769,7 +771,7 @@ impl App {
             for (kind, index) in lines.take(500) {
                 list = list.push(text(format!("{kind}　{}", name(index))).size(11));
             }
-            body = body.push(scrollable(list).height(Length::Fixed(140.0)));
+            body = body.push(fluent::scrollable(list).height(Length::Fixed(140.0)));
             body = body.push(
                 row![
                     button(text("写す").size(12))
@@ -810,7 +812,7 @@ impl App {
         let header = row![
             text("フォルダーを比べる").size(15),
             text(summary).size(12).width(Length::Fill),
-            checkbox(screen.only_different)
+            fluent::checkbox(screen.only_different)
                 .label("違うものだけ")
                 .text_size(12)
                 .on_toggle(|on| Message::Folder(FolderMessage::OnlyDifferent(on))),
@@ -900,7 +902,7 @@ impl App {
             let chosen = screen.selected.get(index).copied().unwrap_or(false);
             list = list.push(
                 row![
-                    checkbox(chosen).on_toggle_maybe(
+                    fluent::checkbox(chosen).on_toggle_maybe(
                         idle.then_some(move |on| Message::Folder(FolderMessage::Select(index, on)))
                     ),
                     button(label)
@@ -926,7 +928,7 @@ impl App {
                     .size(11)
                     .into(),
                 },
-                container(scrollable(list).height(Length::Fill))
+                container(fluent::scrollable(list).height(Length::Fill))
                     .padding(2)
                     .style(container::bordered_box),
             ]

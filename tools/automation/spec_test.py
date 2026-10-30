@@ -750,16 +750,16 @@ PAGE_ITEMS = {
                "editor_guide_columns", "minimap", "minimap_width", "wysiwyg", "wysiwyg_limit_kb", "wysiwyg_table_align", "list_marker", "emphasis_marker", "strong_marker"],
     # プレビューから編集の行へ（v2.4.0 R-03）
     # 図の拡大（v2.4.0 R-04）
-    "preview": ["preview_font_size", "frontmatter_panel", "html_tables", "html_elements", "preview_jump", "preview_jump_click", "preview_follow_caret",
+    "preview": ["preview_font_size", "frontmatter_panel", "html_tables", "html_elements", "github_alerts", "preview_jump", "preview_jump_click", "preview_follow_caret",
                 "figure_zoom", "figure_button", "figure_png_scale", "code_copy_button"],
     # 背景画像（v2.4.0 R-01）は配色と題名の間
-    "appearance": ["theme", "window_material", "window_body_tint", "bg_enabled", "bg_area", "bg_fit", "bg_anchor", "bg_scroll",
+    "appearance": ["theme", "window_material", "window_body_tint", "look_os", "bg_enabled", "bg_area", "bg_fit", "bg_anchor", "bg_scroll",
                    "bg_light_image", "bg_light_opacity", "bg_light_blur",
                    "bg_dark_image", "bg_dark_opacity", "bg_dark_blur",
                    "title_format", "status_format"],
-    "file": ["remember_urls", "remote_images", "url_system_proxy", "recent_limit", "autosave_draft", "autosave", "autosave_seconds",
+    "file": ["remember_urls", "remote_images", "url_system_proxy", "recent_limit", "remember_positions", "positions_limit", "large_file_mb", "autosave_draft", "autosave", "autosave_seconds",
              "watch_external", "reload_unmodified"],
-    "assist": ["continue_lists", "table_format", "paste_url_as_link", "paste_images",
+    "assist": ["continue_lists", "line_copy", "table_format", "paste_url_as_link", "paste_images",
                "image_markup", "image_folder", "toc_depth", "lint_enabled", "format_tables", "format_bullets", "format_bullet", "format_emphasis", "lint_fix_menu", "lint_fix_key", "lint_fix_save", "lint_fix_close", "format_menu", "format_key", "format_save", "format_close"],
     # v2.3.0 R-02
     # MCP（v2.4.0 R-06 6c）
@@ -777,7 +777,7 @@ CHANGED = {
     "show_gremlins": "false", "minimap": "false", "minimap_width": "120",
     "preview_font_size": "20", "theme": "dark", "recent_limit": "5",
     "autosave_draft": "false", "autosave": "true", "autosave_seconds": "10",
-    "watch_external": "false", "reload_unmodified": "true", "continue_lists": "false",
+    "watch_external": "false", "reload_unmodified": "true", "continue_lists": "false", "line_copy": "false",
     "table_format": "false", "paste_url_as_link": "false", "paste_images": "false",
     "image_markup": "markdown", "image_folder": "pics",
     # v2.2.0
@@ -794,7 +794,7 @@ CHANGED = {
     "bg_dark_blur": "strong",
     "preview_jump": "false", "preview_jump_click": "alt", "preview_follow_caret": "false",
     "figure_zoom": "false", "figure_button": "false", "figure_png_scale": "3",
-    "code_copy_button": "false", "mcp_enabled": "false", "mcp_headless": "false", "mcp_http": "true", "mcp_http_port": "39300", "marp_slides": "false", "marp_assist": "false", "marp_present_info": "true", "marp_export_format": "pptx", "pptx_embed_fonts": "false", "remember_urls": "false", "remote_images": "true", "url_system_proxy": "false", "frontmatter_panel": "false", "html_tables": "false", "html_elements": "false", "wysiwyg": "false", "wysiwyg_limit_kb": "2048", "wysiwyg_table_align": "true", "format_tables": "false", "format_bullets": "false", "format_bullet": "+", "format_emphasis": "false", "lint_fix_menu": "false", "lint_fix_key": "false", "lint_fix_save": "true", "lint_fix_close": "true", "format_menu": "false", "format_key": "false", "format_save": "true", "format_close": "true", "list_marker": "second", "emphasis_marker": "second", "strong_marker": "second", "window_material": "opaque", "window_body_tint": "false",
+    "code_copy_button": "false", "mcp_enabled": "false", "mcp_headless": "false", "mcp_http": "true", "mcp_http_port": "39300", "marp_slides": "false", "marp_assist": "false", "marp_present_info": "true", "marp_export_format": "pptx", "pptx_embed_fonts": "false", "remember_urls": "false", "remote_images": "true", "url_system_proxy": "false", "frontmatter_panel": "false", "html_tables": "false", "html_elements": "false", "github_alerts": "false", "remember_positions": "false", "positions_limit": "20", "large_file_mb": "500", "wysiwyg": "false", "wysiwyg_limit_kb": "2048", "wysiwyg_table_align": "true", "format_tables": "false", "format_bullets": "false", "format_bullet": "+", "format_emphasis": "false", "lint_fix_menu": "false", "lint_fix_key": "false", "lint_fix_save": "true", "lint_fix_close": "true", "format_menu": "false", "format_key": "false", "format_save": "true", "format_close": "true", "list_marker": "second", "emphasis_marker": "second", "strong_marker": "second", "window_material": "opaque", "window_body_tint": "false", "look_os": "false",
 }
 
 
@@ -2006,7 +2006,8 @@ def img_tags_render_as_images(ctx):
     tiny_png(os.path.join(folder, "images", "wide.png"), 3000, 10)
     doc = ctx.write("render/img.md",
                     '# 画像\n\n<img width="10" height="5" alt="小" onerror="alert(1)" src="images/a.png">\n')
-    app = ctx.app(doc, settings={"theme": "light"})
+    # OS に寄せた見た目は切る（v3 R-07。OS の強調色が青だと、通知の「閉じる」を画像の色と取り違える）
+    app = ctx.app(doc, settings={"theme": "light", "look_os": False})
     html = ctx.path("render/out.html")
     export(app, ctx, "HTML に出力…", html)
     text = open(html, encoding="utf-8").read()

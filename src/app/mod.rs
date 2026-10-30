@@ -8,7 +8,7 @@
 //!     ここと `save_now`（上書き）・画像の貼り付けで断る
 //!   - 試験の口（`--automation`）は `automation`
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, Task};
 
 use std::path::Path;
@@ -69,6 +69,8 @@ mod palette_view;
 mod eyegrep;
 // Fluent Design を考えた光と影（v2.3.0 R-12）
 pub(crate) mod fluent;
+// OS に寄せた見た目（v3 R-07）
+pub(crate) mod look;
 // 背景画像（v2.4.0 R-01）
 mod backdrop_view;
 // Mica 風の地（v2.4.0 R-05）
@@ -80,11 +82,21 @@ mod mcp_settings;
 pub(crate) use ipc_view::position_of;
 // コマンドパレット（v2.4.0 R-02）
 mod command_palette;
+// 打鍵の一覧（v3 R-16）
+mod key_list;
+// メニューの幅を中身に合わせる（v3 R-04）
+mod menu_width;
+// メニューの階層（v3 R-05）
+mod menu_view;
+// macOS では OS のメニュー（v3 R-06）
+mod native_menu;
+pub use menu_view::MenuKey;
+// 選ばずに行ごと切り取る・写す（v3 R-17）
+mod line_copy;
 // プレビューから編集の行へ・キャレットを追う（v2.4.0 R-03）
 mod preview_jump;
 // 図を拡大して見る・PNG で写す（v2.4.0 R-04）
 mod figure_view;
-pub(crate) use command_palette::RECENT_MAX as COMMAND_RECENT_MAX;
 pub use figure_view::FigureMessage;
 // コードスニペット（v2.3.0 R-08 / R-09）
 mod egg;
@@ -117,6 +129,19 @@ mod licenses;
 pub use licenses::{AboutItem, AboutLicense};
 // `<details>` を開く・畳む（v2.9.0 R-03）
 mod details;
+// ファイルごとの位置の記憶（v3 R-10）
+mod positions;
+// マルチカーソル（v3 R-11）
+mod multi;
+// 大きすぎるファイル（v3 R-12）
+mod large;
+// 図のファイルを描いて開く（v3 R-13）
+mod file_figure;
+// 権限の要る場所への保存（v3 R-14）
+mod elevated_save;
+use elevated_save::readonly_attribute;
+pub use elevated_save::ElevatedSave;
+pub use file_figure::FileFigureMessage;
 // frontmatter の欄（v2.6.0 R-03）
 mod front_panel;
 pub use front_panel::FrontAction;
@@ -139,8 +164,15 @@ pub(crate) enum SearchTarget {
     /// マージの面
     Merge(merge_compare::MergePane),
 }
+pub use look::ui_font;
 pub use settings_view::{SettingChange, SettingsPage};
-pub use window::{initial as initial_window, FileStamp};
+
+/// 見た目の組を決める（v3 R-07。起動時）
+pub fn use_look(os: bool) {
+    look::set(look::Look::chosen(os));
+}
+
+pub use window::{focus_existing_on_launch, initial as initial_window, FileStamp, OpenNext};
 
 use crate::render::{
     Action, Divider, EditorState, EditorView, FileCommand, ImeAction, Message, PreviewAction,
@@ -307,6 +339,16 @@ pub struct App {
     search_target: SearchTarget,
     /// 開いているファイルメニューの折りたたみ
     open_submenu: Option<menu::Submenu>,
+    /// メニューの中でいまいる行（v3 R-05。矢印と乗った所で動く）
+    menu_cursor: Option<menu_view::MenuCursor>,
+    /// 乗ってから下の階層を切り替えるまでの待ち（v3 R-05。切り替える先と時刻）
+    menu_pending: Option<(Option<menu::Submenu>, std::time::Instant)>,
+    /// OS のメニュー（v3 R-06。macOS だけ）。中身の写し・押された項目のメッセージ・受け持つ打鍵
+    native_signature: String,
+    native_messages: std::collections::HashMap<String, Message>,
+    native_taken: std::collections::HashSet<String>,
+    #[cfg(target_os = "macos")]
+    native_menu: Option<crate::native_menu_mac::NativeMenu>,
     /// 開いているメニュー。**1 つだけ開く**
     open_menu: Option<menu::Menu>,
     /// About を出しているか
@@ -342,10 +384,19 @@ pub struct App {
     wrap: Option<crate::render::wrap::Wrap>,
     /// 作ったときの鍵（どれかが変われば作り直す）
     wrap_key: Option<crate::render::wrap::WrapKey>,
+    /// 折り返しの表を作ってから書き換えた行（`(最初の行, 消した行の数, 入れた行の数)`。v3 R-12）。
+    /// **表を作り直さず、この行だけを数え直す**（`sync_wrap`）
+    wrap_edits: Vec<(usize, usize, usize)>,
+    /// 図のファイル（`.mmd`・`.svg`）をプレビューの欄に描いたもの（v3 R-13）
+    file_figure: Option<file_figure::FileFigure>,
+    /// 権限を上げて保存している最中か（v3 R-14）。`Some(true)` なら、書けたら保留していた操作を続ける
+    elevating: Option<bool>,
     /// 1 段に入る桁。**エディタが測って知らせてくる**（幅を知るのは描画層だけ）
     wrap_columns: Option<usize>,
     /// プレビューで選んだ文字（v2.2.0）。**最後に触ったのがプレビューのときだけ**写す
     preview_selection: Option<String>,
+    /// 最後に行ごとに写した字（v3 R-17）。**貼る字がこれと同じなら行の頭に貼る**
+    line_clip: Option<String>,
     /// 小窓を開いている図・数式（原文の頭と、前に描けた原文。v2.5.1 R-01）
     figure_hold: Option<(usize, String)>,
     /// 中で打った表（原文の頭。桁をそろえ直す設定のとき、キャレットが出たらそろえる。v2.5.1 R-01）
@@ -402,6 +453,8 @@ pub struct App {
     snippet_picker: Option<String>,
     /// コマンドパレットの絞り込みの文字（開いているときだけ。v2.4.0 R-02）
     command_palette: Option<String>,
+    /// 打鍵の一覧（v3 R-16）。絞り込みの字
+    key_list: Option<String>,
     /// MCP から頼まれた確認（v2.4.0 R-06 6c）
     mcp_confirm: Option<ipc_view::McpConfirm>,
     /// 図を拡大して見る画面（v2.4.0 R-04）と、描く依頼の番号
@@ -447,6 +500,19 @@ pub struct App {
     settings_baseline: Settings,
     /// 設定ファイルの印（中身の要約）。**他の窓が書いたことに気づくため**に持つ
     settings_stamp: Option<u64>,
+    /// ファイルごとの位置の記憶（v3 R-10）。**戻す直前にファイルから読み直す**（ほかの窓の記憶も取り込む）。試験ではファイルを使わない
+    positions: crate::io::positions::Positions,
+    /// マルチカーソル（v3 R-11）: 自分で当てている間か（**ほかの道の編集なら追加のキャレットを消す**。位置が古くなるため）
+    multi_applying: bool,
+    /// `Ctrl` + クリックの前の選択（続けてダブルクリックで語を足すときに戻す。v3 R-11）
+    caret_snapshot: Option<Vec<multi::Sel>>,
+    /// 「同じ語を選ぶ」をキャレットの語から始めたときの範囲と、語単位で探すか（v3 R-11）
+    occurrence_seed: Option<std::ops::Range<usize>>,
+    occurrence_whole: bool,
+    /// 大きすぎるファイル（v3 R-12）: 先頭だけを開いたので読み取り専用にしたか（全部を開いたら外す）
+    truncation_lock: bool,
+    /// 「全部を開く」を押して、確認を出しているか
+    whole_confirm: bool,
     /// この窓へファイルを落としたか（2 つ目からは別の窓。R-09）
     dropped_here: bool,
     /// 試験用の操作口を開いているか（`--automation`）
@@ -717,17 +783,10 @@ fn preview_factor(settings: &Settings) -> f32 {
     settings.zoom * settings.preview_font_size / crate::render::PREVIEW_BASE_SIZE
 }
 
-/// メニューの見出し 1 つぶんの幅（px）。
-///
-/// **同じ幅にする。** 中身を出す位置を「何番目 × この幅」で決めるため、
-/// 幅が揃っていないと見出しの真下に出ない
-const MENU_WIDTH: f32 = 96.0;
 /// メニューバーの高さ（px）。中身を重ねる位置に使う
-const MENU_BAR_HEIGHT: f32 = 36.0;
-/// 開いたメニューの幅（px）
 ///
-/// **打鍵の併記（`Shift + Alt + A`）と並んでも 1 行に収まる幅にする**（v2.1.0）
-const MENU_PANEL_WIDTH: f32 = 320.0;
+/// 見出しと中身の幅は中身に合わせる（v3 R-04。`menu_width`）。v2.9.0 までは見出し 96 px・中身 320 px の決め打ちだった
+const MENU_BAR_HEIGHT: f32 = 36.0;
 
 /// この知らせでメニューを閉じるか。
 ///
@@ -746,6 +805,11 @@ fn closes_menu(message: &Message) -> bool {
             | Message::SearchFound { .. }
             // 折りたたみの開閉でメニューを閉じない（開いた先を選べなくなる）
             | Message::ToggleSubmenu(_)
+            // メニューの中を動く（v3 R-05。押したかは `menu_key` が決める）
+            | Message::MenuHover { .. }
+            | Message::MenuTick
+            | Message::MenuKey(_)
+            | Message::NativeMenuPoll
             // 修飾キーを押しただけでメニューを閉じない
             | Message::ModifiersChanged(_)
             // 割り当て文字は、選んだ側で閉じるかどうかを決める
@@ -792,69 +856,6 @@ fn closes_menu(message: &Message) -> bool {
     )
 }
 
-/// 開いたメニューの 1 行。
-fn item_row(item: menu::Item) -> Element<'static, Message> {
-    match item {
-        // **区切りは線で引く。** 空行だと、詰まって見えるだけで境目にならない
-        menu::Item::Separator => container(iced::widget::rule::horizontal(1))
-            .padding([4, 0])
-            .into(),
-        // **押せない見出し。** 並びが何のためのものかを示す
-        menu::Item::Heading(label) => container(text(label).size(11)).padding([6, 8]).into(),
-        // **開いているかを三角で示す。** 押しても何も起きないように見えない
-        menu::Item::Fold {
-            label,
-            open,
-            message,
-            enabled,
-            access,
-        } => {
-            let head = if open { "▾ " } else { "▸ " };
-            let mut b = button(access_label(&format!("{head}{label}"), access, 13.0))
-                .padding([4, 8])
-                .width(Length::Fill)
-                .style(button::text);
-            if enabled {
-                b = b.on_press(message);
-            }
-            b.into()
-        }
-        menu::Item::Action {
-            label,
-            accel,
-            message,
-            enabled,
-            checked,
-            indent,
-            access,
-        } => {
-            let head = if checked { "● " } else { "   " };
-            // 折りたたみの中身は字下げして、どこに属するかを示す
-            let left: f32 = if indent { 24.0 } else { 8.0 };
-            let line = row![
-                access_label(&format!("{head}{label}"), access, 13.0),
-                iced::widget::Space::new().width(Length::Fill),
-                text(accel).size(11),
-            ]
-            .align_y(iced::Alignment::Center);
-
-            let mut b = button(line)
-                .padding(iced::Padding {
-                    top: 4.0,
-                    right: 8.0,
-                    bottom: 4.0,
-                    left,
-                })
-                .width(Length::Fill)
-                .style(button::text);
-            if enabled {
-                b = b.on_press(message);
-            }
-            b.into()
-        }
-    }
-}
-
 /// 起動時に開くファイルを裏で読み始める（v2.2.2）。**`main()` で窓を作る前に呼ぶ**
 pub fn start_preload() {
     preload::start();
@@ -891,6 +892,14 @@ fn bench_tick_ms() -> u64 {
 fn bench_show_gutter() -> bool {
     std::env::var("BENCH_NO_GUTTER").as_deref() != Ok("1")
 }
+
+/// 打鍵の計測で使うキャレットの数（`BENCH_CARETS`。既定 1）。**マルチカーソルの 1 打鍵を測る**（v3 R-11）
+fn bench_carets() -> usize {
+    std::env::var("BENCH_CARETS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+}
 /// 1 フレームに送る行数。PoC と揃える。
 const BENCH_LINES_PER_FRAME: usize = 7;
 
@@ -910,8 +919,14 @@ fn latency_summary(values: &mut [f64]) -> (f64, f64, usize) {
 
 impl App {
     pub fn new() -> (Self, Task<Message>) {
-        // **読み込みに失敗しても既定値で起動する**（§13.5）
-        let settings = Settings::load();
+        // **読み込みに失敗しても既定値で起動する**（§13.5）。
+        // **試験では利用者の設定を読まない**（2026-10-29）。読むと、利用者が表示の切り替えや WYSIWYG を
+        // 変えただけで試験が落ちる（v3 R-01 の作業中に踏んだ）。保存と読み直しも試験では止めている
+        let settings = if cfg!(test) {
+            Settings::default()
+        } else {
+            Settings::load()
+        };
         // **手元の HTTP で受けるなら、受け持ちを起こす**（v2.4.0 R-06 6d。既定は受けない）
         if !cfg!(test) {
             crate::mcp::http::want(&settings);
@@ -944,10 +959,13 @@ impl App {
 
         // **読み始めていなければ、これまでどおり同期で読む。** 窓が出る前なので UI は止まらない。
         // 開けなければ新規文書として起動する（起動しないよりよい）
+        // 大きすぎるファイルの上限（v3 R-12）。読む前に決める
+        crate::io::set_size_limit(u64::from(settings.large_file_mb) * 1024 * 1024);
         let loaded = if preload.is_some() {
             None
         } else {
-            path.as_deref().map(crate::io::load)
+            path.as_deref()
+                .map(|path| crate::io::load_limited(path, None))
         };
 
         let (text, meta, notice) = match loaded {
@@ -967,7 +985,10 @@ impl App {
                         file.path.display()
                     ))
                 });
-                let meta = DocumentMeta::opened(file.path, file.format);
+                let meta = DocumentMeta {
+                    truncated: file.truncated,
+                    ..DocumentMeta::opened(file.path, file.format)
+                };
                 (file.text, meta, notice)
             }
             Some(Err(error)) => (
@@ -1054,6 +1075,13 @@ impl App {
                 search_focused: false,
                 search_target: SearchTarget::Main,
                 open_submenu: None,
+                menu_cursor: None,
+                menu_pending: None,
+                native_signature: String::new(),
+                native_messages: Default::default(),
+                native_taken: Default::default(),
+                #[cfg(target_os = "macos")]
+                native_menu: None,
                 open_menu: None,
                 about_open: false,
                 about_filter: String::new(),
@@ -1070,8 +1098,12 @@ impl App {
                 fold_headings: Vec::new(),
                 wrap: None,
                 wrap_key: None,
+                wrap_edits: Vec::new(),
+                file_figure: None,
+                elevating: None,
                 wrap_columns: None,
                 preview_selection: None,
+                line_clip: None,
                 figure_hold: None,
                 table_touched: None,
                 table_seen: None,
@@ -1098,6 +1130,7 @@ impl App {
                 lint: Default::default(),
                 snippet_picker: None,
                 command_palette: None,
+                key_list: None,
                 figure: None,
                 figure_generation: 0,
                 mcp_confirm: None,
@@ -1123,6 +1156,13 @@ impl App {
                 autosave_touched: None,
                 settings_baseline: Settings::default(),
                 settings_stamp: None,
+                positions: Default::default(),
+                multi_applying: false,
+                caret_snapshot: None,
+                occurrence_seed: None,
+                occurrence_whole: false,
+                truncation_lock: false,
+                whole_confirm: false,
                 dropped_here: false,
                 automation: automation::requested(),
                 spawned: Vec::new(),
@@ -1148,6 +1188,8 @@ impl App {
             crate::parse::html_table::set_enabled(app.0.settings.html_tables);
             // 決まった HTML（v2.9.0 R-03）
             crate::parse::html_inline::set_enabled(app.0.settings.html_elements);
+            // GitHub のアラート（v3 R-08）
+            crate::parse::alert::set_enabled(app.0.settings.github_alerts);
             // プレビューのタブの幅（v2.8.1 R-02）
             crate::layout::set_tab_width(app.0.settings.tab_width);
         }
@@ -1165,6 +1207,17 @@ impl App {
                 "event": "ready",
                 "version": env!("CARGO_PKG_VERSION"),
             }));
+        }
+        // 覚えた位置へ戻す（v3 R-10）。**すぐ読んだときは `install_document` を通らない**のでここで戻す
+        // （裏で読むときは読み終えて据え付けるときに戻す）。`-g` の行はこのあとで当てるので勝つ
+        if !app.0.preloading {
+            // 先頭だけを開いたなら読み取り専用に（v3 R-12）
+            app.0.settle_truncation();
+            app.0.restore_position();
+            // タスクバー・Dock の「最近使ったもの」にも（v3 R-18）
+            if let Some(path) = app.0.meta.path.clone() {
+                app.0.note_recent(&path);
+            }
         }
         // **`-g` の行へキャレットを置き、その行を先頭に出す**（v2.1.3）。
         // 行が足りなければ最終行。最終行も先頭まで送れるので、どの行でも先頭に来る
@@ -1225,7 +1278,13 @@ impl App {
                         file.path.display()
                     )));
                 }
-                self.install_document(document, DocumentMeta::opened(file.path, file.format));
+                // タスクバー・Dock の「最近使ったもの」にも（v3 R-18）
+                self.note_recent(&file.path);
+                let meta = DocumentMeta {
+                    truncated: file.truncated,
+                    ..DocumentMeta::opened(file.path, file.format)
+                };
+                self.install_document(document, meta);
             }
             Err(reason) => {
                 self.notice = Some(notice::Notice::plain(reason));
@@ -1281,17 +1340,18 @@ impl App {
                     ))
                     .size(13),
                     text("戻すと、保存されていない状態で開きます。").size(12),
-                    row![
+                    fluent::dialog_buttons(vec![
                         button(text("戻す").size(13))
-                            .padding([6, 16])
+                            .padding(look::current().button_padding())
                             .style(fluent::accent)
-                            .on_press(Message::RestoreDraft),
+                            .on_press(Message::RestoreDraft)
+                            .into(),
                         button(text("捨てる").size(13))
-                            .padding([6, 16])
+                            .padding(look::current().button_padding())
                             .style(fluent::standard)
-                            .on_press(Message::DiscardDraft),
-                    ]
-                    .spacing(8),
+                            .on_press(Message::DiscardDraft)
+                            .into(),
+                    ]),
                 ]
                 .spacing(12),
             )
@@ -1315,7 +1375,7 @@ impl App {
 
         let answer = |label: &'static str, answer: Answer| {
             button(text(label).size(13))
-                .padding([6, 16])
+                .padding(look::current().button_padding())
                 // **保存が主な操作**（Fluent の強調）
                 .style(if answer == Answer::Save {
                     fluent::accent
@@ -1330,12 +1390,11 @@ impl App {
                 column![
                     text("保存していない変更があります").size(15),
                     text(format!("{name} の変更を保存しますか。")).size(13),
-                    row![
-                        answer("保存して続ける", Answer::Save),
-                        answer("破棄して続ける", Answer::Discard),
-                        answer("中止", Answer::Cancel),
-                    ]
-                    .spacing(8),
+                    fluent::dialog_buttons(vec![
+                        answer("保存して続ける", Answer::Save).into(),
+                        answer("破棄して続ける", Answer::Discard).into(),
+                        answer("中止", Answer::Cancel).into(),
+                    ]),
                 ]
                 .spacing(12),
             )
@@ -1352,7 +1411,7 @@ impl App {
     fn goto_view(&self, input: &str) -> Element<'_, Message> {
         row![
             text("行番号").size(12),
-            text_input("1", input)
+            fluent::text_input("1", input)
                 .id(goto_input_id())
                 .on_input(Message::GotoInput)
                 // **Enter で決まる。** 入力欄が受け取るので本文へは流れない
@@ -1431,7 +1490,7 @@ impl App {
                 button(text("上へ").size(12))
                     .padding([4, 10])
                     .on_press(Message::BrowserUp),
-                text_input(
+                fluent::text_input(
                     if browser.save {
                         "名前（または絶対パス）"
                     } else {
@@ -1458,7 +1517,7 @@ impl App {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-            container(iced::widget::scrollable(list))
+            container(fluent::scrollable(list))
                 .height(Length::Fill)
                 .width(Length::Fill),
             self.browser_format_row(browser),
@@ -1478,7 +1537,6 @@ impl App {
     ///
     /// **OS のダイアログには足せないので、こちらにだけ置く**（要件定義書 §0.2）
     fn browser_format_row<'a>(&self, browser: &'a browser::Browser) -> Element<'a, Message> {
-        use iced::widget::{checkbox, pick_list};
         if !browser.is_markdown() {
             return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
         }
@@ -1495,7 +1553,7 @@ impl App {
                 .map_or("自動判定".to_owned(), |e| e.label().to_owned());
             return row![
                 text("文字コード").size(12),
-                pick_list(choices, Some(selected), |label: String| {
+                fluent::pick_list(choices, Some(selected), |label: String| {
                     let found = crate::io::Encoding::ALL
                         .into_iter()
                         .find(|e| e.label() == label);
@@ -1511,19 +1569,19 @@ impl App {
             .into();
         }
         let (encoding, bom, ending) = browser.save_format;
-        let mut bom_box = checkbox(bom).label("BOM").text_size(12);
+        let mut bom_box = fluent::checkbox(bom).label("BOM").text_size(12);
         if encoding.supports_bom() {
             bom_box = bom_box.on_toggle(|on| Message::EncodingChoice(EncodingChoice::Bom(on)));
         }
         row![
             text("文字コード").size(12),
-            pick_list(crate::io::Encoding::ALL.to_vec(), Some(encoding), |e| {
+            fluent::pick_list(crate::io::Encoding::ALL.to_vec(), Some(encoding), |e| {
                 Message::EncodingChoice(EncodingChoice::Encoding(e))
             })
             .text_size(12),
             bom_box,
             text("改行").size(12),
-            pick_list(crate::io::LineEnding::ALL.to_vec(), Some(ending), |e| {
+            fluent::pick_list(crate::io::LineEnding::ALL.to_vec(), Some(ending), |e| {
                 Message::EncodingChoice(EncodingChoice::LineEnding(e))
             })
             .text_size(12),
@@ -1554,7 +1612,7 @@ impl App {
         };
 
         let find = row![
-            text_input("検索（原文）", &self.search.query)
+            fluent::text_input("検索（原文）", &self.search.query)
                 .id(search_input_id())
                 .on_input(Message::SearchInput)
                 // **Enter は入力欄に受け取らせる**（§10.40）。
@@ -1569,6 +1627,8 @@ impl App {
             // **切り替えは近くに置く。** 当たらないときに真っ先に疑うのがここ
             toggle("Aa", self.search.case_sensitive, Message::ToggleCase),
             toggle(".*", self.search.use_regex, Message::ToggleRegex),
+            // 単語単位（v3 R-09。`Alt + W`）
+            toggle("単語", self.search.whole_word, Message::ToggleWholeWord),
             toggle("置換", self.search.replacing, Message::ToggleReplace),
             button(text("閉じる").size(12))
                 .padding([4, 10])
@@ -1592,7 +1652,7 @@ impl App {
         column![
             find,
             row![
-                text_input("置換後", &self.search.replacement)
+                fluent::text_input("置換後", &self.search.replacement)
                     .on_input(Message::ReplaceInput)
                     .on_submit(Message::ReplaceOne)
                     .size(13)
@@ -1619,19 +1679,28 @@ impl App {
     /// **`view` から出す。** 1 つの関数に詰めると、何がどこにあるのか
     /// 追いにくい。画面の要素ごとに読めるようにする
     fn chrome(&self) -> Element<'_, Message> {
+        // macOS では画面の上端のメニューバーに出す（v3 R-06）。窓の中には出さない
+        if self.native_menu_bar() {
+            return iced::widget::Space::new().into();
+        }
         let context = self.menu_context();
         let menu_bar = row(menu::Menu::ALL.map(|heading| {
             let opened = self.open_menu == Some(heading);
-            button(access_label(heading.label(), Some(heading.access()), 13.0))
-                .padding([4, 8])
-                .width(Length::Fixed(MENU_WIDTH))
-                .style(if opened {
-                    button::secondary
-                } else {
-                    button::text
-                })
-                .on_press(Message::OpenMenu(heading))
-                .into()
+            button(access_label(
+                heading.label(),
+                Some(heading.access()),
+                menu_width::HEADING_SIZE,
+            ))
+            .padding([4, 8])
+            // 字の幅に合わせる（v3 R-04）
+            .width(Length::Fixed(menu_width::heading(heading)))
+            .style(if opened {
+                button::secondary
+            } else {
+                button::text
+            })
+            .on_press(Message::OpenMenu(heading))
+            .into()
         }))
         .spacing(0);
 
@@ -1639,33 +1708,6 @@ impl App {
         // 二重に持つと片方だけ直して食い違う（利用者の要望）
         let _ = context;
         menu_bar.into()
-    }
-
-    /// 開いているメニューの中身（本文の上に重ねる）。
-    fn dropdown(&self, open: menu::Menu) -> Element<'_, Message> {
-        let index = menu::Menu::ALL
-            .iter()
-            .position(|heading| *heading == open)
-            .unwrap_or(0);
-        let context = self.menu_context();
-        let entries = column(
-            menu::expand(menu::items(open, context), context)
-                .into_iter()
-                .map(item_row),
-        )
-        .spacing(1);
-
-        column![
-            iced::widget::Space::new().height(Length::Fixed(MENU_BAR_HEIGHT)),
-            row![
-                iced::widget::Space::new().width(Length::Fixed(6.0 + index as f32 * MENU_WIDTH)),
-                container(entries)
-                    .padding(6)
-                    .width(Length::Fixed(MENU_PANEL_WIDTH))
-                    .style(fluent::menu),
-            ],
-        ]
-        .into()
     }
 
     /// メニューを組み立てるのに要る、いまの状態。
@@ -1718,7 +1760,9 @@ impl App {
             zoom: self.settings.zoom,
             // 出力中とダイアログ中はファイル操作を止める
             busy: self.export.is_some() || self.picking || self.export_dialog.is_some(),
-            has_selection: self.selected().is_some() || self.editor.rect.is_some(),
+            has_selection: self.selected().is_some() || self.is_multi(),
+            // 行ごとに切り取り・コピーできる（v3 R-17。編集画面を出しているとき）
+            line_copy: self.settings.line_copy && self.mode != ViewMode::Preview,
             preview_selection: self.preview_selection.is_some(),
             has_bom: self.meta.format.has_bom,
             encoding: self.meta.format.encoding,
@@ -1778,7 +1822,7 @@ impl App {
                 page.push(
                     row![
                         button(text("閉じる").size(13))
-                            .padding([6, 16])
+                            .padding(look::current().button_padding())
                             .style(fluent::accent)
                             .on_press(Message::CloseAbout),
                         container(text("")).width(Length::Fill),
@@ -1886,7 +1930,7 @@ impl App {
 
             panel = panel.push(choice("見出しを選ぶ".to_owned(), RangeKind::Heading));
             panel = panel.push(
-                container(scrollable(items).height(Length::Fixed(140.0)))
+                container(fluent::scrollable(items).height(Length::Fixed(140.0)))
                     .width(Length::Fixed(420.0)),
             );
         }
@@ -1895,12 +1939,12 @@ impl App {
         panel = panel.push(
             row![
                 choice("ページを指定".to_owned(), RangeKind::Pages),
-                text_input("1", &dialog.from)
+                fluent::text_input("1", &dialog.from)
                     .on_input(Message::SetExportFrom)
                     .size(13)
                     .width(Length::Fixed(70.0)),
                 text("ページから").size(12),
-                text_input("50", &dialog.count)
+                fluent::text_input("50", &dialog.count)
                     .on_input(Message::SetExportCount)
                     .size(13)
                     .width(Length::Fixed(70.0)),
@@ -1936,19 +1980,18 @@ impl App {
             .align_y(iced::Alignment::Center),
         );
 
-        panel = panel.push(
-            row![
-                button(text("出力").size(13))
-                    .padding([6, 16])
-                    .style(fluent::accent)
-                    .on_press(Message::StartExport),
-                button(text("キャンセル").size(13))
-                    .padding([6, 16])
-                    .style(fluent::standard)
-                    .on_press(Message::DismissExportDialog),
-            ]
-            .spacing(8),
-        );
+        panel = panel.push(fluent::dialog_buttons(vec![
+            button(text("出力").size(13))
+                .padding(look::current().button_padding())
+                .style(fluent::accent)
+                .on_press(Message::StartExport)
+                .into(),
+            button(text("キャンセル").size(13))
+                .padding(look::current().button_padding())
+                .style(fluent::standard)
+                .on_press(Message::DismissExportDialog)
+                .into(),
+        ]));
 
         container(container(panel).padding(24).style(fluent::card))
             .center_x(Length::Fill)
@@ -1967,7 +2010,7 @@ impl App {
         }
 
         // **絞り込みの欄を上に置く**（R-18）。見出しの多い文書で探しやすくする
-        let filter = text_input("目次を絞り込む", &self.toc_filter)
+        let filter = fluent::text_input("目次を絞り込む", &self.toc_filter)
             .id(toc_filter_id())
             .on_input(Message::TocFilter)
             .size(12);
@@ -1997,7 +2040,7 @@ impl App {
 
         column![
             container(filter).padding([4, 6]),
-            scrollable(items).height(Length::Fill)
+            fluent::scrollable(items).height(Length::Fill)
         ]
         .into()
     }
@@ -2014,6 +2057,14 @@ impl App {
         self.status().text(&self.settings.status_format)
     }
 
+    /// 開いた・保存したファイルを、タスクバー（Windows）・Dock（macOS）の「最近使ったもの」へ（v3 R-18）。
+    /// **試験と試験の口では知らせない**（利用者の一覧を試験のファイルで埋めない）
+    fn note_recent(&self, path: &Path) {
+        if !cfg!(test) && !self.automation {
+            crate::recent_docs::note(path);
+        }
+    }
+
     /// 読み取り専用なら知らせて `true`（v2.1.3）。**書き換える操作の入口で呼ぶ**
     pub(super) fn refuse_edit(&mut self) -> bool {
         if self.read_only {
@@ -2024,6 +2075,11 @@ impl App {
 
     /// 読み取り専用を切り替える（v2.1.3）。
     fn toggle_read_only(&mut self) {
+        // **先頭だけを開いているなら外さない**（v3 R-12。書き換えて保存すると後ろが消える）
+        if self.read_only && self.meta.truncated.is_some() {
+            self.notice = Some(notice::Notice::plain(large::LOCKED_NOTICE.to_owned()));
+            return;
+        }
         self.read_only = !self.read_only;
         // 前に出した「読み取り専用です」を残さない
         self.notice = None;
@@ -2039,7 +2095,11 @@ impl App {
         let backdrop = self.refresh_backdrop();
         // Mica 風の地（v2.4.0 R-05）。窓の位置を聞き直し、壁紙が変わっていれば読む
         let mica = self.refresh_mica();
-        Task::batch([task, backdrop, mica])
+        // 図のファイルなら、いまの本文を描くよう頼む（v3 R-13）
+        let figure = self.refresh_file_figure();
+        // OS のメニュー（v3 R-06。macOS だけ）。中身が変わっていれば作り直す
+        self.sync_native_menu();
+        Task::batch([task, backdrop, mica, figure])
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
@@ -2212,12 +2272,20 @@ impl App {
             Message::OpenMenu(menu) => {
                 // 同じ見出しをもう一度押したら閉じる
                 self.open_menu = (self.open_menu != Some(menu)).then_some(menu);
+                self.reset_menu_cursor();
             }
+            // メニューの階層（v3 R-05）
+            Message::MenuHover { sub, index } => self.menu_hover(sub, index),
+            Message::MenuTick => self.menu_tick(),
+            Message::MenuKey(key) => return self.menu_key(key),
+            // OS のメニュー（v3 R-06）
+            Message::NativeMenuPoll => return self.poll_native_menu(),
             // **イースターエッグを出していれば、Esc は About に戻るだけ**（v2.5.0 R-04）
             Message::CloseMenu if self.egg.egg.is_some() => self.egg.egg = None,
             Message::CloseMenu => {
                 // `Esc` は開いているものを閉じる。**両方まとめて閉じる**
                 self.open_menu = None;
+                self.reset_menu_cursor();
                 self.about_open = false;
             }
             Message::Cut => return self.cut(),
@@ -2241,13 +2309,17 @@ impl App {
             Message::SaveWithLineEnding(ending) => {
                 return self.save_now(needs_save_as(&self.meta), SaveAs::Newline(ending))
             }
-            Message::FileDropped(path) => return self.open_dropped(path),
-            Message::OpenRecent(path) => {
-                // **未保存の確認を通す**（§18.2）。開くと編集中の内容は消える
-                if !self.begin(Pending::OpenPath(path)) {
+            // **ほかの窓で開いていれば、その窓を前に出す**（v3 R-15）。開く前に問い合わせる
+            Message::FileDropped(path) => {
+                // 画像はこの文書へ入れる（開くのではない。問い合わせない）
+                if self.drop_image(&path) {
                     return Task::none();
                 }
-                return self.run_pending();
+                return self.open_unless_elsewhere(path, OpenNext::Drop);
+            }
+            Message::OpenRecent(path) => return self.open_unless_elsewhere(path, OpenNext::Recent),
+            Message::OpenElsewhere(path, next, elsewhere) => {
+                return self.opened_elsewhere(path, next, elsewhere)
             }
             Message::ToggleInvisibles => {
                 self.settings.show_invisibles = !self.settings.show_invisibles;
@@ -2323,6 +2395,9 @@ impl App {
             Message::ZoomOut => self.set_zoom(next_zoom(self.settings.zoom, false)),
             Message::ZoomReset => self.set_zoom(1.0),
             Message::SelectAll => self.select_all(),
+            // マルチカーソル（v3 R-11）
+            Message::AddCaret(down) => self.add_caret(down),
+            Message::SelectOccurrence(all) => self.select_occurrence(all),
             Message::Transform(which) => self.transform(which),
             Message::Indent(deeper) => self.reindent(deeper),
             Message::DuplicateLine => self.duplicate_line(),
@@ -2410,6 +2485,16 @@ impl App {
             Message::CommandPaletteSubmit => return self.run_palette(None),
             Message::CommandPalettePick(index) => return self.run_palette(Some(index)),
             Message::CloseCommandPalette => return self.close_command_palette(),
+            Message::ToggleKeyList => return self.toggle_key_list(),
+            Message::KeyListInput(query) => {
+                if let Some(list) = self.key_list.as_mut() {
+                    *list = query;
+                }
+            }
+            Message::CloseKeyList => {
+                self.key_list = None;
+                return self.focus_editor_now();
+            }
             Message::OpenSnippetPicker => {
                 if self.editing_blocked() {
                     return Task::none();
@@ -2483,6 +2568,7 @@ impl App {
                 return self.open_figure(block)
             }
             Message::Figure(message) => return self.figure_message(message),
+            Message::FileFigure(message) => self.file_figure_message(message),
             // WYSIWYG（v2.5.0 R-01 a）。IME は編集画面と同じ道
             Message::Preview(PreviewAction::Wysiwyg(action)) => {
                 self.preview_selection = None;
@@ -2573,10 +2659,13 @@ impl App {
                 let Some(message) = menu::find_access(open, self.menu_context(), key) else {
                     return Task::none();
                 };
-                // **選んだら閉じる。** 折りたたみの開閉だけは開いたままにする
-                if !matches!(message, Message::ToggleSubmenu(_)) {
-                    self.open_menu = None;
+                // 下の階層は開いて、その中へ入る（v3 R-05。`→` と同じ）
+                if let Message::ToggleSubmenu(which) = message {
+                    return self.enter_submenu(which);
                 }
+                // **選んだら閉じる**
+                self.open_menu = None;
+                self.reset_menu_cursor();
                 return self.update(message);
             }
             // **`Shift` なら前の一致へ**（§10.40）
@@ -2589,6 +2678,8 @@ impl App {
             Message::ToggleSubmenu(which) => {
                 // 同じものをもう一度押したら閉じる
                 self.open_submenu = (self.open_submenu != Some(which)).then_some(which);
+                // いまいる行をその見出しへ（v3 R-05）
+                self.point_at_fold(which);
             }
             Message::OpenSearch => {
                 self.search.open = true;
@@ -2628,6 +2719,13 @@ impl App {
             Message::ToggleCase => {
                 self.search.case_sensitive = !self.search.case_sensitive;
                 return self.run_search();
+            }
+            // 単語単位（v3 R-09）。検索バーが閉じていても切り替え、開いていれば探し直す
+            Message::ToggleWholeWord => {
+                self.search.whole_word = !self.search.whole_word;
+                if self.search.open {
+                    return self.run_search();
+                }
             }
             Message::ReplaceOne => return self.replace_one(),
             Message::ReplaceAll => return self.replace_all(),
@@ -2703,7 +2801,8 @@ impl App {
                 };
                 // **自前の選択で文字コードを選んでいたら、それで読む**（R-04）
                 let forced = choice.and_then(|choice| choice.open);
-                return self.load_path_as(path, forced);
+                // ほかの窓で開いていれば、その窓を前に出す（v3 R-15）
+                return self.open_unless_elsewhere(path, OpenNext::Load(forced));
             }
             Message::PickedSave(path, how) => {
                 self.picking = false;
@@ -2924,6 +3023,10 @@ impl App {
             }
             Message::ClearRecent => {
                 self.settings.recent.clear();
+                // タスクバー・Dock の一覧も消す（v3 R-18。試験と試験の口では触らない）
+                if !cfg!(test) && !self.automation {
+                    crate::recent_docs::clear();
+                }
                 self.open_submenu = None;
                 self.touch_settings_now();
             }
@@ -2943,6 +3046,11 @@ impl App {
                 return self.reload_external();
             }
             Message::IgnoreExternal => self.ignore_external(),
+            // 大きすぎるファイルを全部開く（v3 R-12）。1 回目は確認を出す
+            Message::OpenWhole(confirmed) => return self.open_whole(confirmed),
+            Message::DismissWholeConfirm => self.whole_confirm = false,
+            // 権限を上げて書き終えた（v3 R-14）
+            Message::ElevatedSaved(saved) => return self.finish_elevated(*saved),
         }
         Task::none()
     }
@@ -2957,6 +3065,7 @@ impl App {
             || self.heading_picker.is_some()
             || self.snippet_picker.is_some()
             || self.command_palette.is_some()
+            || self.key_list.is_some()
             || self.figure.is_some()
             || self.mcp_confirm.is_some()
             || self.presenting.is_some()
@@ -2985,6 +3094,10 @@ impl App {
             return Task::none();
         }
         if let Some(command) = self.keymap.lookup(&chord) {
+            // **OS のメニューが受け持つ打鍵は扱わない**（v3 R-06。macOS。メニューが先に取るので、二重に動く）
+            if self.native_takes(command) {
+                return Task::none();
+            }
             // **入力欄が受け取ったものは横取りしない**（§10.40）。
             // ファイルと表示の操作だけは、どこに焦点があっても効く
             if !free && !command.works_in_inputs() {
@@ -3002,7 +3115,8 @@ impl App {
             self.open_menu = None;
             return self.update(command.message());
         }
-        if chord.alt && !chord.ctrl {
+        // 割り当て文字（macOS の OS のメニューでは出さない。v3 R-06）
+        if chord.alt && !chord.ctrl && !self.native_menu_bar() {
             if let keymap::ChordKey::Char(key) = chord.key {
                 return self.update(Message::AccessKey { key, alt: true });
             }
@@ -3023,6 +3137,8 @@ impl App {
     /// 終わる（設定を書いてから）。
     fn exit_now(&mut self) -> Task<Message> {
         self.remember_window();
+        // ファイルごとの位置（v3 R-10）
+        self.remember_position();
         // **MCP サーバーへの居場所を消す**（v2.4.0 R-06 6b）
         crate::ipc::unregister(std::process::id());
         // 手元の HTTP を受けていたら、口と合言葉のファイルを消す（6d）
@@ -3044,64 +3160,29 @@ impl App {
         }
         match action {
             Action::Move { movement, select } => {
-                // **普通の移動で矩形は解ける**（§4.13）
+                // **追加のキャレットがあれば全部を動かす**（v3 R-11）。クリック（行・桁へ飛ぶ）は 1 つに戻す
                 self.editor.rect = None;
-                // **掴んでいなければここで掴む**（§4.4 の `Shift` + 移動）
-                if select && self.editor.anchor.is_none() {
-                    self.editor.anchor = Some(self.caret_byte());
-                }
-                let from = self.editor.cursor_line;
-                // **折り返していれば、上下とページ送りは見た目の段で動く**（v2.2.0）
-                let rows = match movement {
-                    crate::render::CursorMove::Up => Some(-1),
-                    crate::render::CursorMove::Down => Some(1),
-                    crate::render::CursorMove::Page { down, rows } => {
-                        Some(if down { rows as i64 } else { -(rows as i64) })
-                    }
-                    _ => None,
-                };
-                match (rows, self.wrap.as_ref()) {
-                    (Some(rows), Some(wrap)) => {
-                        let (line, column, goal) = wrap.step(
-                            &self.document,
-                            self.editor.cursor_line,
-                            self.editor.cursor_column,
-                            self.editor.goal_cells,
-                            rows,
-                        );
-                        self.editor.cursor_line = line;
-                        self.editor.cursor_column = column;
-                        self.editor.goal_column = None;
-                        self.editor.goal_cells = Some(goal);
-                    }
-                    _ => {
-                        cursor::move_cursor(&self.document, &mut self.editor, movement);
-                        self.editor.goal_cells = None;
-                    }
-                }
-                // **畳んだ行は飛ばす**（R-20）。下へなら次の見える行、
-                // 上へなら畳んだ見出しの行へ
-                if self.folds.is_hidden(self.editor.cursor_line) {
-                    let line = if self.editor.cursor_line >= from {
-                        self.folds.visible_at_or_after(self.editor.cursor_line)
-                    } else {
-                        self.folds.visible_at_or_before(self.editor.cursor_line)
-                    };
-                    let line = line.min(self.document.text().len_lines().saturating_sub(1));
-                    let column = self.editor.cursor_column;
-                    self.editor.extend_caret(line, column);
-                    let byte = self.document.byte_at(line, column);
-                    let (line, column) = self.document.position_at(byte);
-                    self.editor.extend_caret(line, column);
-                }
-                if !select {
-                    self.editor.anchor = None;
+                if !self.editor.extra.is_empty()
+                    && !matches!(movement, crate::render::CursorMove::To { .. })
+                {
+                    self.move_all(movement, select);
+                } else {
+                    // **普通の移動で矩形は解ける**（§4.13）
+                    self.editor.extra.clear();
+                    self.move_caret(movement, select);
                 }
             }
             // **選んでいれば行ごと字下げ、選んでいなければ 1 つ入れる**
             // （TeraPad と同じ。§4.9）
             Action::Tab { shift } => {
                 // **スニペット**（v2.3.0 R-08）。略語が一致したとき・入力位置を移っている最中だけ
+                if self.is_multi() {
+                    // 選択が複数なら各所へタブを入れる（字下げはしない。v3 R-11）
+                    if !shift {
+                        self.insert("\t");
+                    }
+                    return Task::none();
+                }
                 if !shift && self.snippet_tab() {
                     return Task::none();
                 }
@@ -3114,6 +3195,7 @@ impl App {
             Action::RectStart { line, column } => {
                 // **普通の選択とは同時に持たない**（§4.13）
                 self.editor.anchor = None;
+                self.editor.extra.clear();
                 self.editor.rect = Some(crate::render::RectSelection::at(line, column));
                 // 矩形は保つので `place_caret` は使わない
                 self.editor.extend_caret(line, column);
@@ -3132,8 +3214,18 @@ impl App {
             Action::Cut => return self.cut(),
             Action::Copy => return self.copy(),
             Action::Paste => return iced::clipboard::read().map(Message::Pasted),
-            Action::SelectWord { line, column } => self.select_word(line, column),
-            Action::SelectLine { line } => self.select_line(line),
+            // 普通のダブルクリック・3 回クリックは 1 つに戻す（v3 R-11）
+            Action::SelectWord { line, column } => {
+                self.clear_carets();
+                self.select_word(line, column);
+            }
+            Action::SelectLine { line } => {
+                self.clear_carets();
+                self.select_line(line);
+            }
+            // マルチカーソル（v3 R-11）
+            Action::AddWord { line, column } => self.add_word(line, column),
+            Action::ClearCarets => self.clear_carets(),
             Action::Scrolled {
                 lines,
                 max_top_line,
@@ -3181,7 +3273,8 @@ impl App {
             Action::ScrollXTo { to } => self.editor.scroll_x = to.max(0.0),
             // **改行はリストを続けるかを先に見る**（R-14）
             Action::Insert(text) => {
-                if text != "\n" || !self.continue_list() {
+                // 選択が複数なら、リストは続けず改行だけを入れる（v3 R-11）
+                if self.is_multi() || text != "\n" || !self.continue_list() {
                     self.insert(&text);
                 }
             }
@@ -3189,6 +3282,8 @@ impl App {
             Action::Ime(ime) => self.apply_ime(ime),
             Action::ToggleFold { line } => self.toggle_fold_at(line),
             Action::OpenLinkAt { line, column } => {
+                // 続けて `Ctrl` + ダブルクリックになったら、いまの選択へ語を足す（v3 R-11）
+                self.caret_snapshot = Some(self.selections());
                 self.editor.place_caret(line, column);
                 return self.open_link_at(line, column);
             }
@@ -3201,6 +3296,62 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// 主のキャレットを動かす（矢印・Home・End・ページ送り・クリック）。`select` なら掴んだまま。
+    /// マルチカーソル（v3 R-11）では、キャレットを 1 つずつ主へ入れ替えてこれを呼ぶ
+    fn move_caret(&mut self, movement: crate::render::CursorMove, select: bool) {
+        // **掴んでいなければここで掴む**（§4.4 の `Shift` + 移動）
+        if select && self.editor.anchor.is_none() {
+            self.editor.anchor = Some(self.caret_byte());
+        }
+        let from = self.editor.cursor_line;
+        // **折り返していれば、上下とページ送りは見た目の段で動く**（v2.2.0）
+        let rows = match movement {
+            crate::render::CursorMove::Up => Some(-1),
+            crate::render::CursorMove::Down => Some(1),
+            crate::render::CursorMove::Page { down, rows } => {
+                Some(if down { rows as i64 } else { -(rows as i64) })
+            }
+            _ => None,
+        };
+        match (rows, self.wrap.as_ref()) {
+            (Some(rows), Some(wrap)) => {
+                let (line, column, goal) = wrap.step(
+                    &self.document,
+                    self.editor.cursor_line,
+                    self.editor.cursor_column,
+                    self.editor.goal_cells,
+                    rows,
+                );
+                self.editor.cursor_line = line;
+                self.editor.cursor_column = column;
+                self.editor.goal_column = None;
+                self.editor.goal_cells = Some(goal);
+            }
+            _ => {
+                cursor::move_cursor(&self.document, &mut self.editor, movement);
+                self.editor.goal_cells = None;
+            }
+        }
+        // **畳んだ行は飛ばす**（R-20）。下へなら次の見える行、
+        // 上へなら畳んだ見出しの行へ
+        if self.folds.is_hidden(self.editor.cursor_line) {
+            let line = if self.editor.cursor_line >= from {
+                self.folds.visible_at_or_after(self.editor.cursor_line)
+            } else {
+                self.folds.visible_at_or_before(self.editor.cursor_line)
+            };
+            let line = line.min(self.document.text().len_lines().saturating_sub(1));
+            let column = self.editor.cursor_column;
+            self.editor.extend_caret(line, column);
+            let byte = self.document.byte_at(line, column);
+            let (line, column) = self.document.position_at(byte);
+            self.editor.extend_caret(line, column);
+        }
+        if !select {
+            self.editor.anchor = None;
+        }
     }
 
     /// プレビューからの通知（§3.7）。
@@ -3307,9 +3458,9 @@ impl App {
         // **WYSIWYG で表のセルへ入れるなら、`|` を逃がし改行を空白に**（v2.5.1 R-01）。
         // 打鍵・IME・貼り付けのどれもここを通る
         let text = &self.cell_text(text);
-        // **矩形が掛かっていれば各行へ入れる**（§4.13）
-        if self.editor.rect.is_some() {
-            self.insert_into_rect(text);
+        // **選択が複数（矩形・追加のキャレット）なら全部へ入れる**（§4.13・v3 R-11）
+        if self.is_multi() {
+            self.multi_insert(text);
             return;
         }
         // **選んでいたら置き換える**（§4.5 の確定時の処理と同じ順）
@@ -3340,8 +3491,8 @@ impl App {
     ///
     /// **選んでいればそれを消す。** 後退キーと同じ扱いにする
     fn delete_forward(&mut self) {
-        if self.editor.rect.is_some() {
-            self.delete_rect();
+        if self.is_multi() {
+            self.multi_delete();
             return;
         }
         if self.selected().is_some() {
@@ -3375,7 +3526,11 @@ impl App {
     /// **選んでいればそれを消す。** 選んだうえで語ごと消すのは、
     /// どこまで消えるのか予想できない
     fn delete_word(&mut self, forward: bool) {
-        if self.editor.rect.is_some() || self.selected().is_some() {
+        if self.is_multi() {
+            self.multi_delete_word(forward);
+            return;
+        }
+        if self.selected().is_some() {
             if forward {
                 self.delete_forward();
             } else {
@@ -3426,9 +3581,9 @@ impl App {
         if self.refuse_edit() {
             return;
         }
-        // **矩形が掛かっていればそれを消す**（§4.13）
-        if self.editor.rect.is_some() {
-            self.delete_rect();
+        // **選択が複数（矩形・追加のキャレット）なら全部で消す**（§4.13・v3 R-11）
+        if self.is_multi() {
+            self.multi_backspace();
             return;
         }
         // **選んでいたらそれを消す。** 1 文字ではなく選択が対象になる
@@ -3508,10 +3663,9 @@ impl App {
         self.sync_from_editor();
     }
 
-    /// 折り返したいか（v2.2.0）。**設定が入っていて、文書が小さい**ときだけ
+    /// 折り返したいか（v2.2.0）。v3 R-12 から**大きな文書でも折り返す**（書き換えた行だけを数え直すため）
     fn wrap_wanted(&self) -> bool {
         self.settings.soft_wrap
-            && self.document.text().len_bytes() <= crate::render::wrap::WRAP_LIMIT_BYTES
     }
 
     /// 折り返しの表を、いまの文書・幅・タブ幅・畳み込みに合わせる（v2.2.0）。
@@ -3526,8 +3680,22 @@ impl App {
         };
         let tab_width = self.tab_width();
         let key = crate::render::wrap::WrapKey::of(&self.document, &self.folds, columns, tab_width);
+        let edits = std::mem::take(&mut self.wrap_edits);
         if self.wrap_key.as_ref() == Some(&key) {
             return;
+        }
+        // **書き換えただけなら、その行だけを数え直す**（v3 R-12）。幅・タブ幅・畳み込みが同じとき
+        let same_shape = self.wrap_key.as_ref().is_some_and(|old| {
+            old.columns == key.columns && old.tab_width == key.tab_width && old.folds == key.folds
+        });
+        if let (true, false, Some(wrap)) = (same_shape, edits.is_empty(), self.wrap.as_mut()) {
+            let updated = edits.iter().all(|&(from, removed, added)| {
+                wrap.update(&self.document, &self.folds, from, removed, added)
+            });
+            if updated {
+                self.wrap_key = Some(key);
+                return;
+            }
         }
         self.wrap = Some(crate::render::wrap::Wrap::build(
             &self.document,
@@ -3576,6 +3744,7 @@ impl App {
         let generation = self.search.generation;
 
         if self.search.query.is_empty() {
+            self.search.compiled = None;
             self.search.accept(crate::search::Found::default());
             return Task::none();
         }
@@ -3584,10 +3753,12 @@ impl App {
         let pattern = match self.search.pattern() {
             Ok(pattern) => {
                 self.search.error = None;
+                self.search.compiled = Some(pattern.clone());
                 pattern
             }
             Err(reason) => {
                 self.search.error = Some(reason);
+                self.search.compiled = None;
                 self.search.accept(crate::search::Found::default());
                 return Task::none();
             }
@@ -3829,10 +4000,33 @@ impl App {
         }
         // **控えてある一致は、当てた瞬間に古くなる**（§10.38）
         self.search.invalidate();
-        for edit in edits {
-            let range = edit.at..edit.at + edit.removed.len();
-            self.document
-                .edit(range, &edit.inserted, self.width(), &self.metrics);
+        // 折り返しの表のために、書き換える行を控える（v3 R-12。当てる前と後の行で）
+        let lines_before = self.wrap.is_some().then(|| self.edited_lines(edits));
+        // **いくつもの編集は、まとめて当てる**（v3 R-11。マルチカーソルと、その取り消し）。
+        // 並びのまま当てたのと同じになるときだけ。1 つずつ当てると、そのたびに後ろの全部のブロックをずらす
+        match multi::original_positions(edits) {
+            Some(batch) if edits.len() > 1 => {
+                let width = self.width();
+                self.document.edit_many(&batch, width, &self.metrics);
+            }
+            _ => {
+                for edit in edits {
+                    let range = edit.at..edit.at + edit.removed.len();
+                    self.document
+                        .edit(range, &edit.inserted, self.width(), &self.metrics);
+                }
+            }
+        }
+        if let Some((from, removed, span)) = lines_before {
+            // 当てた後の行の数（書き換えた範囲の終わりの行まで）
+            let end = span.end.max(0) as usize;
+            let rope = self.document.text();
+            let added = rope.byte_to_line(end.min(rope.len_bytes())) - from + 1;
+            self.wrap_edits.push((from, removed, added));
+        }
+        // **マルチカーソルの道でなければ、追加のキャレットは消す**（位置が古くなる。v3 R-11）
+        if !self.multi_applying {
+            self.editor.extra.clear();
         }
         self.meta.dirty = true;
         // **diff の面の文書なら、ここまで**（v2.3.0 R-02）。目次・畳み込み・退避・自動保存・
@@ -4112,103 +4306,6 @@ impl App {
         self.settings.tab_width.max(1)
     }
 
-    /// 矩形選択が掛かっている、行ごとのバイト範囲（**後ろの行から**）。
-    ///
-    /// **後ろから返す。** 前から当てると、1 行目の長さが変わって
-    /// 2 行目以降の位置がずれる（§4.7 と同じ理由）
-    fn rect_ranges(&self) -> Vec<std::ops::Range<usize>> {
-        let Some(rect) = self.editor.rect else {
-            return Vec::new();
-        };
-        let columns = rect.columns();
-        let total = self.document.text().len_lines();
-
-        rect.lines()
-            .filter(|line| *line < total)
-            .map(|line| {
-                let start = self.document.byte_at(line, columns.start);
-                let end = self.document.byte_at(line, columns.end);
-                start..end.max(start)
-            })
-            .rev()
-            .collect()
-    }
-
-    /// 矩形選択の中身（行ごとに改行でつないだもの）。
-    fn rect_text(&self) -> String {
-        let mut lines: Vec<String> = self
-            .rect_ranges()
-            .into_iter()
-            .map(|range| self.document.text().byte_slice(range).to_string())
-            .collect();
-        // `rect_ranges` は後ろの行から返すので、写すときは並べ直す
-        lines.reverse();
-        lines.join("\n")
-    }
-
-    /// 矩形選択を消す（1 つの編集として積む）。
-    fn delete_rect(&mut self) {
-        let ranges = self.rect_ranges();
-        if ranges.iter().all(|range| range.is_empty()) {
-            return;
-        }
-        let before = self.caret_byte();
-        let edits: Vec<history::Edit> = ranges
-            .into_iter()
-            .map(|range| {
-                let removed = self.document.text().byte_slice(range.clone()).to_string();
-                history::Edit::new(range.start, removed, "")
-            })
-            .collect();
-
-        // **先頭の行の頭へ寄せる**（消えた場所の左端）
-        let after = edits.last().map(|edit| edit.at).unwrap_or(before);
-        if !self.apply_edits(&edits) {
-            return;
-        }
-        self.history.push(history::Transaction {
-            edits,
-            cursor_before: before,
-            cursor_after: after,
-        });
-        self.editor.rect = None;
-        self.move_caret_to_byte(after);
-    }
-
-    /// 矩形選択の各行へ同じ文字を入れる（§4.13）。
-    ///
-    /// **桁をそろえて打ち込む使い方が本来の用途**であり、
-    /// 幅 0 の矩形でも効く
-    fn insert_into_rect(&mut self, text: &str) {
-        let ranges = self.rect_ranges();
-        if ranges.is_empty() {
-            return;
-        }
-        let before = self.caret_byte();
-        let edits: Vec<history::Edit> = ranges
-            .into_iter()
-            .map(|range| {
-                let removed = self.document.text().byte_slice(range.clone()).to_string();
-                history::Edit::new(range.start, removed, text)
-            })
-            .collect();
-
-        let after = edits
-            .last()
-            .map(|edit| edit.at + edit.inserted.len())
-            .unwrap_or(before);
-        if !self.apply_edits(&edits) {
-            return;
-        }
-        self.history.push(history::Transaction {
-            edits,
-            cursor_before: before,
-            cursor_after: after,
-        });
-        self.editor.rect = None;
-        self.move_caret_to_byte(after);
-    }
-
     /// 選んでいるところをクリップボードへ写す。
     ///
     /// **選んでいなければ何もしない。** 行をまるごと写す作りにはしない
@@ -4219,9 +4316,9 @@ impl App {
         if let Some(text) = self.preview_selection.clone() {
             return iced::clipboard::write(text);
         }
-        // **矩形が掛かっていればそちらを写す**（§4.13）
-        if self.editor.rect.is_some() {
-            let text = self.rect_text();
+        // **選択が複数（矩形・追加のキャレット）なら全部を写す**（§4.13・v3 R-11）
+        if self.is_multi() {
+            let text = self.multi_text();
             return if text.is_empty() {
                 Task::none()
             } else {
@@ -4229,22 +4326,29 @@ impl App {
             };
         }
         let Some(range) = self.selected() else {
-            return Task::none();
+            // **選んでいなければ行ごと**（v3 R-17。設定で切れる）
+            return match self.line_copy_text() {
+                Some(text) => iced::clipboard::write(text),
+                None => Task::none(),
+            };
         };
+        // 選んで写したものは行の頭に貼らない
+        self.line_clip = None;
         let text = self.document.text().byte_slice(range).to_string();
         iced::clipboard::write(text)
     }
 
     /// 選んでいるところを切り取る。
     fn cut(&mut self) -> Task<Message> {
-        if self.editor.rect.is_some() {
+        if self.is_multi() {
             let task = self.copy();
-            self.delete_rect();
+            self.multi_delete_selected();
             return task;
         }
         // **写す先が無いなら消さない。** 消してから写せないことに気づくと戻せない
         if self.selected().is_none() {
-            return Task::none();
+            // 選んでいなければ行ごと（v3 R-17）
+            return self.cut_line();
         }
         let task = self.copy();
         // 消すのは後退キーと同じ道を通る（選択があればそれを消す）
@@ -4373,6 +4477,11 @@ impl App {
                     return self.save_now(true, SaveAs::Keep);
                 }
                 let task = self.save_now(false, SaveAs::Keep);
+                // 権限を上げて書いている最中なら、書けてから続ける（v3 R-14）
+                if self.elevating.is_some() {
+                    self.elevating = Some(true);
+                    return task;
+                }
                 if self.meta.dirty {
                     // 保存できなかった
                     self.pending = None;
@@ -4438,9 +4547,10 @@ impl App {
         path: std::path::PathBuf,
         encoding: Option<crate::io::Encoding>,
     ) -> Task<Message> {
+        // **大きすぎれば先頭だけ**（v3 R-12）
         Task::perform(
             async move {
-                crate::io::load_as(&path, encoding)
+                crate::io::load_limited(&path, encoding)
                     .map(Box::new)
                     .map_err(|e| e.to_string())
             },
@@ -4468,8 +4578,13 @@ impl App {
                 }
                 // **開けたものだけ覚える**（§19.7）。失敗したパスを並べない
                 self.settings.remember(&file.path);
+                // タスクバー・Dock の「最近使ったもの」にも（v3 R-18）
+                self.note_recent(&file.path);
                 self.touch_settings();
-                let meta = DocumentMeta::opened(file.path.clone(), file.format.clone());
+                let meta = DocumentMeta {
+                    truncated: file.truncated,
+                    ..DocumentMeta::opened(file.path.clone(), file.format.clone())
+                };
                 // **外の変更を読み直したときは、居た場所に留まる**（R-21）
                 let keep = std::mem::take(&mut self.reloading).then_some((
                     self.editor.top_line,
@@ -4548,17 +4663,19 @@ impl App {
     }
 
     /// HTML の表を表として描くかを合わせる（v2.8.0 R-05）。**変わったら文書を組み直す**（組み方の覚えを捨てるため）
-    /// 決まった HTML（v2.9.0 R-03）も同じ所で合わせる
+    /// 決まった HTML（v2.9.0 R-03）・GitHub のアラート（v3 R-08）も同じ所で合わせる
     pub(super) fn refresh_html_tables(&mut self) {
         // 試験では変えない（ほかの試験と同じ置き場を使うため）
         if cfg!(test)
             || (crate::parse::html_table::enabled() == self.settings.html_tables
-                && crate::parse::html_inline::enabled() == self.settings.html_elements)
+                && crate::parse::html_inline::enabled() == self.settings.html_elements
+                && crate::parse::alert::enabled() == self.settings.github_alerts)
         {
             return;
         }
         crate::parse::html_table::set_enabled(self.settings.html_tables);
         crate::parse::html_inline::set_enabled(self.settings.html_elements);
+        crate::parse::alert::set_enabled(self.settings.github_alerts);
         self.rebuild_document_kind(self.document.is_plain());
     }
 
@@ -4610,8 +4727,14 @@ impl App {
 
     /// 出来上がった文書を据え付ける。**状態を残さない**（`replace_document` と同じ後始末）
     fn install_document(&mut self, document: Document, meta: DocumentMeta) {
+        // ファイルごとの位置（v3 R-10）。**差し替える前に、いまの文書の位置を覚える**
+        self.remember_position();
         // 起動時の裏の読み込みより後に開いたものが勝つ（v2.2.2）
         self.preloading = false;
+        // 前の文書で控えた書き換えの行は捨てる（折り返しの表は作り直す。v3 R-12）
+        self.wrap_edits.clear();
+        // 図のファイルの絵は描き直す（v3 R-13）
+        self.file_figure = None;
         self.document = document;
         self.editor = EditorState {
             caret_visible: true,
@@ -4637,6 +4760,10 @@ impl App {
             self.read_only_by_url = false;
         }
         self.sync_remote_images();
+        // 先頭だけを開いたなら読み取り専用に、全部を開いたら外す（v3 R-12）
+        self.settle_truncation();
+        // 覚えた位置へ戻す（v3 R-10）。起動の `-g` の行は、このあとで当てるので勝つ
+        self.restore_position();
     }
 
     /// 保存する。`ask` なら保存先を聞く。
@@ -4646,6 +4773,11 @@ impl App {
     fn save_now(&mut self, ask: bool, how: SaveAs) -> Task<Message> {
         // **裏で読んでいる間は保存しない**（v2.2.2。空の本文で元のファイルを上書きしない）
         if self.preloading {
+            return Task::none();
+        }
+        // **先頭だけを開いていれば、名前を付けても保存しない**（v3 R-12。元のファイルへ書くと後ろが消える）
+        if self.meta.truncated.is_some() {
+            self.notice = Some(notice::Notice::plain(large::LOCKED_NOTICE.to_owned()));
             return Task::none();
         }
         // **元のファイルは書き換えない**（読み取り専用。v2.1.3）。
@@ -4664,7 +4796,8 @@ impl App {
         };
         // 保存するときに当てる設定なら当てる（v2.5.0 R-03。自動保存では当てない）
         self.tidy_on(crate::render::TidyTrigger::Save);
-        self.save_to(path, how)
+        // 利用者が保存した。**権限が無ければ OS の確認を経て書く**（v3 R-14）
+        self.write_to(path, how, true)
     }
 
     /// 文字コードを指定して開き直す（§19.4）。
@@ -4680,8 +4813,20 @@ impl App {
         self.run_pending()
     }
 
-    /// 指定の場所へ書く。
+    /// 指定の場所へ書く（自動保存・整形して閉じる・MCP など。**権限が無くても OS の確認は出さない**）
     fn save_to(&mut self, path: std::path::PathBuf, how: SaveAs) -> Task<Message> {
+        self.write_to(path, how, false)
+    }
+
+    /// 指定の場所へ書く。`elevate` なら、権限が無いときに OS の確認を経て書き直す（v3 R-14）
+    fn write_to(&mut self, path: std::path::PathBuf, how: SaveAs, elevate: bool) -> Task<Message> {
+        // 権限を上げて書いている間は、次の保存を始めない（同じ先へ 2 つが書く）
+        if self.elevating.is_some() {
+            self.notice = Some(notice::Notice::plain(
+                "管理者の権限での保存を待っています".to_owned(),
+            ));
+            return Task::none();
+        }
         // **書く前に、目次と見出しの番号を作り直す**（v2.3.0 R-10。印がある・番号を振った文書だけ）
         self.refresh_toc_before_save();
         let text = self.document.text().to_string();
@@ -4706,25 +4851,39 @@ impl App {
 
         // **成功を先に反映しない。** 書けたことを確かめてから未保存を下ろす
         match crate::io::save(&path, &text, &format) {
-            Ok(()) => {
-                self.meta.path = Some(path.clone());
-                self.meta.dirty = false;
-                // 拡張子が変われば読み方も変える（v2.2.0。`.txt` → `.md` など）
-                self.refresh_kind();
-                // 書けてから覚える。取り消しや失敗で表示だけが変わらないように
-                self.meta.format = format;
-                self.settings.remember(&path);
-                self.touch_settings();
-                // **保存できたので控えは要らない**（§18.3）
-                crate::io::recover::forget();
-                self.notice = None;
-                // **自分で書いたものを外の変更と取り違えない**（R-21）
-                self.reset_watch();
-                self.autosave_touched = None;
+            Ok(()) => self.saved(path, format, None),
+            // **権限が無ければ、OS の確認を経て書き直す**（v3 R-14）。読み取り専用の属性なら上げても書けない
+            Err(crate::io::LoadError::Denied(_)) if elevate && !readonly_attribute(&path) => {
+                return self.save_elevated(path, &text, format);
             }
             Err(error) => self.notice = Some(notice::Notice::plain(format!("{error}"))),
         }
         Task::none()
+    }
+
+    /// 書けたあと。`version` は書いた本文の版（権限を上げて書いたとき。**その後に打った分は未保存のまま**）
+    fn saved(
+        &mut self,
+        path: std::path::PathBuf,
+        format: crate::io::FileFormat,
+        version: Option<u64>,
+    ) {
+        self.meta.path = Some(path.clone());
+        self.meta.dirty = version.is_some_and(|version| version != self.document.version());
+        // 拡張子が変われば読み方も変える（v2.2.0。`.txt` → `.md` など）
+        self.refresh_kind();
+        // 書けてから覚える。取り消しや失敗で表示だけが変わらないように
+        self.meta.format = format;
+        self.settings.remember(&path);
+        // タスクバー・Dock の「最近使ったもの」にも（v3 R-18）
+        self.note_recent(&path);
+        self.touch_settings();
+        // **保存できたので控えは要らない**（§18.3）
+        crate::io::recover::forget();
+        self.notice = None;
+        // **自分で書いたものを外の変更と取り違えない**（R-21）
+        self.reset_watch();
+        self.autosave_touched = None;
     }
 
     fn finish_save(&mut self, result: Result<std::path::PathBuf, String>) {
@@ -4844,8 +5003,13 @@ impl App {
 
         // 保存するときに当てる設定なら当てる（v2.5.0 R-03。名前を付けて保存も）
         self.tidy_on(crate::render::TidyTrigger::Save);
-        let task = self.save_to(path, how);
+        let task = self.write_to(path, how, true);
         if !resume {
+            return task;
+        }
+        // 権限を上げて書いている最中なら、書けてから続ける（v3 R-14）
+        if self.elevating.is_some() {
+            self.elevating = Some(true);
             return task;
         }
         if self.meta.dirty {
@@ -5064,7 +5228,8 @@ impl App {
         }
         // HTML の表（v2.8.0 R-05）。ほかの窓で変えたときも効かせる
         if (previous.html_tables != self.settings.html_tables
-            || previous.html_elements != self.settings.html_elements)
+            || previous.html_elements != self.settings.html_elements
+            || previous.github_alerts != self.settings.github_alerts)
             && !cfg!(test)
         {
             self.refresh_html_tables();
@@ -5097,7 +5262,8 @@ impl App {
             || previous.sun_longitude != self.settings.sun_longitude
             || previous.sun_rise_offset != self.settings.sun_rise_offset
             || previous.sun_set_offset != self.settings.sun_set_offset
-            || previous.code_color_limit_kb != self.settings.code_color_limit_kb;
+            || previous.code_color_limit_kb != self.settings.code_color_limit_kb
+            || previous.large_file_mb != self.settings.large_file_mb;
         if let Some(screen) = self.settings_screen.as_mut().filter(|_| outside) {
             screen.refresh(&self.settings);
         }
@@ -5229,7 +5395,16 @@ impl App {
     }
 
     pub fn theme(&self) -> iced::Theme {
-        self.theme_of(&self.effective_theme())
+        let theme = self.theme_of(&self.effective_theme());
+        // **強調色は OS から**（v3 R-07。OS に寄せた見た目のとき）。配色の主色にすると、型を付けていない部品にも効く
+        match look::current().accent {
+            Some(accent) => {
+                let mut palette = theme.palette();
+                palette.primary = accent;
+                iced::Theme::custom(theme.to_string(), palette)
+            }
+            None => theme,
+        }
     }
 
     /// 配色の指定を iced の配色にする。**自分の配色は、元のプリセットに色を上書きして作る**
@@ -5361,6 +5536,10 @@ impl App {
                     offset_in_block: 0.0,
                 };
             }
+            // 下の行へキャレットを足す（v3 R-11）
+            for _ in 1..bench_carets() {
+                self.add_caret(true);
+            }
         }
         self.insert("あ");
     }
@@ -5418,6 +5597,21 @@ impl App {
                     };
                     if modifiers.command() || modifiers.alt() {
                         return None;
+                    }
+                    // 矢印と Enter で動く・押す（v3 R-05）
+                    {
+                        use iced::keyboard::key::Named;
+                        let moved = match key.as_ref() {
+                            iced::keyboard::Key::Named(Named::ArrowUp) => Some(MenuKey::Up),
+                            iced::keyboard::Key::Named(Named::ArrowDown) => Some(MenuKey::Down),
+                            iced::keyboard::Key::Named(Named::ArrowLeft) => Some(MenuKey::Left),
+                            iced::keyboard::Key::Named(Named::ArrowRight) => Some(MenuKey::Right),
+                            iced::keyboard::Key::Named(Named::Enter) => Some(MenuKey::Enter),
+                            _ => None,
+                        };
+                        if let Some(moved) = moved {
+                            return Some(Message::MenuKey(moved));
+                        }
                     }
                     let iced::keyboard::Key::Character(typed) = key.as_ref() else {
                         return None;
@@ -5545,7 +5739,10 @@ impl App {
             } else {
                 iced::Subscription::none()
             },
-            if self.open_menu.is_some() || self.about_open {
+            // メニューを開いていれば、`Esc` は 1 段戻る（v3 R-05。下の階層を閉じ、上の階層ならメニューを閉じる）
+            if self.open_menu.is_some() {
+                escape(|| Message::MenuKey(MenuKey::Escape))
+            } else if self.about_open {
                 iced::event::listen_with(|event, _status, _window| {
                     let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                         ref key, ..
@@ -5556,6 +5753,19 @@ impl App {
                     (key.as_ref() == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape))
                         .then_some(Message::CloseMenu)
                 })
+            } else {
+                iced::Subscription::none()
+            },
+            // OS のメニューで押されたものを受け取る（v3 R-06。macOS だけ）
+            if self.native_menu_bar() {
+                iced::time::every(std::time::Duration::from_millis(50))
+                    .map(|_| Message::NativeMenuPoll)
+            } else {
+                iced::Subscription::none()
+            },
+            // 乗ってから下の階層を切り替えるまでの待ち（v3 R-05）。待っている間だけ刻む
+            if self.menu_pending.is_some() {
+                iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::MenuTick)
             } else {
                 iced::Subscription::none()
             },
@@ -5602,6 +5812,8 @@ impl App {
                 escape(|| Message::CloseSnippetPicker)
             } else if self.command_palette.is_some() {
                 escape(|| Message::CloseCommandPalette)
+            } else if self.key_list.is_some() {
+                escape(|| Message::CloseKeyList)
             } else if self.figure.is_some() && self.browser.is_none() {
                 escape(|| Message::Figure(FigureMessage::Close))
             } else if self.diff_screen.is_some() && self.browser.is_none() && !self.search.open {
@@ -5723,7 +5935,8 @@ impl App {
                     && self.open_menu.is_none()
                     && self.heading_picker.is_none()
                     && self.snippet_picker.is_none()
-                    && self.command_palette.is_none(),
+                    && self.command_palette.is_none()
+                    && self.key_list.is_none(),
             )
             .display(
                 self.tab_width(),
@@ -5828,13 +6041,18 @@ impl App {
                 }))
                 .base_dir(self.meta.base_dir())
                 .highlight(if self.search.open {
-                    self.search.query.as_str()
+                    self.search.compiled.as_ref()
                 } else {
-                    ""
+                    None
                 }),
         )
         .width(Length::Fill)
         .height(Length::Fill);
+        // 図のファイル（`.mmd`・`.svg`）は、ファイル全体を 1 枚の図として出す（v3 R-13）
+        let preview: Element<'_, Message> = match self.file_figure_view() {
+            Some(view) => view,
+            None => preview.into(),
+        };
         let preview = container(self.with_backdrop(backdrop_view::Layer::Preview, preview))
             .width(Length::Fill)
             .height(Length::Fill);
@@ -5937,7 +6155,7 @@ impl App {
             .align_y(iced::Alignment::Center);
 
         // **集中モードではメニューを隠す**（v2.3.0 R-13）。打鍵と Esc で出られる
-        let mut body = if self.focus_mode {
+        let mut body = if self.focus_mode || self.native_menu_bar() {
             column![]
         } else {
             column![container(self.chrome()).padding(6)]
@@ -5962,7 +6180,15 @@ impl App {
         if let Some(query) = &self.command_palette {
             body = body.push(fluent::float(self.command_palette_view(query)));
         }
+        // 打鍵の一覧（v3 R-16）
+        if let Some(query) = &self.key_list {
+            body = body.push(fluent::float(self.key_list_view(query)));
+        }
 
+        // 大きすぎるので先頭だけを開いていることを帯で知らせる（v3 R-12）
+        if let Some(band) = self.large_band() {
+            body = body.push(band);
+        }
         // **外で書き換えられたことを帯で知らせる**（R-21）
         if self.watch.changed {
             let warning = if self.meta.dirty {

@@ -1,0 +1,178 @@
+/* モバイル版の画面（v3 R-02）。本文の見た目は書き出しの CSS（土台の export::html::stylesheet）を先に読み、ここで重ねる */
+:root {
+  --bg: #ffffff;
+  --fg: #1b1b1b;
+  --muted: #6b6b73;
+  --line: #e2e2e7;
+  --panel: #f6f6f8;
+  --accent: #0b63ce;
+  --accent-fg: #ffffff;
+  --hit: rgba(255, 196, 0, 0.45);
+  --editing: rgba(11, 99, 206, 0.08);
+  --kb: 0px;
+  --scale: 1;
+  color-scheme: light dark;
+}
+/* 配色は OS の設定に従う */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17171a;
+    --fg: #e8e8ec;
+    --muted: #9a9aa4;
+    --line: #33333a;
+    --panel: #222227;
+    --accent: #5aa2ff;
+    --accent-fg: #0b0b0d;
+    --hit: rgba(255, 196, 0, 0.35);
+    --editing: rgba(90, 162, 255, 0.12);
+  }
+  /* 書き出しの CSS は明るい配色で決め打ちなので、暗い配色では上書きする */
+  #read main { color: var(--fg); }
+  #read code, #read pre, #read th { background: #2a2a30; }
+  #read blockquote { color: #b9b9c2; border-color: #4a4a52; }
+  #read th, #read td { border-color: #3a3a42; }
+  #read h1, #read h2 { border-color: #33333a; }
+  #read .mv-embed svg, #read .mv-embed img { background: #ffffff; border-radius: 4px; }
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overscroll-behavior: none; }
+body { font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans CJK JP", "Yu Gothic UI", sans-serif; }
+button { font: inherit; color: inherit; }
+
+#shell { position: fixed; inset: 0; display: flex; flex-direction: column; }
+
+/* 上の帯: 文書名だけ。下へ読むと隠れる */
+#top {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 5;
+  padding: max(8px, env(safe-area-inset-top)) 16px 8px;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  border-bottom: 1px solid var(--line);
+  font-weight: 600; font-size: 16px; line-height: 28px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: transform 0.2s ease;
+}
+#top.hidden { transform: translateY(-100%); }
+#top .state { font-weight: 400; color: var(--muted); font-size: 13px; margin-left: 8px; }
+
+#body { flex: 1; display: flex; min-height: 0; }
+#toc-side { display: none; }
+#read {
+  flex: 1; min-width: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding-top: calc(env(safe-area-inset-top) + 48px);
+}
+#read main { max-width: 46rem; margin: 0 auto; padding: 8px 16px 96px; font-size: calc(16px * var(--scale)); }
+#read main > .blk > :first-child { margin-top: 0.6em; }
+.blk { border-radius: 6px; }
+.blk.hit { background: var(--editing); }
+.blk.editing { background: var(--editing); outline: 2px solid var(--accent); outline-offset: 2px; }
+#shell.edit-mode .blk { cursor: text; }
+#shell.edit-mode .blk:active { background: var(--editing); }
+::highlight(mv-hit) { background: var(--hit); }
+::highlight(mv-current) { background: #ff9d00; color: #000; }
+
+.banner { margin: 8px 16px 0; padding: 10px 12px; border-radius: 8px; background: var(--panel); color: var(--muted); font-size: 14px; }
+
+/* 下の 5 つの操作。押せる所は 48 以上 */
+#bar {
+  display: flex; border-top: 1px solid var(--line); background: var(--panel);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+#bar button {
+  flex: 1; min-height: 56px; border: 0; background: none; font-size: 12px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+}
+#bar button .icon { font-size: 20px; line-height: 22px; }
+#bar button.on { color: var(--accent); font-weight: 600; }
+#bar button:disabled { opacity: 0.35; }
+
+/* 下から出る板 */
+.scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.32); z-index: 20; }
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: var(--kb); z-index: 21;
+  background: var(--bg); border-radius: 14px 14px 0 0; box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.18);
+  max-height: 70vh; display: flex; flex-direction: column;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+}
+.sheet .grip { width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 8px auto 4px; }
+.sheet h2 { font-size: 15px; margin: 4px 16px 8px; color: var(--muted); font-weight: 600; }
+.sheet .list { overflow-y: auto; }
+.row {
+  display: flex; align-items: center; width: 100%; min-height: 48px; padding: 0 16px;
+  border: 0; background: none; text-align: left; font-size: 16px; gap: 12px;
+}
+.row:active { background: var(--panel); }
+.row .sub { margin-left: auto; color: var(--muted); font-size: 13px; }
+.row:disabled { opacity: 0.4; }
+.toc .row.l2 { padding-left: 32px; } .toc .row.l3 { padding-left: 48px; font-size: 15px; }
+.toc .row.l4, .toc .row.l5, .toc .row.l6 { padding-left: 64px; font-size: 14px; }
+.choices { display: flex; gap: 8px; padding: 4px 16px 12px; }
+.choices button { flex: 1; min-height: 48px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
+.choices button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+
+/* 著作権表示 */
+.sheet.licenses { max-height: 85vh; }
+pre.license { margin: 0 16px 12px; padding: 10px 12px; border-radius: 8px; background: var(--panel); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+
+/* ブロックを直す板。キーボードの上に道具の帯 */
+.editor { max-height: 55vh; }
+.editor textarea, #full-src {
+  width: 100%; border: 0; outline: none; resize: none; background: var(--bg); color: var(--fg);
+  font: 16px/1.6 ui-monospace, "Noto Sans Mono CJK JP", "Menlo", monospace;
+}
+.editor textarea { flex: 1; min-height: 120px; padding: 4px 16px 8px; }
+.tools {
+  display: flex; align-items: center; gap: 2px; padding: 4px 4px; border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.tools .scroll { flex: 1; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.tools button {
+  min-width: 44px; min-height: 44px; border: 0; border-radius: 8px; background: none; font-size: 15px; flex: none;
+}
+.tools button:active { background: var(--line); }
+/* 「完了」はいつも見える（横へ流れる帯の外に置く） */
+.tools .done { background: var(--accent); color: var(--accent-fg); padding: 0 14px; font-weight: 600; }
+
+/* 全文を直す */
+#full { position: fixed; inset: 0; z-index: 15; display: flex; flex-direction: column; background: var(--bg); padding-top: env(safe-area-inset-top); }
+#full-src { flex: 1; padding: 12px 16px; }
+#full .tools { margin-bottom: var(--kb); padding-bottom: max(4px, env(safe-area-inset-bottom)); }
+
+/* 検索: 入力は上、前へ・次へ・置換は下 */
+#find-top {
+  position: fixed; left: 0; right: 0; top: 0; z-index: 12; display: flex; gap: 8px; align-items: center;
+  padding: max(8px, env(safe-area-inset-top)) 12px 8px; background: var(--panel); border-bottom: 1px solid var(--line);
+}
+#find-top input, #find-bottom input {
+  flex: 1; min-width: 0; min-height: 44px; border-radius: 10px; border: 1px solid var(--line); padding: 0 12px;
+  font-size: 16px; background: var(--bg); color: var(--fg);
+}
+#find-top .count { color: var(--muted); font-size: 13px; min-width: 56px; text-align: right; }
+/* 下の余白に OS のボタン（戻る・ホーム・アプリの切り替え）の分を入れる。入れないと帯がその下に潜って押せない（v3.0.0 の実機で踏んだ） */
+#find-bottom {
+  display: flex; gap: 8px; align-items: center; padding: 8px 12px; margin-bottom: var(--kb);
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  background: var(--panel); border-top: 1px solid var(--line);
+}
+#find-top button, #find-bottom button { flex: none; min-width: 44px; min-height: 44px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); }
+#find-bottom { gap: 6px; }
+
+/* 直したあとの知らせと「元に戻す」 */
+#toast {
+  position: fixed; left: 16px; right: 16px; bottom: calc(72px + env(safe-area-inset-bottom)); z-index: 30;
+  display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; border-radius: 12px;
+  background: #2b2b31; color: #fff; font-size: 14px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+#toast span { flex: 1; }
+#toast button { min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px; background: none; color: #8fc1ff; font-weight: 600; }
+
+/* タブレットの横置き: 目次を左に出したまま。全文を直すときは原文とプレビューを並べる */
+@media (min-width: 900px) {
+  #toc-side {
+    display: block; width: 280px; flex: none; overflow-y: auto; border-right: 1px solid var(--line);
+    padding-top: calc(env(safe-area-inset-top) + 48px); background: var(--panel);
+  }
+  #shell.no-side #toc-side { display: none; }
+  .sheet { left: 50%; right: auto; width: 560px; transform: translateX(-50%); border-radius: 14px 14px 0 0; }
+  #full { position: static; flex: 1; min-width: 0; z-index: auto; border-right: 1px solid var(--line); padding-top: calc(env(safe-area-inset-top) + 48px); }
+  #full .tools { margin-bottom: 0; }
+}

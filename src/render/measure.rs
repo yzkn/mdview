@@ -47,6 +47,21 @@ where
         }
         let (font, size) = self.font_and_size(style);
         let line_height = self.line_height(style);
+        // `U+FE0F` 付きの字は絵文字の字体で測る（v3 R-19 C。描く側と同じ分け方）
+        if let Some(spans) = super::emoji_font::presented_spans(content, font) {
+            let paragraph = <Renderer::Paragraph as text::Paragraph>::with_spans(Text {
+                content: spans.as_slice(),
+                bounds: Size::new(f32::INFINITY, line_height),
+                size: Pixels(size),
+                line_height: text::LineHeight::Absolute(Pixels(line_height)),
+                font,
+                align_x: text::Alignment::Left,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: text::Shaping::Advanced,
+                wrapping: text::Wrapping::None,
+            });
+            return paragraph.min_width();
+        }
         let paragraph = <Renderer::Paragraph as text::Paragraph>::with_text(Text {
             content,
             bounds: Size::new(f32::INFINITY, line_height),

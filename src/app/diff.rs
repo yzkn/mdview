@@ -15,6 +15,7 @@
 //! 「保存してある元と比べる」の右の面は、**編集中の文書そのもの**（D-9）。入れ替えずに
 //! 本文を直接書き換えるので、退避や自動保存はふだんどおり働く。
 
+use super::fluent;
 use std::path::PathBuf;
 
 use iced::widget::{button, column, container, row, text};
@@ -276,6 +277,8 @@ pub(super) fn route(message: &Message) -> Route {
         | Message::Paste
         | Message::Pasted(_)
         | Message::SelectAll
+        | Message::AddCaret(_)
+        | Message::SelectOccurrence(_)
         | Message::Transform(_)
         | Message::Indent(_)
         | Message::DuplicateLine
@@ -302,6 +305,7 @@ pub(super) fn route(message: &Message) -> Route {
         | Message::SearchStep(_)
         | Message::ToggleRegex
         | Message::ToggleCase
+        | Message::ToggleWholeWord
         | Message::ReplaceOne
         | Message::ReplaceAll
         | Message::SearchFound { .. } => Route::Pane,
@@ -1765,17 +1769,17 @@ impl App {
             layout_button("左右に並べる", DiffLayout::SideBySide),
             layout_button("1 列に混ぜる", DiffLayout::Unified),
             layout_button("プレビュー", DiffLayout::Preview),
-            iced::widget::pick_list(
+            fluent::pick_list(
                 crate::io::settings::DiffWhitespace::ALL.to_vec(),
                 Some(self.settings.diff_whitespace),
                 |whitespace| Message::Setting(super::SettingChange::DiffWhitespace(whitespace)),
             )
             .text_size(12),
-            iced::widget::checkbox(self.settings.diff_ignore_case)
+            fluent::checkbox(self.settings.diff_ignore_case)
                 .label("大文字と小文字を無視")
                 .text_size(12)
                 .on_toggle(|on| Message::Setting(super::SettingChange::DiffIgnoreCase(on))),
-            iced::widget::checkbox(self.settings.diff_ignore_eol)
+            fluent::checkbox(self.settings.diff_ignore_eol)
                 .label("改行コードを無視")
                 .text_size(12)
                 .on_toggle(|on| Message::Setting(super::SettingChange::DiffIgnoreEol(on))),
@@ -1876,9 +1880,9 @@ impl App {
         .match_color(self.match_colors().0)
         // プレビューでの比較では、検索の語を左右とも塗る（v2.8.0 R-02。読むだけ）
         .highlight(if self.search.open {
-            self.search.query.as_str()
+            self.search.compiled.as_ref()
         } else {
-            ""
+            None
         })
         .embeds(&self.embeds)
         .base_dir(meta.base_dir())
@@ -2015,6 +2019,7 @@ mod tests {
             format: crate::io::FileFormat::for_new_document(),
             oversized: false,
             lossy: false,
+            truncated: None,
         })
     }
 

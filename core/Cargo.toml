@@ -1,0 +1,86 @@
+[package]
+name = "mdview-core"
+# **本体と同じ版数にする**（本体の試験 `core_version_matches_app` がそろっているかを見る）。
+# 土台の中の `CARGO_PKG_VERSION`（URL を読むときの User-Agent など）がこの値になるため
+version = "3.0.0"
+description = "mdview の土台（UI に依存しない部分）"
+authors = []
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+# **土台は窓と GPU の部品を持たない**（v3 R-01）。PC 版（iced）とモバイル版（Dioxus）で共有する。
+# 依存の選び方の理由は本体の Cargo.toml の注釈を正とする（同じものをここへ移した）
+[dependencies]
+# 色・矩形・字体などの値の型だけを使う。**名前を `iced` にする**（本体から移したコードが `iced::Color` と名指しするため）。
+# 窓・描画（winit・wgpu）は入らない
+iced = { package = "iced_core", version = "0.14" }
+# 絵文字の性質の表（v3 R-19。絵文字をつなぐ ZWJ・絵文字で描く字の見分け）。**新しいクレートは増えない**（cosmic-text が同じ版を使っている）
+unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
+ropey = "1.6"
+# UAX #14 の行分割規則。日本語の基本的な禁則はここに含まれる（§3.2）
+unicode-linebreak = "0.1"
+# レイアウトキャッシュ（§3.8）
+lru = "0.18"
+# Markdown の解析（DEC-203）。可視範囲のインライン要素と、出力用の全文解析に使う。
+# 既定の機能だけで足りる（HTML 出力は使わない。§12.7）
+comrak = { version = "0.55", default-features = false }
+# コードブロックの着色（DEC-211）。構文定義 75 種が最初から入る。
+# **テーマは入れない。** 色は役割で持ち描画時に解決するため（§16.10）。
+# 正規表現は fancy-regex（純 Rust）を使う。onig は C の依存が増え、
+# 単一実行ファイル（+crt-static）と 3 OS のビルドを面倒にする
+syntect = { version = "5.3", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
+] }
+# Mermaid の図（DEC-207）。v1 と同じ mermaid 11.17.2 に追従する純 Rust 実装
+merman = "0.9.0"
+# SVG のラスタライズ。画面表示と PDF 出力の双方で要る。
+# **0.45 に留める**（2026-10-16）。0.45 は iced（cosmic-text）と同じ版の `tiny-skia` 0.11・
+# `fontdb` 0.23・`rustybuzz` 0.20 を使うので、同じライブラリが 2 版入らない。0.48 にすると
+# `tiny-skia`・`fontdb`・`harfrust`・`usvg` が 2 版ずつになる。上げるのは iced が追い付いてから
+# （.github/dependabot.yml で 0.46 以上を除外している）
+resvg = "0.45"
+serde_json = "1"
+# URL から読む（v2.4.0 R-09。利用者が URL を指したときだけ）。証明書は OS の確かめ方に任せる。
+# **組み込みの証明書の一覧（webpki-roots）は入れない**（使わない。`rustls` の代わりに、その中身から一覧を除いて選ぶ）。
+# 中継は環境変数と、Windows のプロキシの設定（win-system-proxy）。`_ring` は ureq の `rustls` が使う暗号の部品
+ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "_ring", "platform-verifier", "gzip", "win-system-proxy"] }
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "net", "time", "macros"] }
+# LaTeX 数式（DEC-210）。出力はすべて <path> で、描画に外部フォントが要らない
+latex-rust = "2.1"
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "webp",
+] }
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# 文字コードの変換（利用者の要望。TeraPad に準じる）。
+# Shift_JIS / EUC-JP / ISO-2022-JP / UTF-16 を読み書きする。
+# **判定は自前**（§19.4）。encoding_rs は変換だけを担う
+encoding_rs = "0.8"
+# PDF の生成（DEC-205）。v1 の WebView 印刷に依存しない。
+# **同梱フォントをそのまま埋め込む**（サブセット化は krilla が行う。§8.5）
+krilla = "0.8"
+similar = { version = "3.2.0", features = ["inline"] }
+ttf-parser = "0.25"
+# 字の区切り（v3 R-19。PDF の絵文字を ZWJ の連なりごとに切り替える）。**新しいクレートは増えない**（cosmic-text と同じ版）
+unicode-segmentation = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_UI_Shell"] }
+
+# 自動構成スクリプト（PAC）を評価する JavaScript の処理系（v2.8.0 R-06）。**Linux 版だけ**（Windows・macOS は OS が評価する）。
+# 純 Rust で C の部品が要らない。暦の拡張などは使わないので切る
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+boa_engine = { version = "0.22", default-features = false }
+
+[dev-dependencies]
+# PAC の評価を、Linux 以外でも試験する
+boa_engine = { version = "0.22", default-features = false }

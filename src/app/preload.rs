@@ -63,7 +63,10 @@ pub fn start() {
     let spawned = std::thread::Builder::new()
         .name("preload".to_owned())
         .spawn(move || {
-            let outcome = crate::io::load(&target)
+            // **大きすぎれば先頭だけ**（v3 R-12）。設定はここで読む（窓より先に始まるため）
+            let limit = crate::io::settings::Settings::load().large_file_mb;
+            crate::io::set_size_limit(u64::from(limit) * 1024 * 1024);
+            let outcome = crate::io::load_limited(&target, None)
                 .map(|mut file| {
                     let text = std::mem::take(&mut file.text);
                     let plain = super::reads_as_plain(Some(&file.path));

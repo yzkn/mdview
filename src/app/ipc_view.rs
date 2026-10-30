@@ -80,6 +80,21 @@ impl App {
                     (None, Task::none())
                 }
             }
+            // 開いているファイルなら前に出る（v3 R-15）
+            "focus_if_open" => {
+                let open = request["path"].as_str().is_some_and(|path| {
+                    self.meta
+                        .path
+                        .as_deref()
+                        .is_some_and(|mine| crate::ipc::same_path(mine, std::path::Path::new(path)))
+                });
+                let task = if open {
+                    self.bring_to_front()
+                } else {
+                    Task::none()
+                };
+                (Some(json!({ "ok": true, "open": open })), task)
+            }
             command @ ("save" | "save_as" | "open" | "reload" | "close" | "set_read_only") => {
                 let (answer, task) = self.ipc_command(command, &request);
                 (Some(answer), task)

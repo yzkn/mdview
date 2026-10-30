@@ -37,7 +37,7 @@ pub struct Watch {
     pub pending: bool,
     /// 変わったことを知らせている最中か
     pub changed: bool,
-    /// 印を覚え直した回数（v2.3.0）。**覚え直す前に頼んだ確かめの結果は捨てる**。
+    /// 印を覚え直した回数（v2.3.0）。**覚え直す前に頼んだ確認の結果は捨てる**。
     /// 捨てないと、保存する前の古い印が保存の後に届き、自分の保存を外の変更と取り違える
     pub generation: u64,
 }
@@ -257,6 +257,42 @@ pub fn spawn(path: Option<&Path>, read_only: bool, on_top: bool) -> std::io::Res
     command.spawn().map(|child| child.id())
 }
 
+/// 問い合わせのあとに続けること（v3 R-15）
+#[derive(Debug, Clone)]
+pub enum OpenNext {
+    /// 読む（開くダイアログで選んだ。文字コードの指定つき）
+    Load(Option<crate::io::Encoding>),
+    /// 最近使ったファイル（未保存の確認を通す）
+    Recent,
+    /// 落とされた（この窓か別の窓か）
+    Drop,
+}
+
+/// 起動の引数の 1 つ目のファイルを、**ほかの窓で開いていれば、その窓を前に出して終わる**（v3 R-15）。
+///
+/// 2 つ目からのファイルは、これまでどおり別の窓で開く（それぞれの窓が同じように問い合わせる）。
+/// 終わるなら `true`。試験の口（`--automation`）では問い合わせない（試験が同じファイルを別の窓で開く）
+pub fn focus_existing_on_launch() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--automation") {
+        return false;
+    }
+    let launch = parse_launch(&args);
+    if launch.url.is_some() {
+        return false;
+    }
+    let Some(first) = launch.files.first() else {
+        return false;
+    };
+    if crate::ipc::focus_if_open_blocking(first).is_none() {
+        return false;
+    }
+    for extra in launch.files.iter().skip(1) {
+        let _ = spawn(Some(extra), launch.read_only, launch.on_top);
+    }
+    true
+}
+
 /// 起動引数で決まること（R-08 / v2.1.3）。
 #[derive(Debug, Default, PartialEq)]
 pub struct Launch {
@@ -342,6 +378,71 @@ pub fn parse_launch(args: &[String]) -> Launch {
 }
 
 impl App {
+    /// この窓を前に出す（v3 R-15。ほかの窓から頼まれたとき）。**しまっていたら戻す**
+    pub(super) fn bring_to_front(&mut self) -> Task<Message> {
+        iced::window::latest().then(|id| match id {
+            // **前に出せないときのために、タスクバーでも知らせる**（ほかの窓を使っている最中は、
+            // Windows が前に出すのを止めることがある。前に出られたら点滅は OS が止める）
+            Some(id) => Task::batch([
+                iced::window::minimize(id, false),
+                iced::window::gain_focus(id),
+                iced::window::request_user_attention(
+                    id,
+                    Some(iced::window::UserAttention::Informational),
+                ),
+            ]),
+            None => Task::none(),
+        })
+    }
+
+    /// 開く前に、ほかの窓で開いていないかを問い合わせる（v3 R-15）。開いていれば、その窓が前に出る
+    pub(super) fn open_unless_elsewhere(&mut self, path: PathBuf, next: OpenNext) -> Task<Message> {
+        // **ほかの窓が無ければ問い合わせず、すぐ続ける**（未保存の確認などが、いままでと同じ時に出る）
+        let me = std::process::id();
+        if crate::ipc::registered().iter().all(|pid| *pid == me) {
+            return self.open_next(path, next);
+        }
+        let asked = path.clone();
+        Task::perform(
+            async move { crate::ipc::focus_if_open(&asked).await.is_some() },
+            move |elsewhere| Message::OpenElsewhere(path.clone(), next, elsewhere),
+        )
+    }
+
+    /// 問い合わせの答え。ほかの窓で開いていたら知らせるだけ、でなければ続ける
+    pub(super) fn opened_elsewhere(
+        &mut self,
+        path: PathBuf,
+        next: OpenNext,
+        elsewhere: bool,
+    ) -> Task<Message> {
+        if !elsewhere {
+            return self.open_next(path, next);
+        }
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        self.notice = Some(notice::Notice::plain(format!(
+            "{name} はほかのウィンドウで開いているので、そのウィンドウを前に出しました"
+        )));
+        Task::none()
+    }
+
+    fn open_next(&mut self, path: PathBuf, next: OpenNext) -> Task<Message> {
+        match next {
+            OpenNext::Load(forced) => self.load_path_as(path, forced),
+            OpenNext::Recent => {
+                // **未保存の確認を通す**（§18.2）。開くと編集中の内容は消える
+                if !self.begin(super::file::Pending::OpenPath(path)) {
+                    return Task::none();
+                }
+                self.run_pending()
+            }
+            OpenNext::Drop => self.open_dropped(path),
+        }
+    }
+
     /// 新しい窓を起こす（R-09）。**起こせなかったことも知らせる**
     pub(super) fn spawn_window(&mut self, path: Option<&Path>) {
         // **メニューから起こす新しい窓は、まっさらで開く**（読み取り専用・最前面を引き継がない）
@@ -621,7 +722,7 @@ impl App {
         self.watch.changed = false;
         // **いまのものを知っているものとする。** そうしないと次の刻みでまた出る
         self.watch.known = self.meta.path.as_deref().and_then(FileStamp::of);
-        // 頼んでいた確かめは捨てるので、待つのもやめる（待ったままだと二度と確かめない）
+        // 頼んでいた確認は捨てるので、待つのもやめる（待ったままだと二度と確かめない）
         self.watch.generation = self.watch.generation.wrapping_add(1);
         self.watch.pending = false;
     }
@@ -829,7 +930,7 @@ mod tests {
         ));
     }
 
-    /// **覚え直す前に頼んだ確かめの結果は捨てる**（v2.3.0）。保存の前の古い印が
+    /// **覚え直す前に頼んだ確認の結果は捨てる**（v2.3.0）。保存の前の古い印が
     /// 保存の後に届いても、外の変更と取り違えない
     #[test]
     fn a_stale_external_check_is_dropped() {

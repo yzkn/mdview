@@ -5,6 +5,7 @@
 //! （対応の表は `crate::edit::wysiwyg`）。見た目の行が要る動き（上下・行の頭と終わり・押した所）は
 //! プレビューの部品が決めて `Place` で知らせる。
 
+use super::fluent;
 use super::App;
 use crate::edit::wysiwyg::{map_block, BlockMap, Pos};
 use crate::render::{Action, WysiwygAction};
@@ -403,7 +404,7 @@ impl App {
             tools.push(gap());
             tools.push(text("言語").size(12).into());
             tools.push(
-                iced::widget::text_input("なし", &language)
+                fluent::text_input("なし", &language)
                     .on_input(|value| {
                         Message::Preview(crate::render::PreviewAction::Wysiwyg(
                             WysiwygAction::CodeLanguage(value),

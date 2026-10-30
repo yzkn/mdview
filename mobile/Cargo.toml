@@ -1,0 +1,51 @@
+# mdview のモバイル版（v3 R-02。Android・iOS）。
+#
+# **本体（PC 版）とは別の workspace にする**（Cargo.lock も別）。Dioxus の依存が、PC 版の組み立て・clippy・
+# 使用許諾の一覧に混ざらないように。土台（../core。mdview-core）は PC 版と同じものを使う。
+#
+# - Android・iOS: `dx bundle --platform android|ios --release --no-default-features --features mobile`（CI。`.github/workflows/mobile.yml`）
+# - 手元（Windows の WebView2）: `cargo run`（既定の機能が desktop）
+[workspace]
+resolver = "2"
+
+[package]
+name = "mdview-mobile"
+version = "3.0.0"
+edition = "2021"
+publish = false
+description = "Markdown を読む・軽く直すモバイル版（Dioxus。端末の WebView に描く）"
+license = "MIT"
+
+[dependencies]
+mdview-core = { path = "../core" }
+dioxus = { version = "=0.7.10", default-features = false, features = ["launch", "html", "macro", "signals", "hooks", "document"] }
+# 待つ（自動の保存・「元に戻す」の表示）。Dioxus の desktop・mobile は tokio の上で動く
+tokio = { version = "1", features = ["time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 端末の部品（Kotlin・Swift）を同梱して呼ぶ（src/native.rs）。Dioxus と同じ版
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+manganis = "=0.7.10"
+
+[features]
+default = ["desktop"]
+# 手元で動きを見る（Windows は WebView2）
+desktop = ["dioxus/desktop"]
+# Android・iOS（端末の WebView）
+mobile = ["dioxus/mobile"]
+# 画面の確認（決まった様子を HTML にして、ヘッドレスのブラウザで撮る。配る物には入らない）
+snapshot = ["dioxus/ssr"]
+
+[[bin]]
+name = "snapshot"
+required-features = ["snapshot"]
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+# 端末へ配るので小さく。**strip は dx に任せない**（Android の組み立ては共有ライブラリを自分で縮める）
+opt-level = "s"
+lto = "thin"
+codegen-units = 4

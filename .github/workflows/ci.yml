@@ -145,12 +145,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        # **土台（core/）も見る**（v3 R-01 で作業場を 2 つのクレートにした。--workspace が無いと本体しか見ない）
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: テスト
         # レイアウト層は描画層に依存しないため、ウィンドウ無しで試験できる。
         # **画面の見た目は CI では確かめられない**（字形・IME・滑らかさ）
-        run: cargo test --all
+        run: cargo test --workspace
 
       - name: macOS の起動用を型検査する
         # Finder から開いたファイルを受け取る小さなアプリ（v2.1.0 R-08）。
@@ -385,7 +386,7 @@ jobs:
           #
           # 本体（mdview.exe）は v2.1.3 から GUI のアプリなので、`$v = & $exe --version` では
           # PowerShell が標準出力をつながずに起こし、答えが空（null）になる。しかも
-          # `$null -notmatch '...'` は偽に見えるため、版数の確かめをすり抜けていた
+          # `$null -notmatch '...'` は偽に見えるため、版数の確認をすり抜けていた
           # （公開側の CI で、mdview.com との比べで初めて落ちた）
           function Get-Answer([string]$Path, [string]$Argument) {
             $info = New-Object System.Diagnostics.ProcessStartInfo
@@ -438,6 +439,221 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # **モバイル版**（v3 R-03）。Android は署名した APK を `dist-android` に置き、Release に載せる。
+  # iOS は組めることまで（配らない。Apple の開発者登録が要る）。
+  #
+  # - **署名の鍵は Actions の秘密に置く**（リポジトリには置かない）。秘密が無い実行（PR など）は
+  #   署名せず、Release にも載せない（`dist-android` を作らない）
+  # - 本体（PC 版）の `check` とは別に動く。落ちても PC 版の配布は止めない
+  mobile:
+    name: モバイル版（${{ matrix.label }}）
+    runs-on: ${{ matrix.os }}
+    # Android は 2 つの ABI を順に組むので長い
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # **ユニバーサル APK**（v3.0.0）。実機（arm64）とエミュレーター（x86_64）のどちらにも入るよう、2 つの ABI を 1 つの APK に入れる。
+          # 先頭（arm64）の APK を土台にして、ほかの ABI のライブラリを足す。**32 ビット（armeabi-v7a・x86）は組めない**:
+          # Kotlin を呼ぶ橋（manganis 0.7.10）が「Only 64-bit Android targets are supported」で止める（利用者の判断で 64 ビットだけ）
+          - os: ubuntu-latest
+            label: android
+            target: aarch64-linux-android
+            targets: aarch64-linux-android x86_64-linux-android
+          - os: macos-latest
+            label: ios
+            target: aarch64-apple-ios-sim
+            targets: aarch64-apple-ios-sim
+    env:
+      DIOXUS_CLI_VERSION: "0.7.10"
+    defaults:
+      run:
+        # bash と書くと pipefail が付く
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust と対象を入れる
+        run: |
+          rustup show
+          rustup target add ${{ matrix.targets }}
+
+      - name: NDK の場所を決める（Android）
+        if: matrix.label == 'android'
+        # ランナーに入っている NDK を使う。C の部品（ring など）を NDK の clang で組む
+        run: |
+          ndk="$ANDROID_NDK_LATEST_HOME"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            echo "NDK_HOME=$ndk"
+            echo "ANDROID_NDK_HOME=$ndk"
+            echo "JAVA_HOME=$JAVA_HOME_17_X64"
+            # ABI ごとの C の組み立て役（26 は Dioxus.toml の min_sdk）
+            for t in ${{ matrix.targets }}; do
+              clang="$t"
+              lower=$(echo "$t" | tr '-' '_')
+              upper=$(echo "$lower" | tr '[:lower:]' '[:upper:]')
+              echo "CC_${lower}=$bin/${clang}26-clang"
+              echo "AR_${lower}=$bin/llvm-ar"
+              echo "CARGO_TARGET_${upper}_LINKER=$bin/${clang}26-clang"
+            done
+          } >> "$GITHUB_ENV"
+
+      # **同梱の字体はリポジトリに無い**。土台は `include_bytes!` で読むので、組む前に取る
+      - name: 同梱フォントのキャッシュ
+        id: fonts
+        uses: actions/cache@v6
+        with:
+          path: assets/fonts
+          key: fonts-${{ hashFiles('tools/fetch-fonts.py') }}
+
+      - name: 同梱フォントを取得する
+        if: steps.fonts.outputs.cache-hit != 'true'
+        run: python3 tools/fetch-fonts.py
+
+      - name: 同梱フォントを確認する
+        run: python3 tools/fetch-fonts.py --check
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobile -> target
+          key: mobile-${{ matrix.label }}
+
+      # 画面に依存しない所（ブロックの区切り・作業の印・出力）の試験と書式・Lint は、ランナーの上で流す
+      - name: 書式・Lint・試験（Android のジョブだけ）
+        if: matrix.label == 'android'
+        working-directory: mobile
+        run: |
+          cargo fmt --check
+          cargo clippy --no-default-features --all-targets -- -D warnings
+          cargo test --no-default-features
+          # APK・.app に入る依存の著作権表示の一覧（アプリに埋める）が古くないか
+          rustup target add aarch64-apple-ios
+          python3 ../tools/build-licenses.py --mobile --check
+
+      # **トークンを渡し、向け先を決め、ほかの取得先へ逃げない**（v3.0.0）。トークンが無いと GitHub の API が 403 を返し、
+      # binstall は待ちきれずに別の取得先から x86_64 の macOS 版を拾った。それは Intel の Homebrew の OpenSSL
+      # （/usr/local/opt/openssl@3）を前提にしていて、Apple Silicon のランナーでは起動できずに落ちた
+      - name: Dioxus の CLI を入れる
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          case "$RUNNER_OS" in
+            macOS) host=aarch64-apple-darwin ;;
+            Linux) host=x86_64-unknown-linux-gnu ;;
+            *) echo "想定していない OS: $RUNNER_OS"; exit 1 ;;
+          esac
+          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          cargo binstall -y --force --targets "$host" --disable-strategies quick-install,compile \
+            "dioxus-cli@$DIOXUS_CLI_VERSION"
+          file "$(command -v dx)"
+          dx --version
+
+      - name: APK を組む（Android）
+        if: matrix.label == 'android'
+        working-directory: mobile
+        # **`--target` を必ず渡す**。渡さないと dx は組む機械（ランナーは x86_64）に合わせて x86_64-linux-android で組み、
+        # ARM の実機に入らない APK になる（INSTALL_FAILED_NO_MATCHING_ABIS。v3.0.0 の 1 回目で踏んだ）。
+        # dx は 1 回に 1 つの ABI しか組まないので、ABI ごとに組んで `../out/abi/<対象>.apk` に分けて置く。
+        # 前の APK（キャッシュから戻ったもの・前の ABI のもの）を拾わないよう、組む前に消す
+        run: |
+          set -eu
+          mkdir -p ../out/abi
+          for t in ${{ matrix.targets }}; do
+            echo "::group::$t"
+            find target -name '*.apk' -delete 2>/dev/null || true
+            dx bundle --platform android --target "$t" --release --no-default-features --features mobile
+            apk=$(find target -name '*.apk' -path '*release*' | head -1)
+            test -n "$apk" || { echo "$t の APK が見つからない"; find target -name '*.apk'; exit 1; }
+            cp "$apk" "../out/abi/$t.apk"
+            echo "::endgroup::"
+          done
+          ls -l ../out/abi
+
+      - name: .app を組む（iOS のシミュレーター）
+        if: matrix.label == 'ios'
+        working-directory: mobile
+        run: dx build --platform ios --target ${{ matrix.target }} --release --no-default-features --features mobile
+
+      # **秘密が無ければ署名しない**（PR・フォーク）。そのときは Release に載せない
+      - name: APK に署名する（Android）
+        if: matrix.label == 'android'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -eu
+          # **1 つにまとめる**: 先頭の ABI（arm64）の APK を土台に、全部の ABI の `lib/<ABI>/` を無圧縮で入れ直す。
+          # 無圧縮で入れて zipalign -p でページに揃えると、端末はライブラリを展開せずに読める（extractNativeLibs の値に依らず入る）
+          first=$(echo "${{ matrix.targets }}" | cut -d ' ' -f 1)
+          cp "out/abi/$first.apk" out/unsigned.apk
+          rm -rf out/lib-stage && mkdir -p out/lib-stage
+          for t in ${{ matrix.targets }}; do
+            unzip -o -q "out/abi/$t.apk" 'lib/*' -d out/lib-stage
+          done
+          # 組み立て役が付けた署名（デバッグの鍵）は中身を変えると壊れるので外す。署名は下で付け直す
+          zip -q -d out/unsigned.apk 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.EC' 'META-INF/*.DSA' 'META-INF/MANIFEST.MF' || true
+          zip -q -d out/unsigned.apk 'lib/*' || true
+          (cd out/lib-stage && zip -q -0 -D -r ../unsigned.apk lib)
+          echo "まとめた APK: out/unsigned.apk（$(du -h out/unsigned.apk | cut -f1)）"
+          unzip -l out/unsigned.apk | grep ' lib/'
+          # **2 つの ABI のライブラリがそろっていること**（足りないと、その ABI の端末が入れるのを断る）
+          for abi in arm64-v8a x86_64; do
+            unzip -l out/unsigned.apk | grep -q " lib/${abi}/[^/]*\.so$" || { echo "APK に lib/${abi} が無い"; exit 1; }
+          done
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "署名の鍵（秘密）が無いので署名しない。Release にも載せない"
+            exit 0
+          fi
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
+          mkdir -p dist
+          # **zipalign してから署名する**（apksigner の署名は整列のあとでないと壊れる）
+          "$tools/zipalign" -f -p 4 out/unsigned.apk out/aligned.apk
+          "$tools/apksigner" sign --ks "$RUNNER_TEMP/release.jks" \
+            --ks-pass env:KEYSTORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
+            --out "dist/mdview-${version}-android.apk" out/aligned.apk
+          "$tools/apksigner" verify --print-certs "dist/mdview-${version}-android.apk"
+          rm -f "$RUNNER_TEMP/release.jks"
+
+      - name: 署名しない APK を残す（Android。確かめ用）
+        if: matrix.label == 'android'
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-android-unsigned
+          path: out/unsigned.apk
+          retention-days: 14
+
+      # **release ジョブはこの名前（dist-*）で探す**。署名したときだけ出来る
+      - name: 署名した APK を Release へ回す（Android）
+        if: matrix.label == 'android' && hashFiles('dist/*.apk') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-android
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: .app を残す（iOS。配らない）
+        if: matrix.label == 'ios'
+        run: |
+          set -eu
+          app=$(find mobile/target -name '*.app' -type d | head -1)
+          test -n "$app" || { echo ".app が見つからない"; exit 1; }
+          mkdir -p out
+          ditto -c -k --keepParent "$app" out/mdview-ios-simulator.zip
+          ls -l out
+
+      - uses: actions/upload-artifact@v7
+        if: matrix.label == 'ios'
+        with:
+          name: mobile-ios-simulator
+          path: out/*.zip
+          retention-days: 14
+
   # **版数が新しければ、タグを打って Release を作る**（2026-10-13）。
   #
   # main への push のときだけ走る（PR・手動起動では走らない）。`check` が
@@ -449,7 +665,8 @@ jobs:
   # release.yml が重ねて走ることは無い
   release:
     name: タグと Release を作る
-    needs: check
+    # モバイル版（v3 R-03）の署名した APK も待つ。落ちても PC 版は配る
+    needs: [check, mobile]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     permissions:

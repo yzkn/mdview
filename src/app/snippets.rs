@@ -14,9 +14,10 @@
 //! 設定画面の「スニペット」で、名前・略語・中身を足す・直す・消す。初めからのものも直せ、
 //! 「初めのものに戻す」で戻せる。
 
+use super::fluent;
 use std::ops::Range;
 
-use iced::widget::{button, column, container, row, scrollable, text, text_editor, text_input};
+use iced::widget::{button, column, container, row, text, text_editor};
 use iced::{Element, Length, Task};
 
 use super::settings_view::SettingChange;
@@ -247,7 +248,7 @@ impl App {
             column![
                 row![
                     text("スニペットを入れる").size(12),
-                    text_input("名前か略語で絞り込む", query)
+                    fluent::text_input("名前か略語で絞り込む", query)
                         .id(picker_id())
                         .on_input(Message::SnippetPickerInput)
                         .on_submit(Message::SnippetPickerSubmit)
@@ -259,7 +260,7 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
-                scrollable(list).height(Length::Fixed(220.0)),
+                fluent::scrollable(list).height(Length::Fixed(220.0)),
             ]
             .spacing(6),
         )
@@ -362,7 +363,7 @@ impl App {
                     ),
             ]
             .spacing(8),
-            container(scrollable(list)).height(Length::Fixed(200.0)),
+            container(fluent::scrollable(list)).height(Length::Fixed(200.0)),
         ]
         .spacing(8);
         if let (Some(index), Some(content)) = (screen.snippet, self.snippet_body.as_ref()) {
@@ -371,12 +372,12 @@ impl App {
                     .push(
                         row![
                             text("名前").size(12).width(Length::Fixed(80.0)),
-                            text_input("名前", &s.name)
+                            fluent::text_input("名前", &s.name)
                                 .on_input(|v| message(SnippetChange::Name(v)))
                                 .size(12)
                                 .width(Length::Fixed(260.0)),
                             text("略語").size(12),
-                            text_input("（無し）", &s.prefix)
+                            fluent::text_input("（無し）", &s.prefix)
                                 .on_input(|v| message(SnippetChange::Prefix(v)))
                                 .size(12)
                                 .width(Length::Fixed(120.0)),

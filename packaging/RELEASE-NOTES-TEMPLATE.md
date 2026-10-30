@@ -19,15 +19,18 @@
 | Windows 10/11 (x64) | `mdview-<版数>-windows-x86_64-setup.exe` | `mdview-<版数>-windows-x86_64.exe` |
 | macOS 11+ (Apple Silicon) | `mdview-<版数>-macos-aarch64.dmg` | `mdview-<版数>-macos-aarch64` |
 | Linux (x64) | `mdview-<版数>-linux-x86_64.deb` | `mdview-<版数>-linux-x86_64.AppImage` |
+| Android 8.0 以上 | `mdview-<版数>-android.apk` | — |
 
 **Linux 版は glibc 2.39 以上が要ります**（Ubuntu 24.04・Debian 13 以降）。
+
+**iOS 版は配っていません**（組めることだけを確かめています）。
 
 **どれも単体で動きます。** フォントを同梱しているので、環境によって字形が
 変わることはありません。
 
 ## 初回起動時の警告について
 
-**この配布物には署名を付けていません。** そのため、初回に OS の警告が出ます。
+**PC 版には署名を付けていません**（Android の APK だけは mdview の鍵で署名しています）。 そのため、初回に OS の警告が出ます。
 内容を確かめたうえで、次の手順で進めてください。
 
 ### Windows
@@ -58,6 +61,11 @@ AppImage は実行権限を付けてから動かします。
 chmod +x mdview-<版数>-linux-x86_64.AppImage
 ./mdview-<版数>-linux-x86_64.AppImage
 ```
+
+### Android
+
+ストアからは配っていません。APK を端末で開くと「提供元不明のアプリ」の確認が出るので、
+案内に従って、開いたアプリ（ファイルやブラウザ）からの導入を許可します。
 
 ## 入れ方・消し方
 

@@ -4,6 +4,8 @@
 
     python tools/build-licenses.py          作り直す
     python tools/build-licenses.py --check  古ければ失敗する（CI）
+    --mobile を付けると、モバイル版（mobile/。Android・iOS の APK・.app に入る依存。v3 R-03）の一覧
+                                            （assets/licenses/mobile-third-party.json）
 
 やること:
 
@@ -16,7 +18,7 @@
   4. 同じ全文はまとめ、一覧を JSON に書く。実行ファイルはこれを埋めて About で見せる
 
 **依存を変えたら作り直してコミットする。** 古いままだと CI が落ちる（公開用の複製と同じ考え方）。
-同梱フォントのライセンスは実行ファイルに別に埋めてある（`src/render/fonts.rs`）ので、ここには入れない。
+同梱フォントのライセンスは実行ファイルに別に埋めてある（`core/src/render/fonts.rs`）ので、ここには入れない。
 """
 
 import json
@@ -32,6 +34,27 @@ TEXTS = os.path.join(ROOT, "tools", "license-texts")
 
 # 配る OS（公開側の CI が組むもの）
 TARGETS = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+
+# モバイル版（v3 R-03）。**別の workspace**（mobile/Cargo.lock）なので、そこで数える
+MOBILE = "--mobile" in sys.argv[1:]
+if MOBILE:
+    WORKDIR = os.path.join(ROOT, "mobile")
+    OUTPUT = os.path.join(ROOT, "assets", "licenses", "mobile-third-party.json")
+    # Android はユニバーサル APK（arm64-v8a・x86_64 を 1 つに入れる）なので 2 つとも数える
+    TARGETS = [
+        "aarch64-linux-android",
+        "x86_64-linux-android",
+        "aarch64-apple-ios",
+    ]
+    FEATURES = ["--no-default-features", "--features", "mobile"]
+    # **手続きマクロとその依存は数えない**。組み立てる PC の上で動くだけで APK・.app に入らず、
+    # しかも**組み立てる OS で選ばれる**（Windows で作ると windows-sys が入り、Linux の CI で「古い」と落ちた）
+    EDGES = "normal,no-proc-macro"
+else:
+    WORKDIR = ROOT
+    FEATURES = []
+    # PC 版は 3 つの OS を全部数えるので、組み立てる OS によらない
+    EDGES = "normal"
 
 # ライセンスの文書とみなす名前（フォルダーなら中のファイルを全部）
 LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|UNLICENSE|COPYRIGHT)", re.IGNORECASE)
@@ -51,7 +74,7 @@ def cargo():
 
 def run(*args):
     result = subprocess.run(
-        [cargo(), *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8"
+        [cargo(), *args], cwd=WORKDIR, capture_output=True, text=True, encoding="utf-8"
     )
     if result.returncode != 0:
         sys.exit(f"cargo {' '.join(args)} が失敗した:\n{result.stderr}")
@@ -60,7 +83,7 @@ def run(*args):
 
 def used_packages():
     """実行ファイルに入る依存（名前・版）。自分自身は除く"""
-    args = ["tree", "--locked", "-e", "normal", "--prefix", "none", "-f", "{p}"]
+    args = ["tree", "--locked", "-e", EDGES, "--prefix", "none", "-f", "{p}", *FEATURES]
     for target in TARGETS:
         args += ["--target", target]
     used = set()
@@ -154,7 +177,8 @@ def build():
             + "\n  ".join(missing)
         )
     data = {
-        "note": "tools/build-licenses.py が Cargo.lock から作る。手で直さない",
+        "note": "tools/build-licenses.py が Cargo.lock から作る。手で直さない"
+        + ("（--mobile。mobile/Cargo.lock）" if MOBILE else ""),
         "packages": packages,
         "texts": texts,
     }

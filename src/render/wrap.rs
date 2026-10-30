@@ -1,7 +1,8 @@
 //! 右端での折り返し（v2.2.0）。
 //!
-//! **小さい文書でだけ使う**（[`WRAP_LIMIT_BYTES`] 以下）。折り返すと 1 行が何段になるかを
-//! 全行ぶん数える必要があり、大きな文書では編集のたびに数え直せない（DD-01）。
+//! 折り返すと 1 行が何段になるかを全行ぶん数える必要がある。**表を作るのは開いたとき・幅やタブ幅・
+//! 畳み込みが変わったときだけ**にし、書き換えたときは、その行だけを数え直して後ろの段の番号を足し直す
+//! （[`Wrap::update`]。v3 R-12）。v2.9.0 までは打鍵のたびに作り直していたので、512 KB を超える文書では折り返さなかった
 //!
 //! # 段と行
 //!
@@ -18,12 +19,6 @@ use crate::app::fold::FoldMap;
 use crate::document::Document;
 
 use super::editor::{is_wide, Rendered};
-
-/// 折り返しを許す文書の大きさの上限（バイト）。**超えたら設定が入っていても折り返さない**。
-///
-/// 目視確認で 1 MB では応答が遅かったため 512 KB にした（2026-10-14）。表の作り直しは
-/// 512 KB で約 3 ms（1 MB で約 6 ms。`wrap_build_cost`）
-pub const WRAP_LIMIT_BYTES: usize = 512 * 1024;
 
 /// 1 段に入る桁の下限。**狭すぎる窓で 1 文字ずつの段にならない**ように
 pub const MIN_COLUMNS: usize = 8;
@@ -110,6 +105,27 @@ fn breaks_in(chars: impl Iterator<Item = char>, columns: usize, tab_width: usize
     breaks
 }
 
+/// 1 行の切れ目。**隠した行は `None`**（0 段）
+fn line_breaks(
+    text: &ropey::Rope,
+    folds: &FoldMap,
+    line: usize,
+    columns: usize,
+    tab_width: usize,
+) -> Option<Vec<usize>> {
+    if folds.is_hidden(line) {
+        return None;
+    }
+    let slice = text.line(line);
+    // **全角やタブでも確実に収まる行は数えない**（ほとんどの行がこれ）
+    let widest = 2.max(tab_width);
+    Some(if slice.len_chars() * widest <= columns.max(MIN_COLUMNS) {
+        Vec::new()
+    } else {
+        breaks_in(slice.chars(), columns, tab_width)
+    })
+}
+
 impl Wrap {
     pub fn build(document: &Document, folds: &FoldMap, columns: usize, tab_width: usize) -> Self {
         let text = document.text();
@@ -119,20 +135,13 @@ impl Wrap {
         let mut row = 0usize;
         for line in 0..lines {
             first_row.push(row);
-            if folds.is_hidden(line) {
-                breaks.push(Vec::new());
-                continue;
+            match line_breaks(text, folds, line, columns, tab_width) {
+                Some(found) => {
+                    row += found.len() + 1;
+                    breaks.push(found);
+                }
+                None => breaks.push(Vec::new()),
             }
-            let slice = text.line(line);
-            // **全角やタブでも確実に収まる行は数えない**（ほとんどの行がこれ）
-            let widest = 2.max(tab_width);
-            let found = if slice.len_chars() * widest <= columns.max(MIN_COLUMNS) {
-                Vec::new()
-            } else {
-                breaks_in(slice.chars(), columns, tab_width)
-            };
-            row += found.len() + 1;
-            breaks.push(found);
         }
         first_row.push(row);
         Self {
@@ -142,6 +151,58 @@ impl Wrap {
             breaks,
             wraps: true,
         }
+    }
+
+    /// 書き換えたあとで、**その行だけを数え直す**（v3 R-12）。`from` 行からの `removed` 行が `added` 行になった。
+    ///
+    /// 後ろの行は数え直さず、段の番号だけを足し直す（足し算だけなので 10 MB でも軽い）。
+    /// 畳み込みは変わっていないこと（変わったら作り直す）。**行の数が合わなければ `false`**（呼ぶ側が作り直す）
+    pub fn update(
+        &mut self,
+        document: &Document,
+        folds: &FoldMap,
+        from: usize,
+        removed: usize,
+        added: usize,
+    ) -> bool {
+        let text = document.text();
+        if !self.wraps || from > self.breaks.len() {
+            return false;
+        }
+        let removed = removed.min(self.breaks.len() - from);
+        let fresh: Vec<(Vec<usize>, bool)> = (from..from + added)
+            .map(
+                |line| match line_breaks(text, folds, line, self.columns, self.tab_width) {
+                    Some(found) => (found, false),
+                    None => (Vec::new(), true),
+                },
+            )
+            .collect();
+        // 隠した行は 0 段（切れ目が空でも 1 段の行と分けるため、数え直しのあいだだけ覚える）
+        let hidden: Vec<bool> = fresh.iter().map(|(_, hidden)| *hidden).collect();
+        self.breaks.splice(
+            from..from + removed,
+            fresh.into_iter().map(|(found, _)| found),
+        );
+        if self.breaks.len() != text.len_lines() {
+            return false;
+        }
+        // 段の番号を `from` 行から足し直す。**隠した行は畳み込みの表で見る**（畳んでいなければ見ない）
+        let folded = !folds.ranges().is_empty();
+        let mut row = self.first_row.get(from).copied().unwrap_or(0);
+        self.first_row.truncate(from);
+        for (line, found) in self.breaks.iter().enumerate().skip(from) {
+            self.first_row.push(row);
+            let is_hidden = match line - from {
+                offset if offset < hidden.len() => hidden[offset],
+                _ => folded && folds.is_hidden(line),
+            };
+            if !is_hidden {
+                row += found.len() + 1;
+            }
+        }
+        self.first_row.push(row);
+        true
     }
 
     /// **空きの段**だけを持つ表（v2.3.0 R-02。diff の左右の面）。折り返さない。
@@ -420,6 +481,41 @@ mod tests {
                 "{kb:>5} KB: {:.1} ms / 回（{} 行）",
                 started.elapsed().as_secs_f64() * 1000.0 / rounds as f64,
                 document.text().len_lines()
+            );
+        }
+    }
+
+    /// 書き換えた行だけを数え直しても、作り直したのと同じ表になる（v3 R-12）
+    #[test]
+    fn updating_lines_matches_a_rebuild() {
+        let long = "折り返しの試験の行です。abc def ghi jkl mno pqr。";
+        let text = format!("短い\n{long}\n\n{long}{long}\n終わり\n");
+        let mut document = Document::from_text(text);
+        let mut table = Wrap::build(&document, &FoldMap::default(), 20, 4);
+        let metrics = crate::layout::Metrics::default();
+        // (書き換える所, 入れる字)。1 行の中・行を足す・行を消す
+        let edits: [(std::ops::Range<usize>, &str); 4] = [
+            (
+                0..0,
+                "とても長い行にして折り返させる。とても長い行にして折り返させる。",
+            ),
+            (3..3, "\n足した行\n"),
+            (10..30, ""),
+            (0..0, "\n"),
+        ];
+        for (range, insert) in edits {
+            let text = document.text();
+            let range = text.char_to_byte(text.byte_to_char(range.start))
+                ..text.char_to_byte(text.byte_to_char(range.end.min(text.len_bytes())));
+            let from = text.byte_to_line(range.start);
+            let removed = text.byte_to_line(range.end) - from + 1;
+            document.edit(range.clone(), insert, 800.0, &metrics);
+            let added = document.text().byte_to_line(range.start + insert.len()) - from + 1;
+            assert!(table.update(&document, &FoldMap::default(), from, removed, added));
+            assert_eq!(
+                table,
+                Wrap::build(&document, &FoldMap::default(), 20, 4),
+                "{insert:?}"
             );
         }
     }

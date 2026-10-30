@@ -34,7 +34,7 @@ pub struct Picker {
 }
 
 impl Picker {
-    /// 開く（`.md` と、すべてのファイル）。
+    /// 開く（`.md`・図のファイルと、すべてのファイル）。
     pub fn open() -> Self {
         Self {
             save: false,
@@ -45,6 +45,11 @@ impl Picker {
                         .iter()
                         .map(|extension| (*extension).to_owned())
                         .collect(),
+                ),
+                // 図のファイル（v3 R-13。プレビューの欄に描く）
+                (
+                    "図（Mermaid・SVG）".to_owned(),
+                    ["mmd", "mermaid", "svg"].map(str::to_owned).to_vec(),
                 ),
                 ("すべてのファイル".to_owned(), vec!["*".to_owned()]),
             ],
@@ -144,9 +149,10 @@ mod tests {
     fn the_open_dialog_offers_markdown_and_everything() {
         let picker = Picker::open();
         assert!(!picker.save);
-        assert_eq!(picker.filters.len(), 2);
+        assert_eq!(picker.filters.len(), 3);
         assert!(picker.filters[0].1.iter().any(|ext| ext == "md"));
-        assert_eq!(picker.filters[1].1, ["*"]);
+        assert!(picker.filters[1].1.iter().any(|ext| ext == "mmd"));
+        assert_eq!(picker.filters[2].1, ["*"]);
     }
 
     /// 保存側は既定の名前を持つ。

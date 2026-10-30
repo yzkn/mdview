@@ -62,34 +62,8 @@ impl Selection {
     }
 }
 
-/// 文字の種類（§4.6 の「文字種の切り替わり」）。
-///
-/// **辞書を持たない。** 持つと配布サイズが数十 MB 増える（§4.6）。
-/// 代わりに、種類が変わるところで区切る。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Space,
-    Hiragana,
-    Katakana,
-    Han,
-    Alnum,
-    Symbol,
-}
-
-fn kind_of(ch: char) -> Kind {
-    if ch.is_whitespace() {
-        return Kind::Space;
-    }
-    if ch.is_alphanumeric() {
-        return match ch {
-            'ぁ'..='ゖ' | 'ー' => Kind::Hiragana,
-            'ァ'..='ヺ' | 'ｦ'..='ﾝ' => Kind::Katakana,
-            '一'..='鿿' | '々' | '〆' => Kind::Han,
-            _ => Kind::Alnum,
-        };
-    }
-    Kind::Symbol
-}
+// 文字の種類（§4.6）。**単語単位の検索と同じ区切り**にするため、土台の `search::word` を使う（v3 R-09）
+use crate::search::word::{kind_of, Kind};
 
 /// 1 行の中で、`column`（文字単位）の位置にある語の範囲を返す。
 ///

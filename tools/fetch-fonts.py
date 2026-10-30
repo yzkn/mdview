@@ -57,12 +57,22 @@ TARGETS = [
     ),
 ]
 
-# 版を固定しているので中身は変わらない（2026-09-20 実測）
+# **zip ではなく、そのまま取るもの**（v3 R-19）。(表示名, URL, 置く名前)
+#
+# 絵文字の字体は Noto Color Emoji の **CBDT 版**（画面の部品 iced が色で描ける。COLRv1 版は描けない）。
+# 版はタグで固定する（Unicode 18.0）
+NOTO_EMOJI = "https://raw.githubusercontent.com/googlefonts/noto-emoji/v2026-09-24-unicode18_0/2D/fonts/"
+DIRECT = [
+    ("Noto Color Emoji（Unicode 18.0）", NOTO_EMOJI + "NotoColorEmoji.ttf", "NotoColorEmoji.ttf"),
+]
+
+# 版を固定しているので中身は変わらない（2026-09-20 実測。絵文字は 2026-10-29）
 EXPECTED = {
     "PlemolJP-Regular.ttf": "71c82cb3fb5bfe9f155162f95ba355958e31bdbfca0911a97e02052f76799053",
     "PlemolJP-Bold.ttf": "4fcedf2ca23b11d97df175f2714335c23126cf64c7b03b994a51f2deac6abd39",
     "IBMPlexSansJP-Regular.ttf": "e5e9ee949e05ca25bf75be44d6412c7071fcdeb8ca6c4361a8d6aeb81f96289a",
     "IBMPlexSansJP-Bold.ttf": "1bc9fabb696915df66f59f99fe450b21fa1d6e48749213d182b173367832a118",
+    "NotoColorEmoji.ttf": "15671215ab769fdc7162a045d56fd7d7e477c51b04e6b3c761d914d8fdd6cc44",
 }
 
 # **ライセンス全文を配布物に含める義務がある**（§7.6）。
@@ -70,6 +80,7 @@ EXPECTED = {
 LICENSES = [
     ("PlemolJP-OFL.txt", "https://raw.githubusercontent.com/yuru7/PlemolJP/v3.1.0/LICENSE"),
     ("IBMPlexSansJP-OFL.txt", "https://raw.githubusercontent.com/IBM/plex/master/LICENSE.txt"),
+    ("NotoColorEmoji-OFL.txt", NOTO_EMOJI + "LICENSE"),
 ]
 
 
@@ -149,7 +160,7 @@ def digest_of(path):
 
 
 def verify(dest):
-    """4 本がそろい、SHA256 が一致するか。"""
+    """同梱の字体がそろい、SHA256 が一致するか。"""
     missing = []
     for name, expected in sorted(EXPECTED.items()):
         path = os.path.join(dest, name)
@@ -194,7 +205,7 @@ def main():
         if problems:
             print("python tools/fetch-fonts.py で取得する", file=sys.stderr)
             return 1
-        print("同梱フォント 4 本を確認した")
+        print("同梱フォント %d 本を確認した" % len(EXPECTED))
         return 0
 
     os.makedirs(args.dest, exist_ok=True)
@@ -225,6 +236,22 @@ def main():
                 handle.write(raw)
             print("  取得: %-28s %5.2fMB（圧縮 %.2fMB）" % (base, len(raw) / 1048576, entry[2] / 1048576))
 
+    for label, url, name in DIRECT:
+        print("== %s" % label)
+        out = os.path.join(args.dest, name)
+        if os.path.exists(out) and digest_of(out) == EXPECTED.get(name):
+            print("  済: %s" % name)
+            continue
+        try:
+            body = fetch(url)
+        except urllib.error.URLError as error:
+            print("  取得できない: %s" % error, file=sys.stderr)
+            return 1
+        downloaded += len(body)
+        with io.open(out, "wb") as handle:
+            handle.write(body)
+        print("  取得: %-28s %5.2fMB" % (name, len(body) / 1048576))
+
     for name, url in LICENSES:
         out = os.path.join(args.dest, name)
         if os.path.exists(out) and os.path.getsize(out) > 0:
@@ -250,7 +277,7 @@ def main():
         downloaded / 1048576,
         sum(os.path.getsize(os.path.join(args.dest, n)) for n in EXPECTED) / 1048576,
     ))
-    print("SHA256 照合 OK（4 本）")
+    print("SHA256 照合 OK（%d 本）" % len(EXPECTED))
     return 0
 
 

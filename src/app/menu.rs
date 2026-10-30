@@ -76,6 +76,20 @@ pub enum Submenu {
     Table,
     /// 文書の組み替え（v2.5.0 R-01 b）
     Structure,
+    /// 開く（v3 R-05。開く・新しいウィンドウで開く・URL を開く・アプリ内で開く）
+    Open,
+    /// 比べる（v3 R-05。6 種）
+    Compare,
+    /// 出力（v3 R-05。PDF・HTML・PPTX・スライド）
+    Export,
+    /// キャレット・選択（v3 R-05。マルチカーソル）
+    Caret,
+    /// 行（v3 R-05。複製・削除・連結・字下げ）
+    Lines,
+    /// 目次と見出し（v3 R-05）
+    Headings,
+    /// 整える（v3 R-05。検査の直し・Markdown を整える）
+    Tidy,
 }
 
 impl Submenu {
@@ -91,8 +105,177 @@ impl Submenu {
             Submenu::Format => "書式",
             Submenu::Table => "表",
             Submenu::Structure => "リスト・見出しの組み替え",
+            Submenu::Open => "開く",
+            Submenu::Compare => "比べる",
+            Submenu::Export => "出力",
+            Submenu::Caret => "キャレット・選択",
+            Submenu::Lines => "行",
+            Submenu::Headings => "目次と見出し",
+            Submenu::Tidy => "整える",
         }
     }
+}
+
+/// まとめて下の階層にする項目（v3 R-05）。`(下の階層, 見出しを置く所の項目, 中の項目)`。
+///
+/// **項目そのものは平らな並び（`flat_items`）に書いたまま**にし、ここで名前で拾ってまとめる。打鍵・押せるか・印は
+/// 平らな並びの作りをそのまま使う。見出しは「置く所の項目」の位置に出す（比べるは出力の前に置く）
+const GROUPS: [(Menu, Submenu, &str, &[&str]); 7] = [
+    (
+        Menu::File,
+        Submenu::Open,
+        "開く…",
+        &[
+            "開く…",
+            "新しいウィンドウで開く…",
+            "URL を開く…",
+            "アプリ内で開く…",
+        ],
+    ),
+    (
+        Menu::File,
+        Submenu::Compare,
+        "PDF に出力…",
+        &[
+            "ファイルを比べる…",
+            "アプリ内で選んで比べる…",
+            "保存してある元と比べる",
+            "フォルダーを比べる…",
+            "3 つのファイルをマージする…",
+            "パッチを当てる…",
+        ],
+    ),
+    (
+        Menu::File,
+        Submenu::Export,
+        "PDF に出力…",
+        &[
+            "PDF に出力…",
+            "HTML に出力…",
+            "PPTX に出力（スライド）…",
+            "スライドを書き出す…",
+        ],
+    ),
+    (
+        Menu::Edit,
+        Submenu::Caret,
+        "キャレットを上に足す",
+        &[
+            "キャレットを上に足す",
+            "キャレットを下に足す",
+            "同じ語を選ぶ（次の 1 つ）",
+            "同じ語を選ぶ（全部）",
+        ],
+    ),
+    (
+        Menu::Edit,
+        Submenu::Lines,
+        "行の複製",
+        &["行の複製", "行の削除", "行の連結", "字下げ", "字下げを戻す"],
+    ),
+    (
+        Menu::Edit,
+        Submenu::Headings,
+        "目次を入れる",
+        &[
+            "目次を入れる",
+            "目次を作り直す",
+            "見出しに番号を振る",
+            "見出しの番号を外す",
+        ],
+    ),
+    (
+        Menu::Edit,
+        Submenu::Tidy,
+        "検査の直しをまとめて当てる",
+        &["検査の直しをまとめて当てる", "Markdown を整える"],
+    ),
+];
+
+/// まとめた見出しの割り当て文字（同じメニューの中で重ねない）
+fn group_access(which: Submenu) -> Option<char> {
+    match which {
+        Submenu::Open => Some('O'),
+        Submenu::Compare => Some('D'),
+        Submenu::Export => Some('P'),
+        Submenu::Caret => Some('I'),
+        Submenu::Lines => Some('L'),
+        Submenu::Headings => Some('H'),
+        Submenu::Tidy => Some('Y'),
+        _ => None,
+    }
+}
+
+fn label_of(item: &Item) -> Option<&str> {
+    match item {
+        Item::Action { label, .. } => Some(label.as_str()),
+        _ => None,
+    }
+}
+
+/// 平らな並びを、まとまりごとに下の階層へ入れる（v3 R-05）。続く区切り線・端の区切り線は 1 つにする
+fn nest(menu: Menu, flat: Vec<Item>, context: Context<'_>) -> Vec<Item> {
+    let groups: Vec<_> = GROUPS.iter().filter(|group| group.0 == menu).collect();
+    let mut out: Vec<Item> = Vec::with_capacity(flat.len());
+    for item in &flat {
+        let label = label_of(item);
+        // この項目の所に置く見出し
+        for (_, which, anchor, members) in &groups {
+            if label != Some(*anchor) {
+                continue;
+            }
+            let inside: Vec<&Item> = flat
+                .iter()
+                .filter(|item| label_of(item).is_some_and(|label| members.contains(&label)))
+                .collect();
+            if inside.is_empty() {
+                continue;
+            }
+            let enabled = inside
+                .iter()
+                .any(|item| matches!(item, Item::Action { enabled: true, .. }));
+            out.push(Item::Fold {
+                label: which.label(),
+                open: context.open_submenu == Some(*which),
+                message: Message::ToggleSubmenu(*which),
+                enabled,
+                access: group_access(*which),
+            });
+        }
+        if label.is_some_and(|label| groups.iter().any(|group| group.3.contains(&label))) {
+            continue;
+        }
+        out.push(item.clone());
+    }
+    // 区切り線を整える
+    let mut tidy: Vec<Item> = Vec::with_capacity(out.len());
+    for item in out {
+        let separator = matches!(item, Item::Separator);
+        if separator && (tidy.is_empty() || matches!(tidy.last(), Some(Item::Separator))) {
+            continue;
+        }
+        tidy.push(item);
+    }
+    while matches!(tidy.last(), Some(Item::Separator)) {
+        tidy.pop();
+    }
+    tidy
+}
+
+/// まとめた下の階層の中身（平らな並びから名前で拾う。並びはまとまりに書いた順）
+fn grouped_items(which: Submenu, context: Context<'_>) -> Option<Vec<Item>> {
+    let (menu, _, _, members) = GROUPS.iter().find(|group| group.1 == which)?;
+    let flat = flat_items(*menu, context);
+    Some(
+        members
+            .iter()
+            .filter_map(|name| {
+                flat.iter()
+                    .find(|item| label_of(item) == Some(*name))
+                    .cloned()
+            })
+            .collect(),
+    )
 }
 
 /// メニューの 1 項目。
@@ -189,6 +372,8 @@ pub struct Context<'a> {
     pub busy: bool,
     /// 何かを選んでいるか（切り取り・コピーが押せるか）
     pub has_selection: bool,
+    /// 選んでいなくても、行ごとに切り取り・コピーできるか（v3 R-17）
+    pub line_copy: bool,
     /// プレビューで文字を選んでいるか（v2.2.0。**コピーだけ**押せる。切り取りは本文を変えるので押せない）
     pub preview_selection: bool,
     /// いまの文書に BOM が付いているか
@@ -242,8 +427,13 @@ impl Context<'_> {
     }
 }
 
-/// 1 つのメニューの中身。
+/// 1 つのメニューの中身（下の階層は見出しだけ。v3 R-05）。
 pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
+    nest(menu, flat_items(menu, context), context)
+}
+
+/// 1 つのメニューの、**まとめる前の平らな並び**（まとめた下の階層の中身もここに書く）。
+fn flat_items(menu: Menu, context: Context<'_>) -> Vec<Item> {
     let c = |command: Command| context.accel(command);
     match menu {
         Menu::File => vec![
@@ -408,15 +598,38 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
                     .access('R'),
                 Item::Separator,
                 Item::action("切り取り", c(Command::Cut), Message::Cut)
-                    .enabled(context.has_selection)
+                    .enabled(context.has_selection || context.line_copy)
                     .access('T'),
                 Item::action("コピー", c(Command::Copy), Message::Copy)
-                    .enabled(context.has_selection || context.preview_selection)
+                    .enabled(
+                        context.has_selection || context.preview_selection || context.line_copy,
+                    )
                     .access('C'),
                 // **貼り付けはいつでも押せる。** クリップボードの中身は
                 // 読みに行くまで分からず、毎回覗くと他のアプリの邪魔になる
                 Item::action("貼り付け", c(Command::Paste), Message::Paste).access('P'),
                 Item::action("すべて選択", c(Command::SelectAll), Message::SelectAll).access('A'),
+                // マルチカーソル（v3 R-11）
+                Item::action(
+                    "キャレットを上に足す",
+                    c(Command::AddCaretAbove),
+                    Message::AddCaret(false),
+                ),
+                Item::action(
+                    "キャレットを下に足す",
+                    c(Command::AddCaretBelow),
+                    Message::AddCaret(true),
+                ),
+                Item::action(
+                    "同じ語を選ぶ（次の 1 つ）",
+                    c(Command::SelectNextOccurrence),
+                    Message::SelectOccurrence(false),
+                ),
+                Item::action(
+                    "同じ語を選ぶ（全部）",
+                    c(Command::SelectAllOccurrences),
+                    Message::SelectOccurrence(true),
+                ),
                 Item::Separator,
                 Item::action(
                     "行の複製",
@@ -755,12 +968,21 @@ pub fn items(menu: Menu, context: Context<'_>) -> Vec<Item> {
                 .access('U'),
         ],
 
-        Menu::Help => vec![Item::action(
-            "このアプリについて…",
-            context.accel(Command::About),
-            Message::OpenAbout,
-        )
-        .access('A')],
+        Menu::Help => vec![
+            // 打鍵の一覧（v3 R-16）
+            Item::action(
+                "打鍵の一覧",
+                context.accel(Command::KeyList),
+                Message::ToggleKeyList,
+            )
+            .access('K'),
+            Item::action(
+                "このアプリについて…",
+                context.accel(Command::About),
+                Message::OpenAbout,
+            )
+            .access('A'),
+        ],
     }
 }
 
@@ -783,7 +1005,18 @@ fn save_choices() -> Vec<(&'static str, crate::io::Encoding, bool)> {
 
 /// 折りたたみの中身（§19.6）。
 pub(super) fn submenu_items(which: Submenu, context: Context<'_>) -> Vec<Item> {
+    // まとめた下の階層（v3 R-05）
+    if let Some(items) = grouped_items(which, context) {
+        return items;
+    }
     match which {
+        Submenu::Open
+        | Submenu::Compare
+        | Submenu::Export
+        | Submenu::Caret
+        | Submenu::Lines
+        | Submenu::Headings
+        | Submenu::Tidy => Vec::new(),
         Submenu::ReopenAs => crate::io::Encoding::ALL
             .iter()
             .map(|encoding| {
@@ -956,42 +1189,38 @@ pub(super) fn submenu_items(which: Submenu, context: Context<'_>) -> Vec<Item> {
 /// 分かりにくい。大文字小文字は区別しない。
 pub fn find_access(menu: Menu, context: Context<'_>, key: char) -> Option<Message> {
     let key = key.to_ascii_uppercase();
-    expand(items(menu, context), context)
-        .into_iter()
-        .find_map(|item| match item {
-            Item::Action {
-                message,
-                enabled: true,
-                access: Some(found),
-                ..
-            }
-            | Item::Fold {
-                message,
-                enabled: true,
-                access: Some(found),
-                ..
-            } if found.to_ascii_uppercase() == key => Some(message),
-            _ => None,
-        })
+    // **下の階層を開いていれば、その中から**（v3 R-05。下の階層の中にも割り当て文字を置ける）
+    let shown = match context.open_submenu {
+        Some(which) if items(menu, context).iter().any(|item| matches!(item, Item::Fold { message: Message::ToggleSubmenu(open), .. } if *open == which)) => {
+            submenu_items(which, context)
+        }
+        _ => items(menu, context),
+    };
+    shown.into_iter().find_map(|item| match item {
+        Item::Action {
+            message,
+            enabled: true,
+            access: Some(found),
+            ..
+        }
+        | Item::Fold {
+            message,
+            enabled: true,
+            access: Some(found),
+            ..
+        } if found.to_ascii_uppercase() == key => Some(message),
+        _ => None,
+    })
 }
 
 /// 折りたたみを開いた状態を反映した並びにする。
 ///
 /// **開いているものの直後へ差し込む。** 別の場所へ出すと、
 /// どの見出しの中身なのか分からない
-pub fn expand(items: Vec<Item>, context: Context<'_>) -> Vec<Item> {
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        let fold = match &item {
-            Item::Fold { open: true, .. } => context.open_submenu,
-            _ => None,
-        };
-        out.push(item);
-        if let Some(which) = fold {
-            out.extend(submenu_items(which, context));
-        }
-    }
-    out
+///
+/// **v3 R-05 から差し込まない**（下の階層は横へ開く別の欄に出す）。呼ぶ所を残すために、並びをそのまま返す
+pub fn expand(items: Vec<Item>, _context: Context<'_>) -> Vec<Item> {
+    items
 }
 
 /// 選べるタブ幅（§4.10）。**TeraPad と同じ並び**
@@ -1023,6 +1252,7 @@ mod tests {
             scroll_sync: true,
             busy: false,
             has_selection: true,
+            line_copy: true,
             preview_selection: false,
             has_bom: false,
             encoding: crate::io::Encoding::Utf8,
@@ -1049,8 +1279,27 @@ mod tests {
         }
     }
 
+    /// 上の階層と、下の階層の中身を並べたもの（v3 R-05。試験は名前で探すので、どこにあっても見つかる）
+    fn every(menu: Menu, context: Context<'_>) -> Vec<Item> {
+        let mut out = Vec::new();
+        for item in items(menu, context) {
+            if let Item::Fold {
+                message: Message::ToggleSubmenu(which),
+                ..
+            } = &item
+            {
+                let inside = submenu_items(*which, context);
+                out.push(item);
+                out.extend(inside);
+            } else {
+                out.push(item);
+            }
+        }
+        out
+    }
+
     fn labels(menu: Menu, context: Context<'_>) -> Vec<String> {
-        items(menu, context)
+        every(menu, context)
             .into_iter()
             .filter_map(|item| match item {
                 Item::Action { label, .. } => Some(label),
@@ -1060,7 +1309,7 @@ mod tests {
     }
 
     fn find(menu: Menu, context: Context<'_>, label: &str) -> Item {
-        items(menu, context)
+        every(menu, context)
             .into_iter()
             .find(|item| matches!(item, Item::Action { label: l, .. } if l == label))
             .unwrap_or_else(|| panic!("{label} が無い"))
@@ -1074,9 +1323,13 @@ mod tests {
         matches!(item, Item::Action { checked: true, .. })
     }
 
-    /// そのメニューで割り当てられている文字を集める。
+    /// そのメニューで割り当てられている文字を集める（**欄ごと**。上の階層と、開いている下の階層）。
     fn access_keys(menu: Menu, context: Context<'_>) -> Vec<char> {
-        expand(items(menu, context), context)
+        let shown = match context.open_submenu {
+            Some(which) => submenu_items(which, context),
+            None => items(menu, context),
+        };
+        shown
             .into_iter()
             .filter_map(|item| match item {
                 Item::Action { access, .. } | Item::Fold { access, .. } => access,
@@ -1175,7 +1428,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(folds, [Submenu::Recent.label()]);
+        // 文字コードの折りたたみは無い（下の階層は、開く・最近使ったファイル・比べる・出力。v3 R-05）
+        assert_eq!(
+            folds,
+            [
+                Submenu::Open.label(),
+                Submenu::Recent.label(),
+                Submenu::Compare.label(),
+                Submenu::Export.label()
+            ]
+        );
         assert!(labels(Menu::File, context())
             .iter()
             .any(|l| l == "文字コード・改行コード…"));
@@ -1255,7 +1517,7 @@ mod tests {
             open_submenu: Some(Submenu::Recent),
             ..context()
         };
-        let shown = expand(items(Menu::File, open), open);
+        let shown = submenu_items(Submenu::Recent, open);
         assert!(shown.iter().any(|item| matches!(
             item,
             Item::Action {
@@ -1327,16 +1589,23 @@ mod tests {
         assert!(is_enabled(&find(Menu::Edit, empty, "検索・置換…")));
     }
 
-    /// **選んでいないときは切り取り・コピーが押せない。**
-    /// 押せるのに何も起きないほうが分かりにくい
+    /// **選んでいないときは切り取り・コピーが押せない**（行ごとに写す設定を切っているとき）。
+    /// 押せるのに何も起きないほうが分かりにくい。行ごとに写す設定（v3 R-17。既定）なら押せる
     #[test]
     fn cut_and_copy_need_a_selection() {
         let nothing = Context {
             has_selection: false,
+            line_copy: false,
             ..context()
         };
         assert!(!is_enabled(&find(Menu::Edit, nothing, "切り取り")));
         assert!(!is_enabled(&find(Menu::Edit, nothing, "コピー")));
+        let lines = Context {
+            line_copy: true,
+            ..nothing
+        };
+        assert!(is_enabled(&find(Menu::Edit, lines, "切り取り")));
+        assert!(is_enabled(&find(Menu::Edit, lines, "コピー")));
         // 貼り付けは中身が分からないので止めない
         assert!(is_enabled(&find(Menu::Edit, nothing, "貼り付け")));
     }

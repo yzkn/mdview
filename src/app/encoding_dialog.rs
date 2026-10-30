@@ -4,7 +4,8 @@
 //! 指定して保存・改行コードを指定して保存）があり、**どれが何をするのか
 //! 分かりにくかった**。選ぶものと、することを 1 か所に並べる。
 
-use iced::widget::{button, checkbox, column, container, pick_list, radio, row, text};
+use super::fluent;
+use iced::widget::{button, column, container, radio, row, text};
 use iced::{Element, Length, Task};
 
 use super::App;
@@ -102,7 +103,9 @@ impl App {
         }))
         .spacing(16);
 
-        let mut bom = checkbox(dialog.bom).label("BOM を付ける").text_size(12);
+        let mut bom = fluent::checkbox(dialog.bom)
+            .label("BOM を付ける")
+            .text_size(12);
         if dialog.encoding.supports_bom() {
             bom = bom.on_toggle(|on| Message::EncodingChoice(EncodingChoice::Bom(on)));
         }
@@ -121,9 +124,13 @@ impl App {
                     text(current).size(12),
                     row![
                         text("文字コード").size(12).width(Length::Fixed(90.0)),
-                        pick_list(Encoding::ALL.to_vec(), Some(dialog.encoding), |encoding| {
-                            Message::EncodingChoice(EncodingChoice::Encoding(encoding))
-                        })
+                        fluent::pick_list(
+                            Encoding::ALL.to_vec(),
+                            Some(dialog.encoding),
+                            |encoding| {
+                                Message::EncodingChoice(EncodingChoice::Encoding(encoding))
+                            }
+                        )
                         .text_size(12),
                         bom,
                     ]

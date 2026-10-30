@@ -4,9 +4,10 @@
 //! **実行ファイルに埋める**（単一の実行ファイルのまま配るため）。同梱フォントのライセンスは
 //! `crate::render::fonts::LICENSES` に別に埋めてあり、一覧の頭に並べる。
 
+use super::fluent;
 use std::sync::OnceLock;
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length};
 use serde::Deserialize;
 
@@ -157,7 +158,7 @@ impl App {
                 ))
                 .size(14),
                 container(text("")).width(Length::Fill),
-                text_input("名前・ライセンスで絞り込む", &self.about_filter)
+                fluent::text_input("名前・ライセンスで絞り込む", &self.about_filter)
                     .on_input(|value| Message::AboutLicense(AboutLicense::Filter(value)))
                     .size(12)
                     .padding([2, 6])
@@ -165,10 +166,10 @@ impl App {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-            container(scrollable(list).height(Length::Fixed(140.0)))
+            container(fluent::scrollable(list).height(Length::Fixed(140.0)))
                 .padding(2)
                 .style(container::bordered_box),
-            scrollable(body).height(Length::Fixed(200.0)),
+            fluent::scrollable(body).height(Length::Fixed(200.0)),
         ]
         .spacing(8)
         .into()

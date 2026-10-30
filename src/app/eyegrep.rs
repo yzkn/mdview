@@ -3,7 +3,8 @@
 //! 一覧は設定（`Settings::marks`）に持つ。**探すもの（正規表現）は描くたびに作らず、一覧が
 //! 変わったときだけ作り直す**（`App::eye_marks`）。
 
-use iced::widget::{button, checkbox, column, container, row, text, text_input};
+use super::fluent;
+use iced::widget::{button, column, container, row, text};
 use iced::{Color, Element, Length};
 
 use super::settings_view::SettingChange;
@@ -147,20 +148,21 @@ impl App {
         for (index, mark) in self.settings.marks.iter().enumerate() {
             let color = crate::io::palette::parse_hex(&mark.color);
             let mut line = row![
-                checkbox(mark.enabled).on_toggle(move |on| message(EyeChange::Enabled(index, on))),
-                text_input("探す文字列", &mark.pattern)
+                fluent::checkbox(mark.enabled)
+                    .on_toggle(move |on| message(EyeChange::Enabled(index, on))),
+                fluent::text_input("探す文字列", &mark.pattern)
                     .on_input(move |v| message(EyeChange::Pattern(index, v)))
                     .size(12)
                     .width(Length::Fixed(240.0)),
-                checkbox(mark.regex)
+                fluent::checkbox(mark.regex)
                     .label("正規表現")
                     .text_size(12)
                     .on_toggle(move |on| message(EyeChange::Regex(index, on))),
-                checkbox(mark.case_sensitive)
+                fluent::checkbox(mark.case_sensitive)
                     .label("大文字小文字を区別")
                     .text_size(12)
                     .on_toggle(move |on| message(EyeChange::Case(index, on))),
-                text_input("#rrggbb", &mark.color)
+                fluent::text_input("#rrggbb", &mark.color)
                     .on_input(move |v| message(EyeChange::Color(index, v)))
                     .size(12)
                     .width(Length::Fixed(90.0)),

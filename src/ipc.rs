@@ -111,6 +111,61 @@ pub async fn request(pid: u32, request: &Value) -> Result<Value, String> {
     }
 }
 
+/// ほかの窓で `path` を開いていれば、**その窓を前に出させて**プロセス番号を返す（v3 R-15）。
+///
+/// 自分は問い合わせない。答えない窓（落ちて居場所だけ残ったもの）は少し待って飛ばす。
+/// **Windows は前に出す権利を相手へ渡しておく**（裏のプロセスは自分から前に出られない決まりがあるため）
+pub async fn focus_if_open(path: &std::path::Path) -> Option<u32> {
+    let me = std::process::id();
+    let request = serde_json::json!({ "cmd": "focus_if_open", "path": path.to_string_lossy() });
+    for pid in registered().into_iter().filter(|pid| *pid != me) {
+        allow_foreground(pid);
+        let asked = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            self::request(pid, &request),
+        )
+        .await;
+        if let Ok(Ok(answer)) = asked {
+            if answer["open"] == Value::Bool(true) {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+/// 窓を出す前に使う [`focus_if_open`]（起動の引数で開くとき。v3 R-15）。**ほかの窓が無ければ何もしない**
+pub fn focus_if_open_blocking(path: &std::path::Path) -> Option<u32> {
+    let me = std::process::id();
+    if registered().iter().all(|pid| *pid == me) {
+        return None;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(focus_if_open(path))
+}
+
+/// 前に出す権利を相手のプロセスへ渡す（Windows だけ。ほかの OS は要らない）
+fn allow_foreground(pid: u32) {
+    #[cfg(windows)]
+    // SAFETY: プロセス番号を渡すだけ（失敗しても前に出ないだけで害は無い）
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(pid);
+    }
+    #[cfg(not(windows))]
+    let _ = pid;
+}
+
+/// 同じファイルか（v3 R-15）。**実在するなら正規の形で比べる**（`a\..\b.md` と `b.md`・大文字小文字の違いを同じに）
+pub fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => crate::io::positions::same_file(&a, &b),
+        _ => crate::io::positions::same_file(a, b),
+    }
+}
+
 /// 窓が受けた頼み。**答えは `reply` へ送る**（アプリの `update` で作る）
 #[derive(Debug, Clone)]
 pub struct Incoming {
@@ -234,5 +289,21 @@ mod tests {
         if let Some(path) = registry_file(7) {
             assert!(path.ends_with("windows/7.json") || path.ends_with("windows\\7.json"));
         }
+    }
+
+    /// 同じファイルは、書き方（`..`・大文字小文字）が違っても同じ（v3 R-15）
+    #[test]
+    fn the_same_file_matches_however_it_is_written() {
+        let dir = std::env::temp_dir().join(format!("mdview-same-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("Doc.md");
+        std::fs::write(&file, "x").unwrap();
+        assert!(same_path(&file, &dir.join("sub").join("..").join("Doc.md")));
+        assert_eq!(
+            same_path(&file, &dir.join("doc.md")),
+            cfg!(any(windows, target_os = "macos"))
+        );
+        assert!(!same_path(&file, &dir.join("other.md")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

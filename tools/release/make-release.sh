@@ -72,7 +72,8 @@ fi
 
 # --- 5. 説明文 ---
 absent=""
-for label in windows-x86_64 linux-x86_64 macos-aarch64; do
+# Android（v3 R-03）は署名の鍵（Actions の秘密）が無い実行では作らない。そのときも書く
+for label in windows-x86_64 linux-x86_64 macos-aarch64 android; do
   if ! ls "$dist" | grep -q -- "-${label}"; then
     absent="${absent}${absent:+、}${label}"
   fi
@@ -99,17 +100,21 @@ cat >> release-notes.md <<'NOTES'
 > 字形・レイアウト・図・数式・画像・導入と削除は見ていますが、
 > **性能・ネイティブ GPU ドライバ・IME・デスクトップ統合は
 > 未確認**です。お気づきの点があればお知らせください。
+>
+> **Android 版（v3.0.0 から）も載せています。** iOS 版は配っていません（組めることだけを確かめています）。
 
 ## 受け取った側の手順
 
-**この配布物には署名がありません。** 初回は OS が警告します。
+**PC 版には署名がありません。** 初回は OS が警告します。
 
 | OS | 出るもの | 通し方 |
 | --- | --- | --- |
 | Windows | SmartScreen の警告 | 「詳細情報」→「実行」 |
 | macOS | 「開発元を検証できません」 | `xattr -dr com.apple.quarantine <ファイル>` の後に実行 |
 | Linux | 実行権限が無い | `chmod +x <ファイル>` |
+| Android | 「提供元不明のアプリ」の確認 | APK を開き、案内に従ってこのアプリからの導入を許可 |
 
+Android の APK は mdview の鍵で署名しています（ストアからは配っていません）。
 `SHA256SUMS.txt` で中身を照合できます。
 
 ## 中身

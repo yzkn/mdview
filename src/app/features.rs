@@ -635,7 +635,16 @@ impl App {
     /// **URL を、選んだ文字の上へ貼ったらリンクにする。** 選んでいなければ
     /// そのまま入れる（URL を貼りたいだけのことが多い）
     pub(super) fn paste_text(&mut self, text: &str) {
-        if self.settings.paste_url_as_link && self.markdown_assist() && self.editor.rect.is_none() {
+        // **行ごとに写したものは、キャレットの行の頭に貼る**（v3 R-17。選んでいれば普通に置き換える）
+        if self.paste_line(text) {
+            return;
+        }
+        // 選択が複数なら、行の数が同じとき 1 行ずつ配る（v3 R-11）
+        if self.is_multi() {
+            self.multi_paste(text);
+            return;
+        }
+        if self.settings.paste_url_as_link && self.markdown_assist() {
             if let Some(range) = self.selected() {
                 let selected = self.document.text().byte_slice(range.clone()).to_string();
                 if markdown::looks_like_url(text)

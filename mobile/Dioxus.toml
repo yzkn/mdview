@@ -1,0 +1,15 @@
+# dx（Dioxus の CLI）の設定（v3 R-02・R-03）
+[application]
+name = "mdview"
+
+[bundle]
+identifier = "jp.mdview.mobile"
+publisher = "mdview"
+short_description = "Markdown を読む・軽く直す"
+
+[android]
+min_sdk = 26
+target_sdk = 35
+
+[ios]
+deployment_target = "16.0"

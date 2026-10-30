@@ -7,8 +7,9 @@
 //! 配色が明るい・暗いで変わったとき（日の出・日の入りを含む）・設定を変えたときは、
 //! `update` の出口（`refresh_backdrop`）で要る画像を見直す。
 
+use super::fluent;
 use iced::advanced::image;
-use iced::widget::{button, checkbox, column, container, pick_list, row, stack, text, text_input};
+use iced::widget::{button, column, container, row, stack, text};
 use iced::{Element, Length, Task};
 
 use super::settings_view::SettingChange;
@@ -184,7 +185,7 @@ impl App {
             self.backdrop_item(
                 "背景画像",
                 "bg_enabled",
-                checkbox(s.enabled)
+                fluent::checkbox(s.enabled)
                     .label("使う")
                     .text_size(12)
                     .on_toggle(|on| set("bg_enabled", on.to_string()))
@@ -202,7 +203,7 @@ impl App {
             self.backdrop_item(
                 "動き方",
                 "bg_scroll",
-                checkbox(s.scroll)
+                fluent::checkbox(s.scroll)
                     .label("本文と一緒に動かす（切ると窓に固定）")
                     .text_size(12)
                     .on_toggle(|on| set("bg_scroll", on.to_string()))
@@ -281,7 +282,7 @@ impl App {
         self.backdrop_item(
             label,
             key,
-            pick_list(all.to_vec(), Some(now), move |choice| {
+            fluent::pick_list(all.to_vec(), Some(now), move |choice| {
                 set(key, to_key(choice).to_owned())
             })
             .text_size(12)
@@ -298,7 +299,7 @@ impl App {
         self.backdrop_item(
             label,
             key,
-            pick_list(OPACITY_STEPS.to_vec(), Some(now), move |value| {
+            fluent::pick_list(OPACITY_STEPS.to_vec(), Some(now), move |value| {
                 set(key, value.to_string())
             })
             .text_size(12)
@@ -317,7 +318,7 @@ impl App {
             label,
             key,
             row![
-                text_input("画像ファイル（PNG・JPEG・GIF・BMP・WebP）", value)
+                fluent::text_input("画像ファイル（PNG・JPEG・GIF・BMP・WebP）", value)
                     .on_input(move |value| set(key, value))
                     .size(12)
                     .width(Length::Fixed(360.0)),

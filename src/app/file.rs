@@ -19,6 +19,8 @@ pub struct DocumentMeta {
     pub dirty: bool,
     /// URL から開いたなら、その URL（v2.4.0 R-09。保存先は持たない）
     pub url: Option<String>,
+    /// 大きすぎるので先頭だけを開いたなら、ファイル全体の大きさ（v3 R-12。**保存させない**）
+    pub truncated: Option<u64>,
 }
 
 impl DocumentMeta {
@@ -30,6 +32,7 @@ impl DocumentMeta {
             format: FileFormat::for_new_document(),
             dirty: false,
             url: None,
+            truncated: None,
         }
     }
 
@@ -40,6 +43,7 @@ impl DocumentMeta {
             format,
             dirty: false,
             url: None,
+            truncated: None,
         }
     }
 
@@ -134,6 +138,7 @@ mod tests {
             format: FileFormat::default(),
             dirty: true,
             url: None,
+            truncated: None,
         }
     }
 

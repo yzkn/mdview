@@ -32,6 +32,7 @@
 |ワークフロー|いつ走るか|やること|
 |---|---|---|
 |**CI**（`ci.yml`）の `check`|`main` への push・PR・手動|3 OS で検査（書式・Lint・単体試験・GUI 試験）→ **組む → 包む**（インストーラ・`.deb`・AppImage・`.dmg`）→ 煙試験。出来たものを成果物 `dist-<OS>` として残す|
+|**CI** の `mobile`|`main` への push・PR・手動|Android と iOS（v3.0.0）。Android は書式・Lint・単体試験・著作権表示の一覧が最新か → 2 つの ABI（arm64-v8a・x86_64）で組み、1 つの APK（ユニバーサル）にまとめる → **署名の鍵（秘密）があれば署名して** 成果物 `dist-android` に残す。iOS はシミュレーター向けに組むだけ（配らない）|
 |**CI** の `release`|**`main` への push のときだけ**（`check` のあと）|`Cargo.toml` の版の `v<版数>` が**まだ無ければ**、同じ実行の `dist-*` を検査し、タグを打って Release を作る。**版数を上げていない push ではリリースしない**|
 |Release（`release.yml`）|**手動だけ**|作り直し用。タグのコミットの CI の成果物を落として載せる（組まない）|
 
@@ -180,6 +181,8 @@ gh release delete v2.1.3 --cleanup-tag   # Release とタグを消す
 |**Windows**|**Release を作らない。** 実機で確かめている OS。不完全なものを配らない|
 |Linux|**作る。** Linux の分だけが入らない|
 |macOS|**作る。** macOS の分だけが入らない|
+|Android|**作る。** Android の分だけが入らない（署名の鍵の秘密が無い実行も同じ。§8-11）|
+|iOS|配らない（組めることだけを確かめる）|
 
 判断は `tools/release/make-release.sh`（CI の `release` ジョブと `release.yml` が呼ぶ）。
 **実機が無く確認もできない OS が、確認できる OS の配布を止めるのはおかしい。**
@@ -223,8 +226,11 @@ mdview-<版数>-linux-x86_64.AppImage
 mdview-<版数>-linux-x86_64               単一実行ファイル
 mdview-<版数>-macos-aarch64.dmg
 mdview-<版数>-macos-aarch64              単一実行ファイル
+mdview-<版数>-android.apk                Android 版（v3.0.0 から。ユニバーサル APK。署名あり。§8-11）
 SHA256SUMS.txt
 ```
+
+**iOS 版は配らない**（Apple の開発者登録が要る）。CI はシミュレーター向けの `.app` を組み、成果物 `mobile-ios-simulator` に残すだけ。
 
 **インストーラには `mdview.exe` と端末用の入口 `mdview.com` が入る**（v2.1.3）。
 端末で `mdview -v` と打つと `mdview.com` が起き、端末は答えが出るまで待つ。
@@ -237,6 +243,8 @@ SHA256SUMS.txt
 |Windows|入れて・`mdview.exe --version`・**`mdview.com --version` が同じ版数を返す**・消すと両方消える|
 |Linux|`.deb` を `apt-get install ./…` で入れて・`--version` が `Cargo.toml` の版・`.desktop` が妥当・消せる。**まっさらな `debian:stable-slim` に依存だけを入れて、実行時に読み込むライブラリがそろい、窓を出して描ける**（`check-runtime-libs.sh`・`launch_check.py`）。AppImage は展開して `--version`|
 |macOS|`.dmg` を開いて、2 つのバンドル・アイコン・`Info.plist`・`--version`|
+|Android|書式・Lint・試験・著作権表示の一覧が最新・2 つの ABI（arm64-v8a・x86_64）で組めて 1 つの APK にそろう・**署名して `apksigner verify` が通る**|
+|iOS|シミュレーター向けの `.app` が組める|
 |全部|最初に**タグと `Cargo.toml` の版が一致する**こと|
 
 > **組み立ての試験は「組み立てられること」と「自動試験が通ること」しか
@@ -268,8 +276,9 @@ SHA256SUMS.txt
 |テキストのファイル|`.txt` を開き、`#` や `-` が見出し・リストにならない。名前を付けて保存で `.md` が付かない|
 |プレビューで選んで写す|ドラッグで選び、`Ctrl + C` で貼る。本文の上で I 字になる|
 |題名とステータスバーの書式|設定 → 外観で書式を変え、「既定」で戻る|
+|**Android 版**（v3.0.0）|APK を入れて、書類を開く・読む・ブロックを直す（日本語の変換）・自動の保存と「元に戻す」・PDF と HTML の出力・共有。前の版の上から入れられる（署名の鍵が同じ）|
 
-**実機が無い OS は、無いと書く**（§5）。
+**実機が無い OS は、無いと書く**（§5）。iOS 版は配らないので見ない。
 
 ---
 
@@ -492,6 +501,9 @@ Get-FileHash .\mdview-2.1.3-windows-x86_64-setup.exe -Algorithm SHA256
 **どれも「入れればすぐ使える」という前提と釣り合うかを先に考える。**
 いまは照合値で代えている。
 
+**Android 版の APK だけは署名する**（v3.0.0）。Android は署名の無い APK を入れられず、鍵が変わると前の版の上から入れられないため。
+鍵は自分で作るもので、公的な証明書ではない（§8-11）。
+
 ### 8-10. 環境変数（切り分け用）
 
 |変数|効き目|
@@ -500,6 +512,43 @@ Get-FileHash .\mdview-2.1.3-windows-x86_64-setup.exe -Algorithm SHA256
 |`MDVIEW_DRAFT_DIR=<フォルダ>`|異常終了に備えた控えの置き場を変える|
 |`MV_FONTS=none` / `regular`|同梱フォントの読み込みを減らす（起動時間の切り分け）|
 |`XDG_RUNTIME_DIR=<フォルダ>`|Linux で Wayland の受け口が見つからないときに差し替える|
+
+### 8-11. Android の署名の鍵（v3.0.0）
+
+**鍵は 1 度作ったら作り直さない。** 鍵が変わると、入っている mdview の上へ新しい版を入れられない
+（端末は「別のアプリ」と見て拒む）。鍵と合言葉は失くさないよう、安全な所に控える。
+
+**鍵はリポジトリに置かない。** Actions の秘密（Settings → Secrets and variables → Actions）に置く。
+
+1. 鍵を作る（JDK の `keytool`。Android Studio は要らない）。合言葉は聞かれたときに打つ
+
+   ```bash
+   keytool -genkeypair -v -keystore mdview-release.jks -alias mdview -keyalg RSA -keysize 4096 -validity 36500 -dname "CN=mdview"
+   ```
+
+2. 鍵を 1 行の文字にする
+
+   ```bash
+   base64 -w0 mdview-release.jks
+   ```
+
+   ```powershell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("mdview-release.jks")) | Set-Clipboard
+   ```
+
+3. 秘密を 4 つ作る
+
+   |名前|中身|
+   |---|---|
+   |`ANDROID_KEYSTORE_BASE64`|2 の文字|
+   |`ANDROID_KEYSTORE_PASSWORD`|鍵束の合言葉|
+   |`ANDROID_KEY_ALIAS`|`mdview`|
+   |`ANDROID_KEY_PASSWORD`|鍵の合言葉（聞かれなかったときは鍵束と同じ）|
+
+4. `mdview-release.jks` は作業のフォルダに残さない
+
+秘密が無い実行（フォークからの PR など）では署名せず、Release にも Android 版を載せない（説明文の先頭に「入っていません」と出る）。
+確かめ用に、署名していない APK を成果物 `mobile-android-unsigned` に 14 日残す。
 
 ---
 
@@ -657,6 +706,24 @@ MDVIEW_IN_APP_PICKER=1 mdview
 **署名していないため、OS が警告を出す**（§6）。外し方は
 `packaging/RELEASE-NOTES-TEMPLATE.md` に書いてあり、Release の説明文に
 必ず載る。照合値（`SHA256SUMS.txt`）で中身を確かめられることも伝える。
+
+### macOS の dmg を組む段で `No space left on device` が出る
+
+作業用のイメージが小さい。`hdiutil create -srcfolder` は中身から大きさを見積もるが、小さすぎることがある。
+`packaging/macos/build-dmg.sh` は中身の 1.3 倍に 50 MB を足して `-size` で渡している（v3.0.0）。
+それでも落ちたら、ログの `df -h` でランナーの空きを見る（空きが少なければ、Linux と同じく使わない道具を消す）。
+
+### 「Dioxus の CLI を入れる」で `403 Forbidden` のあと dx が起動しない
+
+トークン無しで GitHub の API を呼ぶと上限で断られ、cargo-binstall が別の取得先から合わない版の dx を拾う
+（Apple Silicon のランナーに Intel の macOS 版が入り、`/usr/local/opt/openssl@3` が無くて落ちた）。
+`GITHUB_TOKEN` を渡し、`--targets` で向け先を決め、`--disable-strategies quick-install,compile` で逃げないようにしている（v3.0.0）。
+
+### Android の APK を入れると `INSTALL_FAILED_NO_MATCHING_ABIS`
+
+APK に端末の ABI のライブラリが無い。`dx bundle` は `--target` が無いと組む機械（ランナーは x86_64）に合わせる。
+ログの「APK に署名する（Android）」に `lib/arm64-v8a/` と `lib/x86_64/` が出ているかを見る。
+**32 ビットの端末（armeabi-v7a・x86）には入らない**。Kotlin を呼ぶ橋（manganis）が 64 ビットの Android しか受け付けない。
 
 ### 版数を 1 か所だけ直してしまった
 

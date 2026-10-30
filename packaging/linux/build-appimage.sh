@@ -54,6 +54,13 @@ Icon=mdview
 Terminal=false
 Categories=Office;WordProcessor;TextEditor;
 MimeType=text/markdown;text/x-markdown;
+Actions=new-window;
+
+# タスクバー・ランチャーの右クリック（v3 R-18。最近使ったファイルは出せないので、新しいウィンドウだけ）
+[Desktop Action new-window]
+Name=New Window
+Name[ja]=新しいウィンドウ
+Exec=mdview
 DESKTOP
 cp "$app/mdview.desktop" "$app/usr/share/applications/mdview.desktop"
 

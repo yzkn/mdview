@@ -7,7 +7,8 @@
 //!
 //! **クライアントの設定の例は、特定のアプリの名前を出さない**（公開側の写しの決まり）。
 
-use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
+use super::fluent;
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length};
 
 use super::settings_view::{heading, line, note, with_reset, SettingChange};
@@ -59,7 +60,7 @@ impl App {
             with_reset(
                 line(
                     "口（ポート）",
-                    text_input("39217", &screen.mcp_http_port)
+                    fluent::text_input("39217", &screen.mcp_http_port)
                         .on_input(|v| Message::Setting(SettingChange::McpHttpPort(v)))
                         .size(12)
                         .width(Length::Fixed(80.0)),
@@ -150,7 +151,7 @@ impl App {
                 line(
                     label,
                     row![
-                        pick_list(Permission::ALL.to_vec(), Some(now), move |permission| {
+                        fluent::pick_list(Permission::ALL.to_vec(), Some(now), move |permission| {
                             Message::Setting(SettingChange::McpPermission(
                                 tool_name.to_owned(),
                                 Some(permission),
@@ -216,7 +217,7 @@ impl App {
                 .into()
             }))
             .spacing(2);
-            page = page.push(scrollable(lines).height(Length::Fixed(220.0)));
+            page = page.push(fluent::scrollable(lines).height(Length::Fixed(220.0)));
         }
         page.into()
     }

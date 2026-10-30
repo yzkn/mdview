@@ -3,9 +3,10 @@
 //! **どこへ行くかの判定は `edit::navigate` が持つ。** ここは文書から行を
 //! 集め、結果に従ってキャレットと画面を動かす。
 
+use super::fluent;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, Task};
 
 use super::{fold, notice, sync, App};
@@ -667,7 +668,7 @@ impl App {
                         .on_press(Message::CloseResults),
                 ]
                 .align_y(iced::Alignment::Center),
-                scrollable(items).height(Length::Fixed(140.0)),
+                fluent::scrollable(items).height(Length::Fixed(140.0)),
             ]
             .spacing(4),
         )
@@ -707,7 +708,7 @@ impl App {
             column![
                 row![
                     text("見出しへ移動").size(12),
-                    text_input("見出しの文字で絞り込む", &picker.query)
+                    fluent::text_input("見出しの文字で絞り込む", &picker.query)
                         .id(super::heading_picker_id())
                         .on_input(Message::HeadingPickerInput)
                         .on_submit(Message::HeadingPickerSubmit)
@@ -719,7 +720,7 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
-                scrollable(list).height(Length::Fixed(220.0)),
+                fluent::scrollable(list).height(Length::Fixed(220.0)),
             ]
             .spacing(6),
         )

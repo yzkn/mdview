@@ -4,11 +4,10 @@
 //! 欄の操作を 1 つの編集として履歴に積むことを受け持つ。**欄を出している間は、プレビューと WYSIWYG では
 //! frontmatter の部分を描かず、キャレットも入れない**（同じものを 2 か所に出さない）。
 
+use super::fluent;
 use std::cell::RefCell;
 
-use iced::widget::{
-    button, checkbox, column, container, row, scrollable, text, text_editor, text_input,
-};
+use iced::widget::{button, column, container, row, text, text_editor};
 use iced::{Element, Length};
 
 use super::App;
@@ -303,7 +302,9 @@ impl App {
                 .on_press_maybe(editable.then_some(send(message)))
         };
         let input = |placeholder: &str, value: &str, on: Box<dyn Fn(String) -> Message>| {
-            let field = text_input(placeholder, value).size(12).padding([2, 6]);
+            let field = fluent::text_input(placeholder, value)
+                .size(12)
+                .padding([2, 6]);
             if editable {
                 field.on_input(on)
             } else {
@@ -316,7 +317,7 @@ impl App {
             let value: Element<'_, Message> = match &entry.value {
                 Value::Scalar { text: value, .. } => match entry.value.as_bool() {
                     Some(on) => {
-                        let mut check = checkbox(on).size(14);
+                        let mut check = fluent::checkbox(on).size(14);
                         if editable {
                             check = check.on_toggle(move |on| send(FrontAction::Bool(index, on)));
                         }
@@ -440,7 +441,7 @@ impl App {
             container(
                 column![
                     header,
-                    scrollable(container(rows).padding(iced::Padding {
+                    fluent::scrollable(container(rows).padding(iced::Padding {
                         right: 16.0,
                         ..iced::Padding::ZERO
                     }))

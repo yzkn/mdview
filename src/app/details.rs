@@ -44,6 +44,43 @@ impl App {
         (!folds.heads.is_empty()).then_some(folds)
     }
 
+    /// 頭に `<` のある段落の番号（前から）。
+    ///
+    /// **本文から `<` だけを拾い、そこがブロックの頭かを見る**。打鍵のたびに探し直すため、全部のブロックを 1 つずつ
+    /// 引いて字に直すと、10 MB の文書で 1 打鍵に 13 ms 余り掛かった（v3 R-11 の計測で見つけた。v2.9.0 から）
+    fn tag_heads(&self) -> Vec<usize> {
+        let rope = self.document.text();
+        let blocks = self.document.blocks();
+        let mut heads: Vec<usize> = Vec::new();
+        let mut offset = 0;
+        for chunk in rope.chunks() {
+            for (at, _) in chunk.match_indices('<') {
+                let byte = offset + at;
+                let Some(index) = self.document.block_at_byte(byte) else {
+                    continue;
+                };
+                if heads.last() == Some(&index) {
+                    continue;
+                }
+                let block = &blocks[index];
+                // 段落の頭（空白だけを挟む）の `<` か
+                let lead = byte.wrapping_sub(block.bytes.start);
+                if block.kind != BlockKind::Paragraph || byte < block.bytes.start || lead > 16 {
+                    continue;
+                }
+                if rope
+                    .bytes_at(block.bytes.start)
+                    .take(lead)
+                    .all(|b| b.is_ascii_whitespace())
+                {
+                    heads.push(index);
+                }
+            }
+            offset += chunk.len();
+        }
+        heads
+    }
+
     /// 文書の中の `<details>` を探す
     fn find_details(&self) -> DetailsFolds {
         let rope = self.document.text();
@@ -51,10 +88,8 @@ impl App {
         let mut folds = DetailsFolds::default();
         // 開いている見出し（ブロックの番号・畳んでいるか）
         let mut stack: Vec<(usize, bool)> = Vec::new();
-        for (index, block) in blocks.iter().enumerate() {
-            if block.kind != BlockKind::Paragraph {
-                continue;
-            }
+        for index in self.tag_heads() {
+            let block = &blocks[index];
             // 頭の数字だけを見る（10 MB の文書でもブロックごとに写すのは 12 字まで）
             let start = rope.byte_to_char(block.bytes.start);
             let end = rope.byte_to_char(block.bytes.end).min(start + 12);

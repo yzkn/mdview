@@ -4,7 +4,8 @@
 //! （直して残したいときは、読み取り専用を外して「名前を付けて保存」）。GitHub などの画面の URL は中身の URL に
 //! 読み替える。設定「画像も URL から取る」を入れていれば、文書の中の画像もその URL の置き場から取る。
 
-use iced::widget::{button, column, container, row, text, text_input};
+use super::fluent;
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, Task};
 
 use super::file::{DocumentMeta, Pending};
@@ -129,10 +130,11 @@ impl App {
 
     /// 「URL を開く」の窓
     pub(super) fn url_dialog_view<'a>(&'a self, dialog: &'a UrlDialog) -> Element<'a, Message> {
-        let mut input = text_input("https://…（GitHub の画面の URL も開けます）", &dialog.input)
-            .id(url_input_id())
-            .size(13)
-            .width(Length::Fill);
+        let mut input =
+            fluent::text_input("https://…（GitHub の画面の URL も開けます）", &dialog.input)
+                .id(url_input_id())
+                .size(13)
+                .width(Length::Fill);
         if !dialog.busy {
             input = input
                 .on_input(Message::UrlInput)

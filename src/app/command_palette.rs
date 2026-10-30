@@ -4,7 +4,8 @@
 //! （`menu::items` と折りたたみの中身）から作るので、打鍵の併記・押せるかどうかはメニューと同じ判断になる。
 //! 最近使った操作を上に出す（設定ファイルの `command_recent` に名前で覚える）。
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use super::fluent;
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, Task};
 
 use super::menu::{self, Item, Menu, Submenu};
@@ -12,7 +13,7 @@ use super::App;
 use crate::render::Message;
 
 /// 覚えておく最近使った操作の数
-pub const RECENT_MAX: usize = 10;
+pub const RECENT_MAX: usize = crate::io::settings::COMMAND_RECENT_MAX;
 
 /// 一覧の 1 件
 #[derive(Debug, Clone)]
@@ -225,7 +226,7 @@ impl App {
             column![
                 row![
                     text("コマンドパレット").size(12),
-                    text_input(
+                    fluent::text_input(
                         "操作の名前で絞り込む（空白で区切ると、すべてを含むもの）",
                         query
                     )
@@ -247,7 +248,7 @@ impl App {
                             .size(12),
                     )
                 } else {
-                    container(scrollable(list)).max_height(260.0).into()
+                    container(fluent::scrollable(list)).max_height(260.0).into()
                 },
             ]
             .spacing(6),

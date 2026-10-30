@@ -4,9 +4,8 @@
 //! 「適用」「キャンセル」は置かない。置くと、効いて見えるのに保存されていない
 //! 状態ができ、利用者が迷う。
 
-use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, slider, text, text_input,
-};
+use super::fluent;
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, Task};
 
 use super::keymap::{self, Command, Keymap};
@@ -112,7 +111,11 @@ pub enum SettingChange {
     HtmlTables(bool),
     /// 決まった HTML を描く（v2.9.0 R-03）
     HtmlElements(bool),
+    /// GitHub のアラートを描く（v3 R-08）
+    GithubAlerts(bool),
     CodeColorLimit(String),
+    /// 大きすぎるファイルの上限（打っている途中の字。v3 R-12）
+    LargeFile(String),
     CodeColorExtensions(String),
     /// 検索の一致の色・いまの一致の色（v2.8.0 R-02）
     SearchMatchColor(String),
@@ -128,12 +131,18 @@ pub enum SettingChange {
     /// 縦線の桁の欄に打った（**読めるときだけ変える**）
     GuideColumns(String),
     RecentLimit(usize),
+    /// ファイルごとの位置を覚えるか（v3 R-10）
+    RememberPositions(bool),
+    /// 位置を覚えるファイルの数（v3 R-10）
+    PositionsLimit(usize),
     AutosaveDraft(bool),
     WatchExternal(bool),
     ReloadUnmodified(bool),
     Autosave(bool),
     AutosaveSeconds(String),
     ContinueLists(bool),
+    /// 選ばずに行ごと切り取る・写す（v3 R-17）
+    LineCopy(bool),
     TableFormat(bool),
     PasteUrl(bool),
     PasteImages(bool),
@@ -211,6 +220,8 @@ pub enum SettingChange {
     /// 窓の地（v2.4.0 R-05）
     WindowMaterial(settings::WindowMaterial),
     WindowBodyTint(bool),
+    /// OS に寄せた見た目（v3 R-07）
+    LookOs(bool),
     /// 背景画像の 1 項目（v2.4.0 R-01。鍵と値。鍵は `crate::io::backdrop::KEYS`）
     Backdrop(String, String),
     /// 背景画像を選ぶ（偽: 明るい配色、真: 暗い配色）
@@ -262,6 +273,8 @@ pub struct SettingsScreen {
     pub wysiwyg_limit: String,
     /// 色を付けるブロックの上限（打っている途中の字。v2.8.0 R-01）
     pub code_color_limit: String,
+    /// 大きすぎるファイルの上限（打っている途中の字。v3 R-12）
+    pub large_file: String,
 }
 
 impl SettingsScreen {
@@ -275,6 +288,7 @@ impl SettingsScreen {
         self.mcp_http_port = fresh.mcp_http_port;
         self.wysiwyg_limit = fresh.wysiwyg_limit;
         self.code_color_limit = fresh.code_color_limit;
+        self.large_file = fresh.large_file;
     }
 
     pub fn new(settings: &settings::Settings) -> Self {
@@ -305,6 +319,7 @@ impl SettingsScreen {
             mcp_host: None,
             wysiwyg_limit: settings.wysiwyg_limit_kb.to_string(),
             code_color_limit: settings.code_color_limit_kb.to_string(),
+            large_file: settings.large_file_mb.to_string(),
         }
     }
 }
@@ -441,6 +456,8 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "html_tables",
             // 決まった HTML（v2.9.0 R-03）
             "html_elements",
+            // GitHub のアラート（v3 R-08）
+            "github_alerts",
             // プレビューから編集の行へ（v2.4.0 R-03）
             "preview_jump",
             "preview_jump_click",
@@ -459,7 +476,7 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
                 items.extend(SUN_KEYS);
             }
             // 窓の地（v2.4.0 R-05）
-            items.extend(["window_material", "window_body_tint"]);
+            items.extend(["window_material", "window_body_tint", "look_os"]);
             // 背景画像（v2.4.0 R-01）
             items.extend(crate::io::backdrop::KEYS);
             items.extend(["title_format", "status_format"]);
@@ -470,6 +487,11 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
             "remote_images",
             "url_system_proxy",
             "recent_limit",
+            // ファイルごとの位置（v3 R-10）
+            "remember_positions",
+            "positions_limit",
+            // 大きすぎるファイル（v3 R-12）
+            "large_file_mb",
             "autosave_draft",
             "autosave",
             "autosave_seconds",
@@ -478,6 +500,7 @@ pub(super) fn page_items(page: SettingsPage, settings: &Settings) -> Vec<&'stati
         ],
         SettingsPage::Assist => vec![
             "continue_lists",
+            "line_copy",
             "table_format",
             "paste_url_as_link",
             "paste_images",
@@ -586,11 +609,14 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         ),
         "window_material" => SettingChange::WindowMaterial(settings::WindowMaterial::parse(value)),
         "window_body_tint" => SettingChange::WindowBodyTint(flag()?),
+        "look_os" => SettingChange::LookOs(flag()?),
         "figure_button" => SettingChange::FigureButton(flag()?),
         "figure_png_scale" => SettingChange::FigurePngScale(value.trim().parse().ok()?),
         "minimap_width" => SettingChange::MinimapWidth(number()?),
         "tab_width" => SettingChange::TabWidth(value.trim().parse().ok()?),
         "recent_limit" => SettingChange::RecentLimit(value.trim().parse().ok()?),
+        "remember_positions" => SettingChange::RememberPositions(flag()?),
+        "positions_limit" => SettingChange::PositionsLimit(value.trim().parse().ok()?),
         "show_gremlins" => SettingChange::Gremlins(flag()?),
         "soft_wrap" => SettingChange::SoftWrap(flag()?),
         "editor_syntax" => SettingChange::EditorSyntax(flag()?),
@@ -598,7 +624,9 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "pptx_embed_fonts" => SettingChange::PptxEmbedFonts(flag()?),
         "html_tables" => SettingChange::HtmlTables(flag()?),
         "html_elements" => SettingChange::HtmlElements(flag()?),
+        "github_alerts" => SettingChange::GithubAlerts(flag()?),
         "code_color_limit_kb" => SettingChange::CodeColorLimit(value.to_owned()),
+        "large_file_mb" => SettingChange::LargeFile(value.to_owned()),
         "code_color_extensions" => SettingChange::CodeColorExtensions(value.to_owned()),
         "search_match_color" => SettingChange::SearchMatchColor(value.to_owned()),
         "search_current_color" => SettingChange::SearchCurrentColor(value.to_owned()),
@@ -614,6 +642,7 @@ pub(super) fn setting_change(key: &str, value: &str) -> Option<SettingChange> {
         "watch_external" => SettingChange::WatchExternal(flag()?),
         "reload_unmodified" => SettingChange::ReloadUnmodified(flag()?),
         "continue_lists" => SettingChange::ContinueLists(flag()?),
+        "line_copy" => SettingChange::LineCopy(flag()?),
         "table_format" => SettingChange::TableFormat(flag()?),
         "paste_url_as_link" => SettingChange::PasteUrl(flag()?),
         "paste_images" => SettingChange::PasteImages(flag()?),
@@ -679,7 +708,7 @@ pub(super) fn toggle<'a>(
     value: bool,
     change: fn(bool) -> SettingChange,
 ) -> Element<'a, Message> {
-    checkbox(value)
+    fluent::checkbox(value)
         .label(label)
         .text_size(12)
         .on_toggle(move |on| Message::Setting(change(on)))
@@ -794,6 +823,10 @@ impl App {
                 self.settings.html_elements = on;
                 self.refresh_html_tables();
             }
+            SettingChange::GithubAlerts(on) => {
+                self.settings.github_alerts = on;
+                self.refresh_html_tables();
+            }
             SettingChange::CodeColors(on) => {
                 self.settings.code_colors = on;
                 self.refresh_code_language();
@@ -806,6 +839,17 @@ impl App {
                     if settings::CODE_COLOR_LIMIT_RANGE.contains(&limit) {
                         self.settings.code_color_limit_kb = limit;
                         self.refresh_code_language();
+                    }
+                }
+            }
+            SettingChange::LargeFile(value) => {
+                if let Some(screen) = self.settings_screen.as_mut() {
+                    screen.large_file.clone_from(&value);
+                }
+                if let Ok(limit) = value.trim().parse::<u32>() {
+                    if settings::LARGE_FILE_RANGE.contains(&limit) {
+                        self.settings.large_file_mb = limit;
+                        crate::io::set_size_limit(u64::from(limit) * 1024 * 1024);
                     }
                 }
             }
@@ -843,6 +887,10 @@ impl App {
                 self.settings.recent_limit = limit.clamp(1, settings::RECENT_LIMIT_MAX);
                 self.settings.recent.truncate(self.settings.recent_limit);
             }
+            SettingChange::RememberPositions(on) => self.settings.remember_positions = on,
+            SettingChange::PositionsLimit(limit) => {
+                self.settings.positions_limit = limit.clamp(1, settings::POSITIONS_LIMIT_MAX);
+            }
             SettingChange::AutosaveDraft(on) => {
                 // **ほかの項目と同じく、すぐに書く**（下の `touch_settings_now` まで通す）
                 if on != self.settings.autosave_draft {
@@ -871,6 +919,7 @@ impl App {
                 }
             }
             SettingChange::ContinueLists(on) => self.settings.continue_lists = on,
+            SettingChange::LineCopy(on) => self.settings.line_copy = on,
             SettingChange::TableFormat(on) => self.settings.table_format = on,
             SettingChange::PasteUrl(on) => self.settings.paste_url_as_link = on,
             SettingChange::PasteImages(on) => self.settings.paste_images = on,
@@ -1012,6 +1061,11 @@ impl App {
             }
             SettingChange::WindowMaterial(material) => self.settings.window_material = material,
             SettingChange::WindowBodyTint(on) => self.settings.window_body_tint = on,
+            SettingChange::LookOs(on) => {
+                self.settings.look_os = on;
+                // 角・影・強調色・ボタンの並びはすぐ効く（字体は再起動で）
+                super::look::set(super::look::Look::chosen(on));
+            }
             SettingChange::FigureButton(on) => self.settings.figure_button = on,
             SettingChange::FigurePngScale(scale) => {
                 self.settings.figure_png_scale = scale.clamp(1, settings::FIGURE_SCALE_MAX);
@@ -1193,7 +1247,7 @@ impl App {
                 row![
                     pages,
                     iced::widget::rule::vertical(1),
-                    scrollable(container(body).padding([4, 16])).height(Length::Fill),
+                    fluent::scrollable(container(body).padding([4, 16])).height(Length::Fill),
                 ]
                 .spacing(12)
                 .height(Length::Fill),
@@ -1218,7 +1272,7 @@ impl App {
             with_reset(
                 line(
                     "置き方",
-                    pick_list(
+                    fluent::pick_list(
                         WindowPlacement::ALL.to_vec(),
                         Some(s.window_placement),
                         |p| Message::Setting(SettingChange::Placement(p)),
@@ -1237,7 +1291,7 @@ impl App {
             let field = |index: usize, label: &'a str| {
                 row![
                     text(label).size(12),
-                    text_input("", &screen.custom[index])
+                    fluent::field("", &screen.custom[index])
                         .on_input(move |value| {
                             Message::Setting(SettingChange::CustomField(index, value))
                         })
@@ -1276,7 +1330,7 @@ impl App {
         page = page.push(with_reset(
             line(
                 "起動時",
-                pick_list(OnTop::ALL.to_vec(), Some(s.always_on_top), |choice| {
+                fluent::pick_list(OnTop::ALL.to_vec(), Some(s.always_on_top), |choice| {
                     Message::Setting(SettingChange::OnTop(choice))
                 })
                 .text_size(12),
@@ -1301,7 +1355,7 @@ impl App {
             with_reset(
                 line(
                     "フォント名",
-                    text_input("空なら同梱の PlemolJP", &s.editor_font)
+                    fluent::field("空なら同梱の PlemolJP", &s.editor_font)
                         .on_input(|name| Message::Setting(SettingChange::EditorFont(name)))
                         .size(12)
                         .width(Length::Fixed(260.0)),
@@ -1317,7 +1371,7 @@ impl App {
                 line(
                     "文字の大きさ",
                     row![
-                        slider(
+                        fluent::slider(
                             settings::FONT_SIZE_MIN..=settings::FONT_SIZE_MAX,
                             s.editor_font_size,
                             |v| Message::Setting(SettingChange::EditorFontSize(v.round())),
@@ -1337,7 +1391,7 @@ impl App {
                 line(
                     "行間（倍）",
                     row![
-                        slider(
+                        fluent::slider(
                             settings::LINE_SPACING_MIN..=settings::LINE_SPACING_MAX,
                             s.editor_line_spacing,
                             |v| Message::Setting(SettingChange::EditorLineSpacing(
@@ -1360,7 +1414,7 @@ impl App {
             with_reset(
                 line(
                     "タブ幅",
-                    pick_list(vec![1usize, 2, 4, 8], Some(s.tab_width), |w| {
+                    fluent::pick_list(vec![1usize, 2, 4, 8], Some(s.tab_width), |w| {
                         Message::Setting(SettingChange::TabWidth(w))
                     })
                     .text_size(12),
@@ -1381,7 +1435,7 @@ impl App {
             ),
             with_reset(
                 toggle(
-                    "右端で折り返す（512 KB 以下のファイルだけ）",
+                    "右端で折り返す",
                     s.soft_wrap,
                     SettingChange::SoftWrap
                 ),
@@ -1416,7 +1470,7 @@ impl App {
             with_reset(
                 line(
                     "縦線を引く桁（, で区切る）",
-                    text_input("80, 120", &screen.guide_columns)
+                    fluent::field("80, 120", &screen.guide_columns)
                         .on_input(|v| Message::Setting(SettingChange::GuideColumns(v)))
                         .size(12)
                         .width(Length::Fixed(160.0)),
@@ -1453,7 +1507,7 @@ impl App {
             with_reset(
                 line(
                     "色を付けるブロック（空行で区切った塊）の大きさの上限（KB。超えたら色無し）",
-                    text_input("64", &screen.code_color_limit)
+                    fluent::field("64", &screen.code_color_limit)
                         .on_input(|v| Message::Setting(SettingChange::CodeColorLimit(v)))
                         .size(12)
                         .width(Length::Fixed(80.0)),
@@ -1467,7 +1521,7 @@ impl App {
             with_reset(
                 line(
                     "色を付ける拡張子（空なら知っているもの全部。`rs, py` や `conf=sh` のように）",
-                    text_input("rs, py, conf=sh", &s.code_color_extensions)
+                    fluent::field("rs, py, conf=sh", &s.code_color_extensions)
                         .on_input(|v| Message::Setting(SettingChange::CodeColorExtensions(v)))
                         .size(12)
                         .width(Length::Fixed(260.0)),
@@ -1482,7 +1536,7 @@ impl App {
             with_reset(
                 line(
                     "一致の色（`#rrggbb`。空ならテーマに合わせる）",
-                    text_input("#rrggbb", &s.search_match_color)
+                    fluent::field("#rrggbb", &s.search_match_color)
                         .on_input(|v| Message::Setting(SettingChange::SearchMatchColor(v)))
                         .size(12)
                         .width(Length::Fixed(120.0)),
@@ -1496,7 +1550,7 @@ impl App {
             with_reset(
                 line(
                     "いまの一致の色（比べる画面の違いの色と見分けにくければ変える）",
-                    text_input("#rrggbb", &s.search_current_color)
+                    fluent::field("#rrggbb", &s.search_current_color)
                         .on_input(|v| Message::Setting(SettingChange::SearchCurrentColor(v)))
                         .size(12)
                         .width(Length::Fixed(120.0)),
@@ -1520,7 +1574,7 @@ impl App {
                 line(
                     "幅",
                     row![
-                        slider(
+                        fluent::slider(
                             settings::MINIMAP_MIN..=settings::MINIMAP_MAX,
                             s.minimap_width,
                             |v| Message::Setting(SettingChange::MinimapWidth(v.round())),
@@ -1549,7 +1603,7 @@ impl App {
             with_reset(
                 line(
                     "入れる文書の大きさの上限（KB）",
-                    text_input("1024", &screen.wysiwyg_limit)
+                    fluent::field("1024", &screen.wysiwyg_limit)
                         .on_input(|v| Message::Setting(SettingChange::WysiwygLimit(v)))
                         .size(12)
                         .width(Length::Fixed(80.0)),
@@ -1576,7 +1630,7 @@ impl App {
             with_reset(
                 line(
                     "太字",
-                    pick_list(
+                    fluent::pick_list(
                         settings::Marker::ALL.to_vec(),
                         Some(s.strong_marker),
                         |m| Message::Setting(SettingChange::StrongMarker(m))
@@ -1592,7 +1646,7 @@ impl App {
             with_reset(
                 line(
                     "強調（斜体）",
-                    pick_list(
+                    fluent::pick_list(
                         settings::Marker::ALL.to_vec(),
                         Some(s.emphasis_marker),
                         |m| Message::Setting(SettingChange::EmphasisMarker(m))
@@ -1608,7 +1662,7 @@ impl App {
             with_reset(
                 line(
                     "リストの印",
-                    pick_list(
+                    fluent::pick_list(
                         settings::Marker::ALL.to_vec(),
                         Some(s.list_marker),
                         |m| Message::Setting(SettingChange::ListMarker(m))
@@ -1636,7 +1690,7 @@ impl App {
                 line(
                     "文字の大きさ",
                     row![
-                        slider(
+                        fluent::slider(
                             settings::FONT_SIZE_MIN..=settings::FONT_SIZE_MAX,
                             s.preview_font_size,
                             |v| Message::Setting(SettingChange::PreviewFontSize(v.round())),
@@ -1694,6 +1748,19 @@ impl App {
                     SettingChange::HtmlElements(d.html_elements)
                 ),
             ),
+            // GitHub のアラート（v3 R-08）
+            with_reset(
+                toggle(
+                    "GitHub のアラート（> [!NOTE]・[!TIP]・[!IMPORTANT]・[!WARNING]・[!CAUTION]）を色の付いた枠で描く",
+                    s.github_alerts,
+                    SettingChange::GithubAlerts
+                ),
+                differs(
+                    &s.github_alerts,
+                    &d.github_alerts,
+                    SettingChange::GithubAlerts(d.github_alerts)
+                ),
+            ),
             // プレビューから編集の行へ（v2.4.0 R-03）
             heading("編集画面との行き来"),
             with_reset(
@@ -1711,7 +1778,7 @@ impl App {
             with_reset(
                 line(
                     "押し方",
-                    pick_list(
+                    fluent::pick_list(
                         settings::JumpClick::ALL.to_vec(),
                         Some(s.preview_jump_click),
                         |click| Message::Setting(SettingChange::PreviewJumpClick(click))
@@ -1767,7 +1834,7 @@ impl App {
             with_reset(
                 line(
                     "写す PNG の倍率（図・数式）",
-                    pick_list(
+                    fluent::pick_list(
                         (1..=settings::FIGURE_SCALE_MAX).collect::<Vec<u8>>(),
                         Some(s.figure_png_scale),
                         |scale| Message::Setting(SettingChange::FigurePngScale(scale))
@@ -1808,7 +1875,7 @@ impl App {
             with_reset(
                 line(
                     "配色",
-                    pick_list(
+                    fluent::pick_list(
                         theme_choices(&self.settings),
                         Some(self.settings.theme.clone()),
                         |theme| { Message::Setting(SettingChange::Theme(theme)) }
@@ -1829,7 +1896,7 @@ impl App {
             with_reset(
                 line(
                     "窓の地",
-                    pick_list(
+                    fluent::pick_list(
                         settings::WindowMaterial::ALL.to_vec(),
                         Some(self.settings.window_material),
                         |material| Message::Setting(SettingChange::WindowMaterial(material))
@@ -1854,6 +1921,19 @@ impl App {
                     SettingChange::WindowBodyTint(d.window_body_tint)
                 ),
             ),
+            // OS に寄せた見た目（v3 R-07）
+            with_reset(
+                toggle(
+                    "OS に寄せた見た目にする（字体・角・影・強調色・ボタンの並び。切ると mdview の見た目。字体の切り替えは再起動で効く）",
+                    self.settings.look_os,
+                    SettingChange::LookOs
+                ),
+                differs(
+                    &self.settings.look_os,
+                    &d.look_os,
+                    SettingChange::LookOs(d.look_os)
+                ),
+            ),
             note(if cfg!(windows) {
                 "Mica 風は、デスクトップの壁紙をぼかして窓の地に敷きます（後ろの窓は透けません）。背景画像を敷いた所は背景画像が先です。"
             } else {
@@ -1866,7 +1946,7 @@ impl App {
             with_reset(
                 line(
                     "窓の題名",
-                    text_input(settings::DEFAULT_TITLE_FORMAT, &self.settings.title_format)
+                    fluent::field(settings::DEFAULT_TITLE_FORMAT, &self.settings.title_format)
                         .on_input(|v| Message::Setting(SettingChange::TitleFormat(v)))
                         .size(12)
                         .width(Length::Fixed(420.0)),
@@ -1880,7 +1960,7 @@ impl App {
             with_reset(
                 line(
                     "ステータスバー",
-                    text_input(
+                    fluent::field(
                         settings::DEFAULT_STATUS_FORMAT,
                         &self.settings.status_format
                     )
@@ -1917,7 +1997,7 @@ impl App {
                 line(
                     "覚える件数",
                     row![
-                        slider(1.0..=settings::RECENT_LIMIT_MAX as f32, recent, |v| {
+                        fluent::slider(1.0..=settings::RECENT_LIMIT_MAX as f32, recent, |v| {
                             Message::Setting(SettingChange::RecentLimit(v.round() as usize))
                         })
                         .width(Length::Fixed(220.0)),
@@ -1934,6 +2014,56 @@ impl App {
             button(text("一覧を消す").size(12))
                 .padding([4, 10])
                 .on_press_maybe((!s.recent.is_empty()).then_some(Message::ClearRecent)),
+            // ファイルごとの位置（v3 R-10）
+            heading("開き直したときの位置"),
+            with_reset(
+                toggle(
+                    "ファイルごとにキャレット・選択・スクロールの位置を覚え、開き直したときに戻す",
+                    s.remember_positions,
+                    SettingChange::RememberPositions
+                ),
+                differs(
+                    &s.remember_positions,
+                    &d.remember_positions,
+                    SettingChange::RememberPositions(d.remember_positions)
+                ),
+            ),
+            with_reset(
+                line(
+                    "覚えるファイルの数",
+                    row![
+                        fluent::slider(
+                            1.0..=settings::POSITIONS_LIMIT_MAX as f32,
+                            s.positions_limit as f32,
+                            |v| Message::Setting(SettingChange::PositionsLimit(v.round() as usize))
+                        )
+                        .width(Length::Fixed(220.0)),
+                        text(format!("{} 件", s.positions_limit)).size(12),
+                    ]
+                    .spacing(8),
+                ),
+                differs(
+                    &s.positions_limit,
+                    &d.positions_limit,
+                    SettingChange::PositionsLimit(d.positions_limit)
+                ),
+            ),
+            // 大きすぎるファイル（v3 R-12）
+            heading("大きすぎるファイル"),
+            with_reset(
+                line(
+                    "これより大きいファイルは、先頭の 512 KB だけを読み取り専用で開く（MB。1〜4096）",
+                    fluent::field("100", &screen.large_file)
+                        .on_input(|v| Message::Setting(SettingChange::LargeFile(v)))
+                        .size(12)
+                        .width(Length::Fixed(80.0)),
+                ),
+                differs(
+                    &s.large_file_mb,
+                    &d.large_file_mb,
+                    SettingChange::LargeFile(d.large_file_mb.to_string())
+                ),
+            ),
             heading("保存と退避"),
             with_reset(
                 toggle(
@@ -1962,7 +2092,7 @@ impl App {
             with_reset(
                 line(
                     "編集が止まってから（秒）",
-                    text_input("30", &screen.autosave_seconds)
+                    fluent::field("30", &screen.autosave_seconds)
                         .on_input(|v| Message::Setting(SettingChange::AutosaveSeconds(v)))
                         .size(12)
                         .width(Length::Fixed(80.0)),
@@ -2068,7 +2198,7 @@ impl App {
             with_reset(
                 line(
                     label,
-                    text_input("", &screen.sun_fields[index])
+                    fluent::field("", &screen.sun_fields[index])
                         .on_input(move |v| Message::Setting(SettingChange::SunField(index, v)))
                         .size(12)
                         .width(Length::Fixed(120.0)),
@@ -2124,7 +2254,7 @@ impl App {
             with_reset(
                 line(
                     "明るい時間の配色",
-                    pick_list(choices.clone(), Some(s.sun_day_theme.clone()), |theme| {
+                    fluent::pick_list(choices.clone(), Some(s.sun_day_theme.clone()), |theme| {
                         Message::Setting(SettingChange::SunDayTheme(theme))
                     })
                     .text_size(12),
@@ -2134,7 +2264,7 @@ impl App {
             with_reset(
                 line(
                     "暗い時間の配色",
-                    pick_list(choices, Some(s.sun_night_theme.clone()), |theme| {
+                    fluent::pick_list(choices, Some(s.sun_night_theme.clone()), |theme| {
                         Message::Setting(SettingChange::SunNightTheme(theme))
                     })
                     .text_size(12),
@@ -2201,7 +2331,7 @@ impl App {
             with_reset(
                 line(
                     "スライドを書き出すときの既定の形式",
-                    pick_list(
+                    fluent::pick_list(
                         settings::SlideExport::ALL.to_vec(),
                         Some(s.marp_export_format),
                         |format| Message::Setting(SettingChange::MarpExportFormat(format))
@@ -2244,7 +2374,7 @@ impl App {
             with_reset(
                 line(
                     "出し方",
-                    pick_list(
+                    fluent::pick_list(
                         settings::DiffLayout::ALL.to_vec(),
                         Some(s.diff_layout),
                         |layout| Message::Setting(SettingChange::DiffLayout(layout))
@@ -2261,7 +2391,7 @@ impl App {
             with_reset(
                 line(
                     "空白",
-                    pick_list(
+                    fluent::pick_list(
                         settings::DiffWhitespace::ALL.to_vec(),
                         Some(s.diff_whitespace),
                         |whitespace| Message::Setting(SettingChange::DiffWhitespace(whitespace))
@@ -2302,7 +2432,7 @@ impl App {
             with_reset(
                 line(
                     "書き出す形式",
-                    pick_list(
+                    fluent::pick_list(
                         settings::PatchFormat::ALL.to_vec(),
                         Some(s.patch_format),
                         |format| Message::Setting(SettingChange::PatchFormat(format))
@@ -2320,7 +2450,7 @@ impl App {
             with_reset(
                 line(
                     "比べない名前（, で区切る。* が使える）",
-                    text_input(".git, node_modules, target", &s.diff_folder_ignore)
+                    fluent::field(".git, node_modules, target", &s.diff_folder_ignore)
                         .on_input(|v| Message::Setting(SettingChange::DiffFolderIgnore(v)))
                         .size(12)
                         .width(Length::Fixed(260.0)),
@@ -2378,6 +2508,15 @@ impl App {
                     SettingChange::ContinueLists(d.continue_lists)
                 ),
             ),
+            // 選ばずに行ごと（v3 R-17）
+            with_reset(
+                toggle(
+                    "選んでいないときの切り取り・コピーを行ごとにし、行ごとに写したものは行の頭に貼る",
+                    s.line_copy,
+                    SettingChange::LineCopy
+                ),
+                differs(&s.line_copy, &d.line_copy, SettingChange::LineCopy(d.line_copy)),
+            ),
             heading("表"),
             with_reset(
                 toggle("表の整形を使う", s.table_format, SettingChange::TableFormat),
@@ -2415,7 +2554,7 @@ impl App {
             with_reset(
                 line(
                     "画像の書き方",
-                    pick_list(ImageMarkup::ALL.to_vec(), Some(s.image_markup), |m| {
+                    fluent::pick_list(ImageMarkup::ALL.to_vec(), Some(s.image_markup), |m| {
                         Message::Setting(SettingChange::ImageMarkup(m))
                     })
                     .text_size(12),
@@ -2429,7 +2568,7 @@ impl App {
             with_reset(
                 line(
                     "画像の置き場（文書からの相対）",
-                    text_input("images", &s.image_folder)
+                    fluent::field("images", &s.image_folder)
                         .on_input(|v| Message::Setting(SettingChange::ImageFolder(v)))
                         .size(12)
                         .width(Length::Fixed(200.0)),
@@ -2445,7 +2584,7 @@ impl App {
             with_reset(
                 line(
                     "目次に入れる見出しの深さ",
-                    pick_list(
+                    fluent::pick_list(
                         (1..=crate::edit::toc::MAX_DEPTH).collect::<Vec<u8>>(),
                         Some(s.toc_depth),
                         |depth| Message::Setting(SettingChange::TocDepth(depth))
@@ -2487,7 +2626,7 @@ impl App {
         let d = Settings::default();
         let check = |label: &'static str, key: &'static str, now: bool, default: bool| {
             with_reset(
-                iced::widget::checkbox(now)
+                fluent::checkbox(now)
                     .label(label)
                     .text_size(12)
                     .on_toggle(move |on| Message::Setting(SettingChange::Tidy(key, on))),
@@ -2501,7 +2640,7 @@ impl App {
             check("表の桁をそろえる", "format_tables", s.format_tables, d.format_tables),
             row![
                 check("リストの印をそろえる", "format_bullets", s.format_bullets, d.format_bullets),
-                pick_list(bullets, Some(s.format_bullet), |c| {
+                fluent::pick_list(bullets, Some(s.format_bullet), |c| {
                     Message::Setting(SettingChange::FormatBullet(c))
                 })
                 .text_size(12),

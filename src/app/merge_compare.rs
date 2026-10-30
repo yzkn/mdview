@@ -730,6 +730,7 @@ mod tests {
             format: Default::default(),
             oversized: false,
             lossy: false,
+            truncated: None,
         }
     }
 

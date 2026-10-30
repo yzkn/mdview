@@ -3,7 +3,8 @@
 //! 配色を作る・選んで直す・名前を変える・元にするプリセットを選ぶ・色を `#rrggbb` で書く・
 //! 使う・消す。**直している配色を使っていれば、書いた色はその場で画面に出る**。
 
-use iced::widget::{button, column, container, pick_list, row, text, text_input};
+use super::fluent;
+use iced::widget::{button, column, container, row, text};
 use iced::{Color, Element, Length};
 
 use super::settings_view::{SettingChange, SettingsScreen};
@@ -183,7 +184,7 @@ impl App {
         let mut out = column![
             text("自分の配色").size(14),
             row![
-                pick_list(names, screen.palette.clone(), |name| message(
+                fluent::pick_list(names, screen.palette.clone(), |name| message(
                     PaletteChange::Edit(Some(name))
                 ))
                 .placeholder("直す配色を選ぶ")
@@ -215,7 +216,7 @@ impl App {
             .push(
                 row![
                     text("名前").size(12).width(Length::Fixed(140.0)),
-                    text_input("名前", &screen.palette_name)
+                    fluent::text_input("名前", &screen.palette_name)
                         .on_input(|v| message(PaletteChange::Name(v)))
                         .on_submit(message(PaletteChange::Rename))
                         .size(12)
@@ -230,7 +231,7 @@ impl App {
             .push(
                 row![
                     text("元にする配色").size(12).width(Length::Fixed(140.0)),
-                    pick_list(
+                    fluent::pick_list(
                         presets,
                         Some(ThemePreference::parse(&palette.base)),
                         |base| { message(PaletteChange::Base(base)) }
@@ -296,7 +297,7 @@ impl App {
                 out = out.push(
                     row![
                         text(*label).size(12).width(Length::Fixed(260.0)),
-                        text_input(&placeholder, &typed)
+                        fluent::text_input(&placeholder, &typed)
                             .on_input(move |v| message(PaletteChange::Color(input_key.clone(), v)))
                             .size(12)
                             .width(Length::Fixed(110.0)),

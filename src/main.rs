@@ -18,27 +18,33 @@
 
 mod app;
 // 2 つの文書の差分（v2.3.0 R-02）
-mod diff;
-mod document;
+use mdview_core::diff;
+use mdview_core::document;
 // 編集の道具（TeraPad から取り込んだもの）
-mod edit;
-mod embed;
+use mdview_core::edit;
+use mdview_core::embed;
 // PDF・HTML 出力（§17）
-mod export;
-mod io;
-mod layout;
+use mdview_core::export;
+use mdview_core::io;
+use mdview_core::layout;
+// 権限の要る場所への保存（v3 R-14）
+mod elevate;
 // MCP サーバー（v2.4.0 R-06）と、窓との通り道（6b）
 mod ipc;
 mod mcp;
-// PDF のページ分割（§5）
-mod marp;
-mod paginate;
-mod parse;
+// タスクバー・Dock の「最近使ったもの」（v3 R-18）
+mod recent_docs;
+// macOS の OS のメニュー（v3 R-06）。木はどの OS でも組む（試験のため）
+#[cfg(target_os = "macos")]
+mod native_menu_mac;
+mod native_menu_tree;
+use mdview_core::marp;
+use mdview_core::parse;
 mod render;
 // 別の糸の後始末（落ちた理由を拾う）
-mod worker;
+use mdview_core::worker;
 // 文書内検索（§15.5）
-mod search;
+use mdview_core::search;
 
 /// プロセス開始時刻。起動〜初回描画の計測に使う（設計メモ DD-OPEN-01）。
 ///
@@ -275,6 +281,19 @@ fn main() -> iced::Result {
         std::process::exit(mcp::run());
     }
 
+    // **権限を上げて起こされた**（v3 R-14）。窓は出さず、一時ファイルの中身を保存先へ書いて終わる
+    {
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        if let [flag, from, to] = args.as_slice() {
+            if flag == elevate::ELEVATED_WRITE {
+                std::process::exit(elevate::write_as_helper(
+                    std::path::Path::new(from),
+                    std::path::Path::new(to),
+                ));
+            }
+        }
+    }
+
     // **落ちる前に書き出す口を仕掛ける**（§18.3）。
     // 画面を出す前に仕掛けるのは、起動の途中で落ちても効かせるためである
     io::recover::arm();
@@ -315,6 +334,11 @@ fn main() -> iced::Result {
     // **描画の下回りを OS ごとに 1 つに絞る**（v2.2.2）。**ほかの糸を作る前に**（環境変数を書くため）
     choose_graphics_backend();
 
+    // **開いているファイルは、その窓を前に出して終わる**（v3 R-15。窓を出す前・読み始める前に）
+    if app::focus_existing_on_launch() {
+        return Ok(());
+    }
+
     // **起動時に開くファイルを、窓と GPU の準備と並べて読み始める**（v2.2.2）。
     // iced は `App::new` を窓と GPU の準備より前に呼ぶので、そこで読むと待ち時間に足される
     app::start_preload();
@@ -323,7 +347,10 @@ fn main() -> iced::Result {
     // システムフォントに頼ると、日本語に中国語の字形が拾われる（§6.5.5）
     // **窓の置き方は設定から決める**（v2.1.0 R-02 / R-05）。
     // 左半分・右半分は、窓が出てからアプリ側で寄せる
-    let placement = app::initial_window(&io::settings::Settings::load());
+    let startup = io::settings::Settings::load();
+    let placement = app::initial_window(&startup);
+    // OS に寄せた見た目（v3 R-07）。**UI の字体は起動時にしか決められない**ので、ここで決める
+    app::use_look(startup.look_os);
     let mut application = iced::application(app::App::new, app::App::update, app::App::view)
         .title(app::App::title)
         .subscription(app::App::subscription)
@@ -343,7 +370,7 @@ fn main() -> iced::Result {
         .theme(app::App::theme)
         // **閉じる要求を自分で受ける。** 未保存の確認を挟むため（§18.2）
         .exit_on_close_request(false)
-        .default_font(render::fonts::body());
+        .default_font(app::ui_font());
 
     // **切り分け用**（DD-OPEN-11）。同じ実行ファイルのまま読み込みだけを変えられる。
     //
@@ -361,6 +388,10 @@ fn main() -> iced::Result {
             _ => {}
         }
         application = application.font(bytes);
+    }
+    // 絵文字（v3 R-19）。**OS の絵文字の字体を外し、同梱の字体を補う先の先頭に置く**（読み込みもここで）
+    if selection != "none" {
+        render::emoji_font::use_bundled();
     }
 
     application.run()
@@ -625,4 +656,17 @@ fn report(path: &str) {
     println!("  ブロック    {}", doc.blocks().len());
     println!("  見出し      {}", doc.headings().count());
     println!("  推定総高さ  {:.0}px", doc.total_height());
+}
+
+#[cfg(test)]
+mod core_version_tests {
+    /// **土台の版数は本体と同じにする**（v3 R-01）。土台の中の版数（URL を読むときの User-Agent など）がずれないように
+    #[test]
+    fn core_version_matches_app() {
+        assert_eq!(
+            mdview_core::VERSION,
+            env!("CARGO_PKG_VERSION"),
+            "core/Cargo.toml の版数を Cargo.toml とそろえる"
+        );
+    }
 }

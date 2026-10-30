@@ -148,17 +148,28 @@ rm -f "$package"
 
 # **3 回までやり直す**（2026-10-13）。GitHub の macOS のランナーでは、`hdiutil create` が
 # 「Resource busy」で落ちることがよくある（索引付けなどが作業用のボリュームを掴む）
+#
+# **作業用のイメージの大きさを渡す**（v3.0.0）。渡さないと hdiutil は中身から見積もるが、見積もりが小さすぎると
+# 作業用のイメージが一杯になり「No space left on device」で落ちる（絵文字の字体を埋めて中身が大きくなった v3.0.0 の
+# 公開側の CI で 3 回とも踏んだ）。中身の 1.3 倍に 50 MB を足す（UDZO に縮めるので、出来る .dmg の大きさは変わらない）
+stage_mb=$(du -sm "$stage" | cut -f1)
+image_mb=$((stage_mb * 13 / 10 + 50))
+echo "中身 ${stage_mb} MB・作業用のイメージ ${image_mb} MB"
+df -h "$out_dir" /tmp || true
 made=false
 for attempt in 1 2 3; do
   if hdiutil create \
     -volname "mdview $version" \
     -srcfolder "$stage" \
+    -size "${image_mb}m" \
     -ov -format UDZO \
     "$package" >/dev/null; then
     made=true
     break
   fi
   echo "hdiutil create に失敗（$attempt / 3）。10 秒待ってやり直す"
+  # 本当にディスクが一杯なのか、作業用のイメージが小さいのかを見分けるため、空きを出す
+  df -h "$out_dir" /tmp || true
   sleep 10
 done
 [ "$made" = true ] || fail "hdiutil create が 3 回とも失敗した"
