@@ -46,7 +46,65 @@ const ICONSET: [(&str, u32); 10] = [
     ("icon_512x512@2x.png", 1024),
 ];
 
+/// Android の適応型アイコンの前景を置く所（v3.1 R-02）。**これだけはリポジトリに置く**。
+/// モバイル版の組み立て（dx）はこの例を走らせない（走らせると PC 版の全部を組むことになる）
+const ANDROID_RES: &str = "mobile/src/android/src/main/res";
+
+/// 前景の大きさ（108 dp を密度ごとに）
+const ANDROID_FOREGROUND: [(&str, u32); 5] = [
+    ("mdpi", 108),
+    ("hdpi", 162),
+    ("xhdpi", 216),
+    ("xxhdpi", 324),
+    ("xxxhdpi", 432),
+];
+
+/// 前景にする絵。原本から**地（角丸の四角）を外し**、紙と矢印を中央の安全域（66/108）に収める。
+///
+/// 紙と矢印は 512 の枠の x 108〜448・y 104〜440 にあり、少し右下に寄っている。中心を
+/// (278, 272) から (256, 256) へ移し、0.88 倍にする（幅 340 → 299。枠の 58%）。地は
+/// `drawable/mdview_launcher_background.xml` の図形で描く
+fn android_foreground() -> Result<resvg::usvg::Tree, Box<dyn std::error::Error>> {
+    let svg = std::fs::read_to_string("assets/icon.svg")?;
+    let ground = svg
+        .find("<rect x=\"32\"")
+        .ok_or("icon.svg に地の四角が無い")?;
+    let ground_end = ground + svg[ground..].find("/>").ok_or("地の四角が閉じていない")? + 2;
+    let close = svg.rfind("</svg>").ok_or("icon.svg が閉じていない")?;
+    let body = format!(
+        "{}<g transform=\"translate(256 256) scale(0.88) translate(-278 -272)\">{}</g></svg>",
+        &svg[..ground],
+        &svg[ground_end..close]
+    );
+    Ok(resvg::usvg::Tree::from_data(
+        body.as_bytes(),
+        &resvg::usvg::Options::default(),
+    )?)
+}
+
+fn write_android() -> Result<(), Box<dyn std::error::Error>> {
+    let tree = android_foreground()?;
+    let art = Art {
+        large: tree.clone(),
+        small: tree,
+    };
+    for (density, size) in ANDROID_FOREGROUND {
+        let dir = Path::new(ANDROID_RES).join(format!("mipmap-{density}"));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("mdview_launcher_foreground.png"),
+            art.render(size)?,
+        )?;
+    }
+    println!("作った: {ANDROID_RES}/mipmap-*/mdview_launcher_foreground.png（Android）");
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `--android`: Android の前景だけを作る（v3.1 R-02）
+    if std::env::args().any(|arg| arg == "--android") {
+        return write_android();
+    }
     let out = PathBuf::from(OUT);
     std::fs::create_dir_all(&out)?;
 

@@ -10,7 +10,7 @@ resolver = "2"
 
 [package]
 name = "mdview-mobile"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 publish = false
 description = "Markdown を読む・軽く直すモバイル版（Dioxus。端末の WebView に描く）"

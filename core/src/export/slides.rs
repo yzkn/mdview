@@ -578,6 +578,15 @@ fn embedded_faces(slides: &[super::pptx_slide::SlideParts]) -> Vec<super::pptx::
         .collect()
 }
 
+/// スライドの区画と、その CSS（v3.1 R-10。モバイル版はこれを読む面に入れる）
+pub struct SlideParts {
+    /// 1 枚ずつの区画（`<div class="mv-slide">…</div>`）
+    pub slides: Vec<String>,
+    /// 区画の CSS（**`body` には触らない**。書き出しの HTML は `body` の決まりを足して使う）
+    pub css: String,
+    pub skipped_images: usize,
+}
+
 /// HTML にする（1 枚 1 区画。印刷すると 1 枚 1 ページ）
 pub fn html(
     document: &Document,
@@ -586,10 +595,42 @@ pub fn html(
     base_dir: Option<&Path>,
     watch: &dyn ExportWatch,
 ) -> Result<Html, ExportError> {
+    let parts = parts(document, deck, base_dir, watch)?;
+    let sections = parts.slides.concat();
+    let text = format!(
+        r#"<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+body {{ margin: 0; background: #2b2b2b; font-family: "IBM Plex Sans JP", "Noto Sans JP", "Yu Gothic", "Hiragino Sans", sans-serif; }}
+{css}</style>
+</head>
+<body>
+{sections}</body>
+</html>
+"#,
+        title = html::escape(title),
+        css = parts.css,
+    );
+    Ok(Html {
+        text,
+        skipped_images: parts.skipped_images,
+    })
+}
+
+/// スライドの区画と CSS を作る（書き出しの HTML とモバイル版の読む面で共有する）
+pub fn parts(
+    document: &Document,
+    deck: &Deck,
+    base_dir: Option<&Path>,
+    watch: &dyn ExportWatch,
+) -> Result<SlideParts, ExportError> {
     watch.total(deck.slides.len());
     let (width, height) = deck.size.dimensions();
     let mut skipped = 0;
-    let mut sections = String::new();
+    let mut slides = Vec::with_capacity(deck.slides.len());
     for (offset, slide) in deck.slides.iter().enumerate() {
         if watch.cancelled() {
             return Err(ExportError::Cancelled);
@@ -678,7 +719,7 @@ pub fn html(
             theme::Vertical::Center => "center",
             theme::Vertical::Top => "flex-start",
         };
-        sections.push_str(&format!(
+        slides.push(format!(
             r#"<div class="mv-slide"><section style="background:{bg};color:{fg};--mv-heading:{heading};--mv-link:{link};font-size:{font};padding:{py} {pr} {py} {pl};text-align:{align};justify-content:{justify}">{backgrounds}<div class="mv-content">{body}</div>{extra}</section></div>
 "#,
             bg = css(look.background),
@@ -695,15 +736,8 @@ pub fn html(
     let small = format!("calc(18 * 100cqw / {width})");
     let edge = format!("calc(21 * 100cqw / {width})");
     let side = format!("calc(30 * 100cqw / {width})");
-    let text = format!(
-        r#"<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<title>{title}</title>
-<style>
-body {{ margin: 0; background: #2b2b2b; font-family: "IBM Plex Sans JP", "Noto Sans JP", "Yu Gothic", "Hiragino Sans", sans-serif; }}
-.mv-slide {{ container-type: inline-size; width: min(100vw - 32px, {width}px); margin: 16px auto; box-shadow: 0 2px 8px rgba(0,0,0,.4); }}
+    let css = format!(
+        r#".mv-slide {{ container-type: inline-size; width: min(100vw - 32px, {width}px); margin: 16px auto; box-shadow: 0 2px 8px rgba(0,0,0,.4); }}
 .mv-slide section {{ position: relative; box-sizing: border-box; aspect-ratio: {width} / {height}; overflow: hidden; display: flex; flex-direction: column; line-height: 1.45; }}
 .mv-slide h1, .mv-slide h2, .mv-slide h3, .mv-slide h4, .mv-slide h5, .mv-slide h6 {{ color: var(--mv-heading); margin: 0.3em 0; }}
 .mv-slide a {{ color: var(--mv-link); }}
@@ -722,16 +756,11 @@ body {{ margin: 0; background: #2b2b2b; font-family: "IBM Plex Sans JP", "Noto S
   @page {{ size: {width}px {height}px; margin: 0; }}
   .mv-slide {{ width: {width}px; margin: 0; box-shadow: none; break-after: page; }}
 }}
-</style>
-</head>
-<body>
-{sections}</body>
-</html>
-"#,
-        title = html::escape(title)
+"#
     );
-    Ok(Html {
-        text,
+    Ok(SlideParts {
+        slides,
+        css,
         skipped_images: skipped,
     })
 }

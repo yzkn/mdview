@@ -1,41 +1,13 @@
 /* モバイル版の画面（v3 R-02）。本文の見た目は書き出しの CSS（土台の export::html::stylesheet）を先に読み、ここで重ねる */
 :root {
-  --bg: #ffffff;
-  --fg: #1b1b1b;
-  --muted: #6b6b73;
-  --line: #e2e2e7;
-  --panel: #f6f6f8;
-  --accent: #0b63ce;
-  --accent-fg: #ffffff;
+  /* 色は theme.rs が作る（#shell.light・#shell.dark。PC 版と同じ色。v3.1 R-04） */
   --hit: rgba(255, 196, 0, 0.45);
-  --editing: rgba(11, 99, 206, 0.08);
   --kb: 0px;
   --scale: 1;
-  color-scheme: light dark;
 }
-/* 配色は OS の設定に従う */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #17171a;
-    --fg: #e8e8ec;
-    --muted: #9a9aa4;
-    --line: #33333a;
-    --panel: #222227;
-    --accent: #5aa2ff;
-    --accent-fg: #0b0b0d;
-    --hit: rgba(255, 196, 0, 0.35);
-    --editing: rgba(90, 162, 255, 0.12);
-  }
-  /* 書き出しの CSS は明るい配色で決め打ちなので、暗い配色では上書きする */
-  #read main { color: var(--fg); }
-  #read code, #read pre, #read th { background: #2a2a30; }
-  #read blockquote { color: #b9b9c2; border-color: #4a4a52; }
-  #read th, #read td { border-color: #3a3a42; }
-  #read h1, #read h2 { border-color: #33333a; }
-  #read .mv-embed svg, #read .mv-embed img { background: #ffffff; border-radius: 4px; }
-}
+#shell.dark { --hit: rgba(255, 196, 0, 0.35); }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overscroll-behavior: none; }
+html, body { margin: 0; height: 100%; overscroll-behavior: none; }
 body { font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans CJK JP", "Yu Gothic UI", sans-serif; }
 button { font: inherit; color: inherit; }
 
@@ -61,6 +33,9 @@ button { font: inherit; color: inherit; }
   padding-top: calc(env(safe-area-inset-top) + 48px);
 }
 #read main { max-width: 46rem; margin: 0 auto; padding: 8px 16px 96px; font-size: calc(16px * var(--scale)); }
+/* 見出しも字の大きさに合わせて縮める（書き出しの CSS は rem で決めていて、字の大きさを変えても縮まなかった。v3.1）。読む幅は変えない（小さくすると 1 行に多く入る） */
+#read main:not(.slides) h1 { font-size: 1.8em; }
+#read main:not(.slides) h2 { font-size: 1.45em; }
 #read main > .blk > :first-child { margin-top: 0.6em; }
 .blk { border-radius: 6px; }
 .blk.hit { background: var(--editing); }
@@ -94,8 +69,17 @@ button { font: inherit; color: inherit; }
   padding-bottom: max(8px, env(safe-area-inset-bottom));
 }
 .sheet .grip { width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 8px auto 4px; }
-.sheet h2 { font-size: 15px; margin: 4px 16px 8px; color: var(--muted); font-weight: 600; }
+.sheet h2 { font-size: 15px; margin: 4px 16px 8px; color: var(--muted); font-weight: 600; border-bottom: 0; padding-bottom: 0; }
+/* メニューの板の見出し（ファイル・編集・ヘルプ。v3.1 R-05）は区切りが分かるよう上を空ける */
+.sheet .list h2 { margin-top: 14px; }
+.sheet .list h2:first-child { margin-top: 4px; }
 .sheet .list { overflow-y: auto; }
+/* メニューの板は項目が多いので、全部が見えるよう高くする（v3.1 R-07） */
+.sheet.menu { max-height: 88vh; }
+/* 設定（v3.1 R-08）。分類の見出しと、項目ごとの「既定」 */
+.sheet.settings h3 { font-size: 13px; margin: 18px 16px 4px; color: var(--accent); }
+.sheet .setting h2 { display: flex; align-items: center; gap: 8px; }
+.sheet .setting .reset { margin-left: auto; min-height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; }
 .row {
   display: flex; align-items: center; width: 100%; min-height: 48px; padding: 0 16px;
   border: 0; background: none; text-align: left; font-size: 16px; gap: 12px;
@@ -106,7 +90,7 @@ button { font: inherit; color: inherit; }
 .toc .row.l2 { padding-left: 32px; } .toc .row.l3 { padding-left: 48px; font-size: 15px; }
 .toc .row.l4, .toc .row.l5, .toc .row.l6 { padding-left: 64px; font-size: 14px; }
 .choices { display: flex; gap: 8px; padding: 4px 16px 12px; }
-.choices button { flex: 1; min-height: 48px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
+.choices button { flex: 1; min-width: 0; padding: 0 4px; min-height: 48px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
 .choices button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 
 /* 著作権表示 */
@@ -146,7 +130,13 @@ pre.license { margin: 0 16px 12px; padding: 10px 12px; border-radius: 8px; backg
   flex: 1; min-width: 0; min-height: 44px; border-radius: 10px; border: 1px solid var(--line); padding: 0 12px;
   font-size: 16px; background: var(--bg); color: var(--fg);
 }
-#find-top .count { color: var(--muted); font-size: 13px; min-width: 56px; text-align: right; }
+#find-top { flex-wrap: wrap; }
+/* 検索の間は帯が 2 段になるので、読む面の頭を帯の下から始める */
+#shell.finding #read { padding-top: calc(env(safe-area-inset-top) + 120px); }
+#find-top .count { color: var(--muted); font-size: 13px; min-width: 56px; text-align: right; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 検索の切り替え（v3.1 R-06。PC 版と同じ Aa・.*・単語） */
+#find-top .opts { display: flex; gap: 8px; align-items: center; width: 100%; }
+#find-top .opts button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 /* 下の余白に OS のボタン（戻る・ホーム・アプリの切り替え）の分を入れる。入れないと帯がその下に潜って押せない（v3.0.0 の実機で踏んだ） */
 #find-bottom {
   display: flex; gap: 8px; align-items: center; padding: 8px 12px; margin-bottom: var(--kb);
@@ -176,3 +166,35 @@ pre.license { margin: 0 16px 12px; padding: 10px 12px; border-radius: 8px; backg
   #full { position: static; flex: 1; min-width: 0; z-index: auto; border-right: 1px solid var(--line); padding-top: calc(env(safe-area-inset-top) + 48px); }
   #full .tools { margin-bottom: 0; }
 }
+
+/* Marp のスライド（v3.1 R-10）。枠を並べ、右下に前・次の送り */
+#read main.slides { padding-left: 0; padding-right: 0; }
+#read main.slides .mv-slide { width: calc(100% - 24px); margin: 12px auto; }
+/* 書き出しの CSS（読む面の見た目）をスライドの中では外す。PC 版のスライドの書き出しと同じ見た目にする */
+#read main.slides .mv-slide h1, #read main.slides .mv-slide h2 { border-bottom: 0; padding-bottom: 0; }
+#read main.slides .mv-slide h1 { font-size: 2em; }
+#read main.slides .mv-slide h2 { font-size: 1.5em; }
+#read main.slides .mv-slide h3 { font-size: 1.17em; }
+#read main.slides .mv-slide blockquote { color: inherit; }
+#slide-nav {
+  position: fixed; right: 12px; bottom: calc(72px + env(safe-area-inset-bottom)); z-index: 12;
+  display: flex; gap: 8px;
+}
+#slide-nav button {
+  width: 48px; height: 48px; border-radius: 24px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--fg); font-size: 24px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+/* frontmatter の欄（v3.1 R-11）。PC 版と同じく名前と値を並べ、畳める */
+#read details.front {
+  max-width: 46rem; margin: 8px auto 0; padding: 4px 16px 8px;
+  font-size: calc(14px * var(--scale)); color: var(--fg);
+}
+#read details.front summary { color: var(--muted); font-weight: 600; padding: 6px 0; cursor: pointer; }
+#read details.front table { border-collapse: collapse; width: 100%; background: var(--panel); border-radius: 8px; overflow: hidden; }
+/* 書き出しの CSS の th・td・pre（明るい配色の決め打ち）は欄では使わない */
+#read details.front th, #read details.front td { text-align: left; vertical-align: top; padding: 6px 10px; border: 0; border-bottom: 1px solid var(--line); background: transparent; }
+#read details.front th { white-space: nowrap; color: var(--muted); font-weight: 600; width: 1%; }
+#read details.front .chip { display: inline-block; margin: 0 4px 4px 0; padding: 1px 8px; border-radius: 10px; background: var(--code-bg); }
+#read details.front pre { margin: 0; padding: 0; background: transparent; color: inherit; white-space: pre-wrap; font-size: 0.9em; }
+#shell.edit-mode #read details.front { outline: 1px dashed var(--line); }

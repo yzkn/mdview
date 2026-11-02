@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- アプリのアイコン（v3.1 R-02）。前景は examples/make-icons.rs で assets/icon.svg から作る（引数は assets/README.md）。XML の注釈には二重のハイフンを書けない -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/mdview_launcher_background" />
+    <foreground android:drawable="@mipmap/mdview_launcher_foreground" />
+</adaptive-icon>

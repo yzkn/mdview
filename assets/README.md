@@ -58,5 +58,13 @@ cargo run --example make-icons
 |`mdview-<大きさ>.png`|Linux の hicolor|
 |`mdview.iconset`|macOS。`iconutil -c icns` で `.icns` にする|
 
+**Android のアイコン（v3.1）だけはリポジトリに置く。** モバイル版の組み立て（dx）はこの例を走らせない
+（走らせると PC 版の全部を組むことになる）ので、前景の PNG を `mobile/src/android/src/main/res/mipmap-*/` に置いておく。
+`icon.svg` を直したら作り直してコミットする。地は同じ所の `drawable/mdview_launcher_background.xml`（図形）。
+
+```
+cargo run --example make-icons -- --android
+```
+
 **Windows の実行ファイルへは `build.rs` が埋める。** `mdview.ico` が
 無ければ黙って飛ばすので、先に例を動かしてからビルドする。

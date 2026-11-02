@@ -28,6 +28,11 @@ pub enum Picked {
     Opened(Opened),
     /// 出力の先が決まり、書いた
     Exported(String),
+    /// 名前を付けて保存した（v3.1 R-07。以後はこの書類を直す）
+    Saved {
+        name: String,
+        handle: Handle,
+    },
     Failed(String),
 }
 
@@ -93,12 +98,67 @@ mod desktop {
         Ok(())
     }
 
+    /// 印から開いた結果を `poll` で渡す（端末と同じ流れにする）
+    static PENDING: std::sync::Mutex<Option<Picked>> = std::sync::Mutex::new(None);
+
     pub fn poll() -> Picked {
-        Picked::Waiting
+        PENDING
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
+            .unwrap_or(Picked::Waiting)
     }
 
     pub fn write(handle: &Handle, bytes: &[u8]) -> Result<(), String> {
         std::fs::write(&handle.0, bytes).map_err(|error| error.to_string())
+    }
+
+    pub fn pick_save_as(_name: &str, _bytes: Vec<u8>) -> Result<(), String> {
+        Err("手元の確認では名前を付けて保存しません".into())
+    }
+
+    /// 最近使ったファイルを開く（手元ではファイルの道）
+    pub fn open_uri(handle: &Handle) -> Result<(), String> {
+        let picked = match std::fs::read(&handle.0) {
+            Ok(bytes) => Picked::Opened(Opened {
+                name: std::path::Path::new(&handle.0)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| handle.0.clone()),
+                handle: handle.clone(),
+                bytes,
+            }),
+            Err(error) => Picked::Failed(error.to_string()),
+        };
+        if let Ok(mut pending) = PENDING.lock() {
+            *pending = Some(picked);
+        }
+        Ok(())
+    }
+
+    /// 覚えた値（手元では一時フォルダの JSON。端末は OS の標準の仕組み）
+    fn prefs_path() -> std::path::PathBuf {
+        std::env::temp_dir().join("mdview-mobile-prefs.json")
+    }
+
+    fn prefs() -> serde_json::Map<String, serde_json::Value> {
+        std::fs::read_to_string(prefs_path())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn pref(key: &str) -> Option<String> {
+        prefs()
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    }
+
+    pub fn set_pref(key: &str, value: &str) {
+        let mut all = prefs();
+        all.insert(key.to_owned(), value.into());
+        let _ = std::fs::write(prefs_path(), serde_json::Value::Object(all).to_string());
     }
 }
 
@@ -157,6 +217,36 @@ mod native {
         parts::ok(parts::open_link(plugin()?, href.to_owned()))
     }
 
+    /// 名前を付けて保存（v3.1 R-07）。置き場と名前を選ぶ画面を出し、結果は `poll`（`Saved`）
+    pub fn pick_save_as(name: &str, bytes: Vec<u8>) -> Result<(), String> {
+        let path = put("save-as", &bytes)?;
+        let request = serde_json::json!({
+            "name": name, "mime": "text/markdown", "path": path, "keep": "true"
+        })
+        .to_string();
+        parts::ok(parts::pick_export(plugin()?, request))
+    }
+
+    /// 印の書類を開く（最近使ったファイル。v3.1 R-07）。結果は `poll`
+    pub fn open_uri(handle: &Handle) -> Result<(), String> {
+        parts::ok(parts::open_uri(plugin()?, handle.0.clone()))
+    }
+
+    /// OS の標準の記憶（Android は SharedPreferences・iOS は UserDefaults。v3.1 R-07・R-08）
+    pub fn pref(key: &str) -> Option<String> {
+        let value = plugin()
+            .and_then(|plugin| parts::text(parts::pref_get(plugin, key.to_owned())))
+            .ok()?;
+        (!value.is_empty()).then_some(value)
+    }
+
+    pub fn set_pref(key: &str, value: &str) {
+        if let Ok(plugin) = plugin() {
+            let request = serde_json::json!({ "key": key, "value": value }).to_string();
+            let _ = parts::ok(parts::pref_set(plugin, request));
+        }
+    }
+
     pub fn write(handle: &Handle, bytes: &[u8]) -> Result<(), String> {
         let path = put("save", bytes)?;
         let request = serde_json::json!({ "uri": handle.0, "path": path }).to_string();
@@ -200,6 +290,10 @@ mod native {
                 Err(error) => Picked::Failed(error.to_string()),
             },
             "exported" => Picked::Exported(reply.name),
+            "saved" => Picked::Saved {
+                name: reply.name,
+                handle: Handle(reply.uri),
+            },
             "cancelled" | "shared" => Picked::Cancelled,
             _ => Picked::Failed(reply.error),
         }

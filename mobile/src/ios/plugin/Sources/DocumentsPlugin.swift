@@ -4,6 +4,9 @@
 // - 中身は一時のファイルで受け渡す（Android と同じ形）。開いた書類は一時の所へ写して道を返し、
 //   書き戻すときは Rust が書いたファイルを書類へ写す
 // - 開いた書類は印（ブックマーク）を持ち、書き戻すたびに「書類へ触る許し」を取り直す
+// - 印は UserDefaults にも残し、次に起動しても最近使ったファイルから開ける（v3.1 R-07）
+// - 名前を付けて保存は、書き出しを「移す」形（asCopy: false）にして、置いた先の印を取る（v3.1 R-07）
+// - 設定・最近使ったファイルの一覧は OS の標準の UserDefaults に持つ（v3.1 R-07・R-08）
 #if os(iOS)
 import Foundation
 import UIKit
@@ -16,9 +19,34 @@ public class DocumentsPlugin: NSObject, UIDocumentPickerDelegate {
   /// 開いた書類の印（URI の文字 → ブックマーク）
   private var bookmarks: [String: Data] = [:]
   private var exporting = false
+  /// 名前を付けて保存か（v3.1 R-07）
+  private var keeping = false
+  /// 印を残す所（UserDefaults の鍵）
+  private let bookmarkKey = "mdview.bookmarks"
 
   override public init() {
     super.init()
+    // 前に残した印を読む（最近使ったファイル）
+    if let saved = UserDefaults.standard.dictionary(forKey: bookmarkKey) as? [String: Data] {
+      bookmarks = saved
+    }
+  }
+
+  /// 印を覚え、UserDefaults にも残す
+  private func remember(_ url: URL) {
+    guard let bookmark = try? url.bookmarkData() else { return }
+    bookmarks[url.absoluteString] = bookmark
+    UserDefaults.standard.set(bookmarks, forKey: bookmarkKey)
+  }
+
+  /// 印から書類を指す
+  private func resolve(_ uri: String) -> URL? {
+    var stale = false
+    if let bookmark = bookmarks[uri],
+       let resolved = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale) {
+      return resolved
+    }
+    return URL(string: uri)
   }
 
   private func finish(_ kind: String, _ pairs: [String: String] = [:]) {
@@ -61,6 +89,7 @@ public class DocumentsPlugin: NSObject, UIDocumentPickerDelegate {
       picker.delegate = self
       picker.allowsMultipleSelection = false
       self.exporting = false
+      self.keeping = false
       self.top()?.present(picker, animated: true)
     }
     return ""
@@ -71,23 +100,57 @@ public class DocumentsPlugin: NSObject, UIDocumentPickerDelegate {
       finish("cancelled")
       return
     }
+    if exporting && keeping {
+      // 名前を付けて保存: 置いた先の印を取る
+      let granted = url.startAccessingSecurityScopedResource()
+      defer { if granted { url.stopAccessingSecurityScopedResource() } }
+      remember(url)
+      finish("saved", ["name": url.lastPathComponent, "uri": url.absoluteString])
+      return
+    }
     if exporting {
       finish("exported", ["name": url.lastPathComponent])
       return
     }
+    copyIn(url)
+  }
+
+  /// 書類を一時の所へ写して道を返す（開く・最近使ったファイル）
+  private func copyIn(_ url: URL) {
     let granted = url.startAccessingSecurityScopedResource()
     defer { if granted { url.stopAccessingSecurityScopedResource() } }
     do {
       let data = try Data(contentsOf: url)
       let target = folder("open").appendingPathComponent("document")
       try data.write(to: target)
-      if let bookmark = try? url.bookmarkData() {
-        bookmarks[url.absoluteString] = bookmark
-      }
+      remember(url)
       finish("opened", ["name": url.lastPathComponent, "uri": url.absoluteString, "path": target.path])
     } catch {
       finish("failed", ["error": error.localizedDescription])
     }
+  }
+
+  /// 印（uri）の書類を開く（最近使ったファイル。v3.1 R-07）。結果は poll
+  @objc public func openUri(_ uri: String) -> String {
+    lock.lock(); result = nil; lock.unlock()
+    guard let url = resolve(uri) else { return "書類を指せません" }
+    DispatchQueue.global().async {
+      self.copyIn(url)
+    }
+    return ""
+  }
+
+  /// 覚えた値（無ければ空。v3.1 R-07・R-08）
+  @objc public func prefGet(_ key: String) -> String {
+    return UserDefaults.standard.string(forKey: "mdview." + key) ?? ""
+  }
+
+  /// `{"key", "value"}`: 値を覚える。できたら空
+  @objc public func prefSet(_ request: String) -> String {
+    let json = fields(request)
+    guard let key = json["key"], let value = json["value"] else { return "頼みを読めません" }
+    UserDefaults.standard.set(value, forKey: "mdview." + key)
+    return ""
   }
 
   public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
@@ -105,16 +168,7 @@ public class DocumentsPlugin: NSObject, UIDocumentPickerDelegate {
   @objc public func writeBack(_ request: String) -> String {
     let json = fields(request)
     guard let uri = json["uri"], let path = json["path"] else { return "頼みを読めません" }
-    var stale = false
-    let url: URL
-    if let bookmark = bookmarks[uri],
-       let resolved = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale) {
-      url = resolved
-    } else if let parsed = URL(string: uri) {
-      url = parsed
-    } else {
-      return "書類を指せません"
-    }
+    guard let url = resolve(uri) else { return "書類を指せません" }
     let granted = url.startAccessingSecurityScopedResource()
     defer { if granted { url.stopAccessingSecurityScopedResource() } }
     do {
@@ -145,16 +199,19 @@ public class DocumentsPlugin: NSObject, UIDocumentPickerDelegate {
     }
   }
 
-  /// `{"name", "mime", "path"}`: 出力の先を選ぶ画面を出す（結果は poll）
+  /// `{"name", "mime", "path", "keep"}`: 出力の先を選ぶ画面を出す（結果は poll）。
+  /// `keep` が "true" なら名前を付けて保存（v3.1 R-07）: 移す形で書き出し、置いた先の印を "saved" で返す
   @objc public func pickExport(_ request: String) -> String {
     let json = fields(request)
     guard let name = json["name"], let path = json["path"] else { return "頼みを読めません" }
+    let keep = json["keep"] == "true"
     lock.lock(); result = nil; lock.unlock()
     DispatchQueue.main.async {
       guard let file = self.named(name, path) else { return }
-      let picker = UIDocumentPickerViewController(forExporting: [file], asCopy: true)
+      let picker = UIDocumentPickerViewController(forExporting: [file], asCopy: !keep)
       picker.delegate = self
       self.exporting = true
+      self.keeping = keep
       self.top()?.present(picker, animated: true)
     }
     return ""

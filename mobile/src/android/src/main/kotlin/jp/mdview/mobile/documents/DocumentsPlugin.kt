@@ -4,6 +4,8 @@
 // - 中身はキャッシュのファイルで受け渡す（JNI で渡せるのは文字列だけなので）。開いた書類はキャッシュへ写して道を返し、
 //   書き戻すときは Rust が書いたキャッシュのファイルを書類へ写す
 // - 開いた書類は書き込みの権限を持ち続ける（takePersistableUriPermission。開き直しても上書きできる）
+// - 名前を付けて保存した書類も同じく権限を持ち続け、最近使ったファイルから開き直せる（v3.1 R-07）
+// - 設定・最近使ったファイルの一覧は OS の標準の SharedPreferences に持つ（v3.1 R-07・R-08）
 package jp.mdview.mobile.documents
 
 import android.app.Activity
@@ -62,12 +64,7 @@ class DocumentsPlugin(private val activity: Activity) {
 
   private fun copyIn(uri: Uri) {
     try {
-      val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-      try {
-        activity.contentResolver.takePersistableUriPermission(uri, flags)
-      } catch (_: SecurityException) {
-        // 書き込みを許さない書類（読むだけ）。保存のときに理由が出る
-      }
+      keep(uri)
       val name = displayName(uri)
       val target = File(folder("open"), "document")
       activity.contentResolver.openInputStream(uri).use { input ->
@@ -78,6 +75,37 @@ class DocumentsPlugin(private val activity: Activity) {
     } catch (error: Throwable) {
       fail(error)
     }
+  }
+
+  /** 書類の権限を持ち続ける（次に起動しても読み書きできる） */
+  private fun keep(uri: Uri) {
+    val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    try {
+      activity.contentResolver.takePersistableUriPermission(uri, flags)
+    } catch (_: SecurityException) {
+      // 書き込みを許さない書類（読み取り専用）。保存のときに理由が出る
+    }
+  }
+
+  /** 印（uri）の書類を開く（最近使ったファイル。v3.1 R-07）。結果は poll。権限が無くなっていれば "failed" */
+  fun openUri(uri: String): String {
+    result = null
+    thread { copyIn(Uri.parse(uri)) }
+    return ""
+  }
+
+  private fun prefs() = activity.getSharedPreferences("mdview", Activity.MODE_PRIVATE)
+
+  /** 覚えた値（無ければ空。v3.1 R-07・R-08） */
+  fun prefGet(key: String): String = prefs().getString(key, "") ?: ""
+
+  /** `{"key", "value"}`: 値を覚える。できたら空 */
+  fun prefSet(request: String): String = try {
+    val json = JSONObject(request)
+    prefs().edit().putString(json.getString("key"), json.getString("value")).apply()
+    ""
+  } catch (error: Throwable) {
+    error.message ?: error.toString()
   }
 
   private fun displayName(uri: Uri): String {
@@ -107,12 +135,19 @@ class DocumentsPlugin(private val activity: Activity) {
     error.message ?: error.toString()
   }
 
-  /** `{"name", "mime", "path"}`: 出力の先を選ぶ画面を出し、`path` を写す（結果は poll） */
+  /** 名前を付けて保存か（v3.1 R-07。保存した書類の権限を持ち続け、その印を返す） */
+  @Volatile private var pendingKeep = false
+
+  /**
+   * `{"name", "mime", "path", "keep"}`: 出力の先を選ぶ画面を出し、`path` を写す（結果は poll）。
+   * `keep` が "true" なら名前を付けて保存（v3.1 R-07）: 書いた書類の権限を持ち続け、"saved" で印（uri）を返す
+   */
   fun pickExport(request: String): String {
     val json = JSONObject(request)
     val name = json.getString("name")
     val mime = json.getString("mime")
     result = null
+    pendingKeep = json.optString("keep") == "true"
     pendingExport = File(json.getString("path"))
     return onUi {
       val launcher = exportLaunchers.getOrPut(mime) {
@@ -123,11 +158,16 @@ class DocumentsPlugin(private val activity: Activity) {
           } else {
             thread {
               try {
-                activity.contentResolver.openOutputStream(uri, "w").use { out ->
+                activity.contentResolver.openOutputStream(uri, "wt").use { out ->
                   requireNotNull(out) { "書けません" }
                   source.inputStream().use { it.copyTo(out) }
                 }
-                finish("exported", "name" to displayName(uri))
+                if (pendingKeep) {
+                  keep(uri)
+                  finish("saved", "name" to displayName(uri), "uri" to uri.toString())
+                } else {
+                  finish("exported", "name" to displayName(uri))
+                }
               } catch (error: Throwable) {
                 fail(error)
               }

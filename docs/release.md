@@ -230,7 +230,11 @@ mdview-<版数>-android.apk                Android 版（v3.0.0 から。ユニ�
 SHA256SUMS.txt
 ```
 
-**iOS 版は配らない**（Apple の開発者登録が要る）。CI はシミュレーター向けの `.app` を組み、成果物 `mobile-ios-simulator` に残すだけ。
+**iOS 版は配らない**（Apple の開発者登録が要る）。CI はシミュレーター向けの `.app`（成果物 `mobile-ios-simulator`）と、
+実機で確かめる人のための署名なしの `.ipa`（成果物 `mobile-ios-device-unsigned`。§8-12）を組むだけ。
+
+**Android の APK は release の組み立て**（v3.1.0）。dx が作った Gradle の作業場で `assembleRelease` を走らせ、デバッグ用の印
+（debuggable）が無いことを確かめてから署名する（v3.0.0 の APK はデバッグ用の組み立てだった）。
 
 **インストーラには `mdview.exe` と端末用の入口 `mdview.com` が入る**（v2.1.3）。
 端末で `mdview -v` と打つと `mdview.com` が起き、端末は答えが出るまで待つ。
@@ -549,6 +553,21 @@ Get-FileHash .\mdview-2.1.3-windows-x86_64-setup.exe -Algorithm SHA256
 
 秘密が無い実行（フォークからの PR など）では署名せず、Release にも Android 版を載せない（説明文の先頭に「入っていません」と出る）。
 確かめ用に、署名していない APK を成果物 `mobile-android-unsigned` に 14 日残す。
+
+
+### 8-12. iOS の実機で確かめる（開発者登録なし。v3.1.0）
+
+**iOS 版は配らない**が、確かめる人が実機で動かせるように、CI は署名なしの実機向けの `.ipa` を組む。Apple の開発者登録（有料）は要らない。
+
+1. CI の成果物 `mobile-ios-device-unsigned` から `mdview-ios-device-unsigned.ipa` を落とす（14 日残る。署名していない実機向け）
+2. 署名し直して入れる道具を入れる（例: **Sideloadly**。Windows・Mac で動く。Windows では Apple の配る iTunes と iCloud が要る（Microsoft Store 版ではないもの））
+3. iPhone を USB でつなぎ、道具に `.ipa` を渡して、**無料の Apple ID** でサインインして入れる（Apple ID の合言葉を道具に渡すことになる。気になるなら確かめ用の Apple ID を使う）
+4. iPhone で「設定 → 一般 → VPN とデバイス管理」から、自分の Apple ID の開発元を信頼する。iOS 16 以降は「設定 → プライバシーとセキュリティ → デベロッパモード」も入れる（再起動する）
+5. 無料の Apple ID の署名は **7 日で切れる**（切れたら開かなくなるので、同じ手順で入れ直す）。無料の Apple ID で同時に入れておけるのは 3 つまで
+
+Mac があれば、Xcode に無料の Apple ID を足して（Personal Team）、`dx serve --platform ios --device` で手元から直接入れることもできる。
+
+**`0xe800801c No code signature found` で入らないとき**: 入れた道具が署名し直していない。`.ipa` には ad-hoc 署名（証明書の無い、中身の指紋だけの署名）しか付いていないので、そのままでは入らない。ファイルを送るだけの道具ではなく、Apple ID で署名し直す道具（Sideloadly・AltStore など）で入れる。v3.1.0 の最初の `.ipa` は署名の欄そのものが無く、署名し直す道具でもこのエラーになった（CI で ad-hoc 署名を付けるようにした）
 
 ---
 

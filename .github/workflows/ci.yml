@@ -461,10 +461,12 @@ jobs:
             label: android
             target: aarch64-linux-android
             targets: aarch64-linux-android x86_64-linux-android
+          # iOS はシミュレーター向けと、**実機向け（署名なし）**を組む（v3.1 R-12）。実機向けは、利用者が無料の Apple ID で
+          # 署名し直して入れる（開発者登録は要らない。docs/release.md）
           - os: macos-latest
             label: ios
             target: aarch64-apple-ios-sim
-            targets: aarch64-apple-ios-sim
+            targets: aarch64-apple-ios-sim aarch64-apple-ios
     env:
       DIOXUS_CLI_VERSION: "0.7.10"
     defaults:
@@ -570,11 +572,42 @@ jobs:
             echo "::endgroup::"
           done
           ls -l ../out/abi
+          # **配るのは release の組み立て**（v3.1 R-12）。dx は Dioxus.toml に署名の設定が無いと Gradle の debug で組み、
+          # デバッグ用の印（debuggable）付きの APK になる。dx が作った Gradle の作業場で assembleRelease を走らせ、
+          # 署名なしの release の APK を作る（署名は次の段で付ける。鍵を dx の設定に書かない）。
+          # dx は ABI ごとに組んでもほかの ABI の jniLibs を消さないので、1 回で両方の ABI が入る（次の段で確かめる）
+          gradlew=$(find target/dx -name gradlew -path '*android*' | head -1)
+          test -n "$gradlew" || { echo "dx の Gradle の作業場が見つからない"; exit 1; }
+          root=$(dirname "$gradlew")
+          echo "Gradle の作業場: $root"
+          find "$root" -path '*jniLibs*' -name '*.so' | sort
+          (cd "$root" && chmod +x gradlew && ./gradlew --no-daemon assembleRelease)
+          release=$(find "$root" -path '*outputs/apk/release*' -name '*.apk' | head -1)
+          test -n "$release" || { echo "release の APK が見つからない"; find "$root" -name '*.apk'; exit 1; }
+          cp "$release" ../out/release.apk
+          echo "release の APK: $release（$(du -h ../out/release.apk | cut -f1)）"
 
-      - name: .app を組む（iOS のシミュレーター）
+      # シミュレーター向けと実機向けを順に組み、`../out/ios/<対象>/mdview.app` に分けて置く（v3.1 R-12）。
+      # **実機向けは署名しない**: dx は実機を指定したとき・--codesign のときだけ署名する。開発者登録が要らないよう、
+      # 署名は入れる人が無料の Apple ID で行う（Sideloadly・AltStore など。docs/release.md）
+      - name: .app を組む（iOS のシミュレーターと実機）
         if: matrix.label == 'ios'
         working-directory: mobile
-        run: dx build --platform ios --target ${{ matrix.target }} --release --no-default-features --features mobile
+        run: |
+          set -eu
+          for t in ${{ matrix.targets }}; do
+            echo "::group::$t"
+            find target -name '*.app' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+            dx build --platform ios --target "$t" --release --no-default-features --features mobile
+            app=$(find target -name '*.app' -type d -prune | head -1)
+            test -n "$app" || { echo "$t の .app が見つからない"; exit 1; }
+            mkdir -p "../out/ios/$t"
+            ditto "$app" "../out/ios/$t/mdview.app"
+            # 実機向けは arm64 の Mach-O であること（シミュレーター向けを取り違えない）
+            exe="../out/ios/$t/mdview.app/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "../out/ios/$t/mdview.app/Info.plist")"
+            file "$exe"
+            echo "::endgroup::"
+          done
 
       # **秘密が無ければ署名しない**（PR・フォーク）。そのときは Release に載せない
       - name: APK に署名する（Android）
@@ -586,29 +619,22 @@ jobs:
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -eu
-          # **1 つにまとめる**: 先頭の ABI（arm64）の APK を土台に、全部の ABI の `lib/<ABI>/` を無圧縮で入れ直す。
-          # 無圧縮で入れて zipalign -p でページに揃えると、端末はライブラリを展開せずに読める（extractNativeLibs の値に依らず入る）
-          first=$(echo "${{ matrix.targets }}" | cut -d ' ' -f 1)
-          cp "out/abi/$first.apk" out/unsigned.apk
-          rm -rf out/lib-stage && mkdir -p out/lib-stage
-          for t in ${{ matrix.targets }}; do
-            unzip -o -q "out/abi/$t.apk" 'lib/*' -d out/lib-stage
-          done
-          # 組み立て役が付けた署名（デバッグの鍵）は中身を変えると壊れるので外す。署名は下で付け直す
-          zip -q -d out/unsigned.apk 'META-INF/*.SF' 'META-INF/*.RSA' 'META-INF/*.EC' 'META-INF/*.DSA' 'META-INF/MANIFEST.MF' || true
-          zip -q -d out/unsigned.apk 'lib/*' || true
-          (cd out/lib-stage && zip -q -0 -D -r ../unsigned.apk lib)
-          echo "まとめた APK: out/unsigned.apk（$(du -h out/unsigned.apk | cut -f1)）"
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          # 土台は release の組み立て（前の段。v3.1 R-12）
+          cp out/release.apk out/unsigned.apk
           unzip -l out/unsigned.apk | grep ' lib/'
           # **2 つの ABI のライブラリがそろっていること**（足りないと、その ABI の端末が入れるのを断る）
           for abi in arm64-v8a x86_64; do
             unzip -l out/unsigned.apk | grep -q " lib/${abi}/[^/]*\.so$" || { echo "APK に lib/${abi} が無い"; exit 1; }
           done
+          # **デバッグ用の組み立てでないこと**（v3.1 R-12。debuggable の APK を配らない）
+          if "$tools/aapt2" dump badging out/unsigned.apk | grep -q "application-debuggable"; then
+            echo "APK がデバッグ用の組み立て（debuggable）になっている"; exit 1
+          fi
           if [ -z "${KEYSTORE_BASE64:-}" ]; then
             echo "署名の鍵（秘密）が無いので署名しない。Release にも載せない"
             exit 0
           fi
-          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
           mkdir -p dist
@@ -637,21 +663,46 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
 
-      - name: .app を残す（iOS。配らない）
+      # シミュレーター向けは .app の zip、実機向けは署名なしの .ipa（Payload/mdview.app の zip）にする（v3.1 R-12）
+      - name: .app と .ipa を残す（iOS。配らない）
         if: matrix.label == 'ios'
         run: |
           set -eu
-          app=$(find mobile/target -name '*.app' -type d | head -1)
-          test -n "$app" || { echo ".app が見つからない"; exit 1; }
-          mkdir -p out
-          ditto -c -k --keepParent "$app" out/mdview-ios-simulator.zip
+          ditto -c -k --keepParent out/ios/aarch64-apple-ios-sim/mdview.app out/mdview-ios-simulator.zip
+          rm -rf out/ipa && mkdir -p out/ipa/Payload
+          ditto out/ios/aarch64-apple-ios/mdview.app out/ipa/Payload/mdview.app
+          app=out/ipa/Payload/mdview.app
+          # **ad-hoc 署名を付けておく**（v3.1 R-12）。署名の欄が無い実行ファイルだと、署名し直す道具が置き換える相手が無く、
+          # 署名しないまま送って「0xe800801c No code signature found」で入らなかった。ad-hoc 署名は証明書も Apple ID も
+          # 要らない中身の指紋だけの署名で、それだけでは iPhone に入らない（入れる人が無料の Apple ID で署名し直す）。
+          # 中の実行ファイル（ライブラリ・フレームワーク）から先に付け、最後に .app に付ける
+          echo "::group::.app の中身"
+          find "$app" -type f | sed "s|^$app/||" | sort
+          echo "::endgroup::"
+          find "$app" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.appex' \) -print0 |
+            while IFS= read -r -d '' part; do
+              codesign --force --sign - --timestamp=none "$part"
+            done
+          codesign --force --sign - --timestamp=none "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | head -5
+          (cd out/ipa && ditto -c -k --sequesterRsrc --keepParent Payload ../mdview-ios-device-unsigned.ipa)
+          unzip -l out/mdview-ios-device-unsigned.ipa | head -5
           ls -l out
 
       - uses: actions/upload-artifact@v7
         if: matrix.label == 'ios'
         with:
           name: mobile-ios-simulator
-          path: out/*.zip
+          path: out/mdview-ios-simulator.zip
+          retention-days: 14
+
+      # 実機で確かめる人が、無料の Apple ID で署名し直して入れる（開発者登録は要らない。docs/release.md §8-12）
+      - uses: actions/upload-artifact@v7
+        if: matrix.label == 'ios'
+        with:
+          name: mobile-ios-device-unsigned
+          path: out/mdview-ios-device-unsigned.ipa
           retention-days: 14
 
   # **版数が新しければ、タグを打って Release を作る**（2026-10-13）。

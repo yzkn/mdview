@@ -1,6 +1,6 @@
 //! 画面の確認（v3 R-02）: 決まった様子の画面を HTML にする。**配る物には入らない**。
 //!
-//! `snapshot <様子> <文書> <出力>`。様子は read・toc・find・edit・block・full・view・more（画面の HTML）と pdf・html（出力）。
+//! `snapshot <様子> <文書> <出力>`。様子は read・toc・find・edit・block・full・view・more・recent・settings（画面の HTML）と pdf・html（出力）。
 //! 出てきた HTML をヘッドレスのブラウザで端末の大きさに撮る（画面の側の仕掛け bridge.js は動かない）
 use dioxus::prelude::*;
 use mdview_mobile::{Sheet, Start, START};
@@ -32,6 +32,22 @@ fn main() {
         text: Some(text),
         ..Start::default()
     };
+    // `-small` を付けると字の大きさを最小で（v3.1）
+    let kind = match kind.strip_suffix("-small") {
+        Some(base) => {
+            start.scale = Some(70);
+            base.to_owned()
+        }
+        None => kind,
+    };
+    // `-dark` を付けると暗い配色で（v3.1 R-04）
+    let kind = match kind.strip_suffix("-dark") {
+        Some(base) => {
+            start.dark = true;
+            base.to_owned()
+        }
+        None => kind,
+    };
     match kind.as_str() {
         "read" => {}
         "toc" => start.sheet = Some(Sheet::Toc),
@@ -47,17 +63,41 @@ fn main() {
         "full" => start.sheet = Some(Sheet::Full),
         "view" => start.sheet = Some(Sheet::View),
         "more" => start.sheet = Some(Sheet::More),
+        "recent" => start.sheet = Some(Sheet::Recent),
+        "settings" => start.sheet = Some(Sheet::Settings),
         other => panic!("知らない様子: {other}"),
     }
     START.set(start).expect("1 度だけ決める");
     let mut dom = VirtualDom::new(mdview_mobile::App);
     dom.rebuild_in_place();
-    let body = initial_values(&dioxus::ssr::render(&dom));
+    let body = local_fonts(&initial_values(&dioxus::ssr::render(&dom)));
     let page = format!(
         "<!DOCTYPE html><html lang=\"ja\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body>{body}</body></html>"
     );
     std::fs::write(&out, page).expect("書けません");
+}
+
+/// 同梱の字体は WebView では `/mvfont/…` で渡す（v3.1 R-03）。撮るときは手元のファイルを読ませる
+fn local_fonts(html: &str) -> String {
+    let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/fonts");
+    let url = |file: &str| {
+        format!(
+            "file:///{}",
+            fonts.join(file).to_string_lossy().replace('\\', "/")
+        )
+    };
+    [
+        ("body.ttf", "IBMPlexSansJP-Regular.ttf"),
+        ("body-bold.ttf", "IBMPlexSansJP-Bold.ttf"),
+        ("mono.ttf", "PlemolJP-Regular.ttf"),
+        ("mono-bold.ttf", "PlemolJP-Bold.ttf"),
+        ("emoji.ttf", "NotoColorEmoji.ttf"),
+    ]
+    .iter()
+    .fold(html.to_owned(), |page, (name, file)| {
+        page.replace(&format!("/mvfont/{name}"), &url(file))
+    })
 }
 
 /// SSR は `initial_value` を属性のまま書く（WebView では Dioxus が 1 度だけ値を入れる）。撮るために、

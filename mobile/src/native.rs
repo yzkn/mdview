@@ -21,6 +21,10 @@ extern "Kotlin" {
     pub fn share(this: &DocumentsPlugin, request: String) -> String;
     pub fn open_link(this: &DocumentsPlugin, href: String) -> String;
     pub fn poll(this: &DocumentsPlugin) -> String;
+    // v3.1 R-07・R-08: 印から開く（最近使ったファイル）・OS の標準の記憶（設定・一覧）
+    pub fn open_uri(this: &DocumentsPlugin, uri: String) -> String;
+    pub fn pref_get(this: &DocumentsPlugin, key: String) -> String;
+    pub fn pref_set(this: &DocumentsPlugin, request: String) -> String;
 }
 
 #[cfg(target_os = "ios")]
@@ -34,6 +38,10 @@ extern "Swift" {
     pub fn share(this: &DocumentsPlugin, request: String) -> String;
     pub fn open_link(this: &DocumentsPlugin, href: String) -> String;
     pub fn poll(this: &DocumentsPlugin) -> String;
+    // v3.1 R-07・R-08: 印から開く（最近使ったファイル）・OS の標準の記憶（設定・一覧）
+    pub fn open_uri(this: &DocumentsPlugin, uri: String) -> String;
+    pub fn pref_get(this: &DocumentsPlugin, key: String) -> String;
+    pub fn pref_set(this: &DocumentsPlugin, request: String) -> String;
 }
 
 /// 部品の名前（Kotlin の build.gradle.kts の namespace ＋ クラス名）

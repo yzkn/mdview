@@ -8,9 +8,7 @@ use std::ops::Range;
 
 use mdview_core::document::Document;
 use mdview_core::parse::BlockKind;
-
-/// これより大きい文書は読むだけ（直す面に入らない）
-pub const EDIT_LIMIT: usize = 1024 * 1024;
+use mdview_core::search::Pattern;
 
 /// 画面に出す 1 ブロック
 #[derive(Debug, Clone, PartialEq)]
@@ -92,12 +90,66 @@ fn task_mark(line: &str) -> Option<usize> {
         .then_some(indent + marker + spaces)
 }
 
-/// 見つけた所（原文のバイト位置）。**大文字と小文字は区別しない**（PC 版の既定と同じ）
-pub fn find(text: &str, query: &str) -> Vec<Range<usize>> {
-    mdview_core::search::find_in_text(text, query)
+/// 検索の指定（v3.1 R-06。PC 版の検索バーと同じ 3 つ）
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchOptions {
+    /// 大文字小文字を区別する（`Aa`）
+    pub case_sensitive: bool,
+    /// 正規表現（`.*`）
+    pub regex: bool,
+    /// 単語単位（`単語`）
+    pub whole_word: bool,
+}
+
+/// 探し方を組み立てる（PC 版と同じ土台の `search::Pattern`）。正規表現の誤りは理由を返す
+pub fn pattern(query: &str, options: SearchOptions) -> Result<Pattern, String> {
+    Pattern::compile(query, options.regex, options.case_sensitive)
+        .map(|pattern| pattern.whole_words(options.whole_word))
+        .map_err(|error| error.to_string())
+}
+
+/// 見つけた所（原文のバイト位置）
+pub fn find(text: &str, pattern: &Pattern) -> Vec<Range<usize>> {
+    if pattern.is_empty() {
+        return Vec::new();
+    }
+    pattern
+        .find_in(text)
         .into_iter()
         .map(|found| found.start..found.end)
         .collect()
+}
+
+/// 置き換えた原文（PC 版と同じ土台の `search::replace`。正規表現では `$1` を展開する）。
+/// `at` が `None` ならすべて。置き換えた件数も返す
+pub fn replace_with(
+    text: &str,
+    pattern: &Pattern,
+    at: Option<Range<usize>>,
+    template: &str,
+) -> (String, usize) {
+    use mdview_core::search::{replace, Match};
+    let plan = match at {
+        Some(range) => replace::one(
+            text,
+            pattern,
+            &Match {
+                start: range.start,
+                end: range.end,
+            },
+            template,
+        ),
+        None => replace::all(text, pattern, template),
+    };
+    // 計画は後ろから当てる順に並んでいる
+    let mut out = text.to_owned();
+    for edit in &plan.edits {
+        let end = edit.at + edit.removed.len();
+        if out.get(edit.at..end) == Some(edit.removed.as_str()) {
+            out.replace_range(edit.at..end, &edit.inserted);
+        }
+    }
+    (out, plan.count)
 }
 
 /// `byte` を含むブロックの番号（ブロックの間の空行なら次のブロック）
@@ -162,12 +214,65 @@ mod tests {
     #[test]
     fn finding_ignores_case_and_points_to_blocks() {
         let text = "Alpha\n\nbeta ALPHA\n";
-        let found = find(text, "alpha");
+        let found = find(text, &pattern("alpha", SearchOptions::default()).unwrap());
         assert_eq!(found, [0..5, 12..17]);
         let list = pieces(text);
         assert_eq!(piece_at(&list, found[1].start), Some(1));
         assert_eq!(piece_at(&list, 6), Some(1), "間の空行は次のブロック");
         assert_eq!(piece_at(&list, 999), Some(1));
         assert_eq!(piece_at(&[], 0), None);
+    }
+
+    /// frontmatter の欄を出すとき、本文から外すブロックは frontmatter だけ（v3.1 R-11）
+    #[test]
+    fn frontmatter_blocks_end_where_the_panel_ends() {
+        let text = "---\ntitle: 題\ntags: [a, b]\n---\n\n# 見出し\n\n本文\n";
+        let front = mdview_core::edit::frontmatter::parse(text).expect("frontmatter");
+        assert_eq!(front.entries.len(), 2);
+        let list = pieces(text);
+        let shown: Vec<&str> = list
+            .iter()
+            .filter(|piece| piece.range.start >= front.range.end)
+            .map(|piece| text[piece.range.clone()].trim_end())
+            .collect();
+        assert_eq!(shown, ["# 見出し", "本文"]);
+        let hidden = list
+            .iter()
+            .position(|piece| piece.range.start < front.range.end);
+        assert_eq!(hidden, Some(0), "編集の状態で欄を押すと開くブロック");
+    }
+
+    /// 検索の切り替えと置換は PC 版と同じ土台で動く（v3.1 R-06）
+    #[test]
+    fn search_options_and_replace_follow_the_pc_version() {
+        let text = "Alpha alphabet ALPHA 全文検索 検索\n";
+        let options = |case_sensitive, regex, whole_word| SearchOptions {
+            case_sensitive,
+            regex,
+            whole_word,
+        };
+        let count = |query: &str, o| find(text, &pattern(query, o).unwrap()).len();
+        assert_eq!(count("alpha", options(false, false, false)), 3);
+        assert_eq!(count("alpha", options(true, false, false)), 1);
+        assert_eq!(
+            count("alpha", options(false, false, true)),
+            2,
+            "alphabet は外す"
+        );
+        assert_eq!(
+            count("検索", options(false, false, true)),
+            1,
+            "全文検索の中は外す"
+        );
+        assert_eq!(count("[A-Z]{5}", options(true, true, false)), 1);
+        assert!(pattern("(", options(false, true, false)).is_err());
+        // 置換: 正規表現の $1 を展開する。1 件だけも、すべても
+        let re = pattern("(a)lpha", options(false, true, true)).unwrap();
+        let (all, n) = replace_with(text, &re, None, "[$1]");
+        assert_eq!(n, 2);
+        assert_eq!(all, "[A] alphabet [A] 全文検索 検索\n");
+        let hits = find(text, &re);
+        let (one, _) = replace_with(text, &re, Some(hits[1].clone()), "x");
+        assert_eq!(one, "Alpha alphabet x 全文検索 検索\n");
     }
 }

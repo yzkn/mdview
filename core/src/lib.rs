@@ -26,5 +26,8 @@ pub mod search;
 // 別の糸の後始末（落ちた理由を拾う）
 pub mod worker;
 
+/// 値の型（色など）。**モバイル版が土台の色を CSS にするため**に出す（v3.1 R-04）
+pub use iced;
+
 /// 土台の版数。**本体と同じ値**（本体の試験でそろっているかを見る）
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

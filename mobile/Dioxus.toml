@@ -1,6 +1,8 @@
 # dx（Dioxus の CLI）の設定（v3 R-02・R-03）
 [application]
 name = "mdview"
+# アイコンを mdview のものにするため、AndroidManifest.xml は自前の写しを使う（v3.1 R-02。中の注釈）
+android_manifest = "AndroidManifest.xml"
 
 [bundle]
 identifier = "jp.mdview.mobile"

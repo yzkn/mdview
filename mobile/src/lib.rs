@@ -1,6 +1,6 @@
 //! mdview のモバイル版（v3 R-02）。Dioxus で端末の WebView に描く。
 //!
-//! - **読む面が主**。上は文書名だけの帯（下へ読むと隠れる）、下に 5 つの操作（目次・検索・直す・表示・その他）
+//! - **読む面が主**。上は文書名だけの帯（下へ読むと隠れる）、下に 5 つの操作（目次・検索・編集・表示・メニュー。v3.1 R-05 で PC 版の言葉に）
 //! - 描くのは土台の HTML の書き出しを**ブロックごとに**（`render`）。直したブロックだけを描き直す
 //! - 直す: 「直す」を押してからブロックを押す（または長押し）と、そのブロックの原文を下から出る板で直す。
 //!   **入力欄へは値を書き戻さない**（日本語の変換を壊さない）。直すそばから板の上のブロックを描き直す
@@ -17,12 +17,17 @@ use mdview_core::io::{self, FileFormat};
 use serde::Deserialize;
 
 pub mod doc;
+pub mod fonts;
 pub mod licenses;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod native;
 pub mod output;
 pub mod platform;
+pub mod positions;
+pub mod recent;
 pub mod render;
+pub mod settings;
+pub mod theme;
 
 use platform::{Format, Handle, Picked};
 
@@ -32,8 +37,8 @@ const BRIDGE: &str = include_str!("bridge.js");
 /// まだ何も開いていないときの文書
 pub const WELCOME: &str = "# mdview\n\n\
 Markdown を読む・軽く直すアプリです。\n\n\
-- 下の「その他」→「開く…」で、端末の書類を開きます\n\
-- 「直す」を押してからブロックを押すと、そのブロックだけを直せます（長押しでも直せます）\n\
+- 下の「メニュー」→「開く…」で、端末の書類を開きます\n\
+- 「編集」を押してからブロックを押すと、そのブロックだけを編集できます（長押しでも編集できます）\n\
 - 直したものは自動で保存します\n\n\
 - [ ] 作業の印は、読む面で押すと入れ替わります\n";
 
@@ -47,6 +52,10 @@ pub struct Start {
     /// この番号のブロックを直している
     pub block: Option<usize>,
     pub query: Option<String>,
+    /// 暗い配色で起動する（v3.1 R-04）
+    pub dark: bool,
+    /// 字の大きさ（%）
+    pub scale: Option<u32>,
 }
 
 pub static START: OnceLock<Start> = OnceLock::new();
@@ -62,6 +71,10 @@ pub enum Sheet {
     Full,
     /// 使っているソフトウェアの著作権表示（v3 R-03）
     Licenses,
+    /// 最近使ったファイル（v3.1 R-07）
+    Recent,
+    /// 設定（v3.1 R-08）
+    Settings,
 }
 
 /// 直しているブロック
@@ -98,11 +111,59 @@ enum Saved {
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum FromPage {
     Ready,
-    Task { block: usize, index: usize },
-    Edit { block: usize },
-    Link { href: String },
-    Found { count: usize },
+    Task {
+        block: usize,
+        index: usize,
+    },
+    Edit {
+        block: usize,
+    },
+    Link {
+        href: String,
+    },
+    Found {
+        count: usize,
+    },
+    /// Back キー（v3.1 R-01）
+    Back,
+    /// OS の明るさ（v3.1 R-04。`prefers-color-scheme`）
+    Scheme {
+        dark: bool,
+    },
+    /// 読んでいる所（v3.1 R-09。画面のいちばん上に見えているブロック）
+    Position {
+        block: usize,
+    },
 }
+
+/// Back キーで何をするか（v3.1 R-01）。**開いているものを 1 段だけ閉じる**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackStep {
+    /// 開いている板をこれに替える（`None` で閉じる）
+    Sheet(Option<Sheet>),
+    /// 直すのを終える（「完了」と同じ。直したものは保存する）
+    Finish,
+    /// 編集の状態から抜ける（下の「編集」をもう一度押したのと同じ）
+    LeaveEdit,
+    /// 何も開いていない。「もう一度押すと終了」
+    Exit,
+}
+
+pub fn back_step(sheet: Option<Sheet>, edit_mode: bool) -> BackStep {
+    match sheet {
+        // 使用許諾はメニューから開くので、メニューへ戻る
+        Some(Sheet::Licenses | Sheet::Recent | Sheet::Settings) => {
+            BackStep::Sheet(Some(Sheet::More))
+        }
+        Some(Sheet::Block | Sheet::Full) => BackStep::Finish,
+        Some(_) => BackStep::Sheet(None),
+        None if edit_mode => BackStep::LeaveEdit,
+        None => BackStep::Exit,
+    }
+}
+
+/// 何も開いていないときの Back で、続けてもう一度押せば閉じる間
+const EXIT_WINDOW: Duration = Duration::from_secs(2);
 
 /// 画面の状態（どれも Signal なので写して使える）
 #[derive(Clone, Copy)]
@@ -126,8 +187,22 @@ struct State {
     replacement: Signal<String>,
     current: Signal<usize>,
     found: Signal<usize>,
-    scale: Signal<u32>,
-    side: Signal<bool>,
+    /// 検索の指定（v3.1 R-06。大文字小文字・正規表現・単語単位）と、正規表現の誤り
+    search: Signal<doc::SearchOptions>,
+    search_error: Signal<Option<String>>,
+    /// 設定（v3.1 R-08。字の大きさ・横置きの目次・テーマも）
+    settings: Signal<settings::Settings>,
+    /// 最近使ったファイル（v3.1 R-07）と、いま開こうとしている印（開けなければ一覧から外す）
+    recent: Signal<Vec<recent::Entry>>,
+    opening_recent: Signal<Option<String>>,
+    /// 起動したときに最後の書類を開いている（v3.1 R-09。開けなくても知らせない）
+    opening_last: Signal<bool>,
+    /// 書類ごとの読んでいた所（v3.1 R-09）
+    positions: Signal<Vec<positions::Position>>,
+    /// まだ保存先の無い新しい文書（v3.1 R-07。初めて保存するときに名前を付けて保存を出す）
+    untitled: Signal<bool>,
+    /// OS の明るさ（v3.1 R-04。テーマが「OS に従う」のとき）
+    os_dark: Signal<bool>,
 }
 
 fn run(js: String) {
@@ -168,23 +243,82 @@ impl State {
     fn load(mut self, opened: platform::Opened) {
         let file = io::from_bytes(opened.name.clone().into(), &opened.bytes, None);
         let read_only = if file.lossy {
-            Some("文字コードを読み違えた所があるので、読むだけにしました")
-        } else if file.text.len() > doc::EDIT_LIMIT {
-            Some("大きい文書（1 MB 超）なので、読むだけにしました")
+            Some("文字コードを読み違えた所があるため、読み取り専用で開いています")
+        } else if file.text.len() > self.settings.peek().number("mobile_edit_limit_kb") * 1024 {
+            Some("大きい文書のため、読み取り専用で開いています（上限はメニュー → 設定…で変えられます）")
         } else {
             None
         };
         self.read_only.set(read_only);
         self.text.set(file.text);
         self.format.set(file.format);
+        self.remember(&opened.name, &opened.handle);
         self.name.set(opened.name);
         self.handle.set(Some(opened.handle));
+        self.untitled.set(false);
         self.saved.set(Saved::Yes);
         self.before.set(None);
         self.block.set(None);
         self.sheet.set(None);
         self.edit_mode.set(false);
-        run("document.getElementById('read').scrollTop = 0".into());
+        if let Some(handle) = self.handle.peek().clone() {
+            platform::set_pref(positions::LAST, &handle.0);
+        }
+        self.restore_position();
+    }
+
+    /// 読んでいた所へ戻す（v3.1 R-09）。覚えていなければ頭から
+    fn restore_position(self) {
+        let block = self
+            .handle
+            .peek()
+            .as_ref()
+            .filter(|_| self.settings.peek().flag("remember_positions"))
+            .and_then(|handle| {
+                let blocks = doc::pieces(&self.text.peek()).len();
+                positions::get(&self.positions.peek(), &handle.0, blocks)
+            });
+        spawn(async move {
+            // 描き終わってから送る
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            match block {
+                Some(block) if block > 0 => run(format!("mv.scrollTo({block})")),
+                _ => run("document.getElementById('read').scrollTop = 0".into()),
+            }
+        });
+    }
+
+    /// 読んでいる所を覚える（v3.1 R-09）
+    fn remember_position(mut self, block: usize) {
+        let settings = self.settings.peek().clone();
+        if !settings.flag("remember_positions") {
+            return;
+        }
+        let Some(handle) = self.handle.peek().clone() else {
+            return;
+        };
+        let mut list = self.positions.peek().clone();
+        positions::put(
+            &mut list,
+            &handle.0,
+            block,
+            settings.number("positions_limit"),
+        );
+        platform::set_pref(positions::KEY, &positions::to_json(&list));
+        self.positions.set(list);
+    }
+
+    /// 起動したときに、最後に開いていた書類を開く（v3.1 R-09。開けなければ何も開かない）
+    fn open_last(mut self) {
+        let Some(uri) = platform::pref(positions::LAST) else {
+            return;
+        };
+        self.opening_last.set(true);
+        if platform::open_uri(&Handle(uri)).is_ok() {
+            self.watch_picker();
+        } else {
+            self.opening_last.set(false);
+        }
     }
 
     /// いまの原文を書類へ書き戻す
@@ -231,13 +365,128 @@ impl State {
         let generation = *self.save_generation.peek() + 1;
         self.save_generation.set(generation);
         if self.save_now() {
-            self.show("保存しました", Some(before));
+            let name = self.name.peek().clone();
+            self.show(format!("保存しました: {name}"), Some(before));
         } else if *self.saved.peek() == Saved::Nowhere {
-            self.show(
-                "保存先がありません（その他 → 開く…で書類を開くと保存します）",
-                Some(before),
-            );
+            if *self.untitled.peek() {
+                // 新しい文書: 初めて保存するときに置き場と名前を決める（v3.1 R-07）。1 度だけ出す
+                self.untitled.set(false);
+                self.save_as();
+            } else {
+                self.show(
+                    "保存先がありません（メニュー → 名前を付けて保存…で保存します）",
+                    Some(before),
+                );
+            }
         }
+    }
+
+    /// 設定を変えて覚える（v3.1 R-08）。描き方に効くものは土台へ渡す
+    fn set_setting(mut self, key: &str, value: &str) {
+        let mut next = self.settings.peek().clone();
+        if next.set(key, value) {
+            platform::set_pref(key, value);
+            next.apply_to_core();
+            self.settings.set(next);
+        }
+    }
+
+    /// 最近使ったファイルに足して覚える（v3.1 R-07）
+    fn remember(mut self, name: &str, handle: &Handle) {
+        let mut list = self.recent.peek().clone();
+        recent::push(
+            &mut list,
+            recent::Entry {
+                name: name.to_owned(),
+                uri: handle.0.clone(),
+            },
+        );
+        platform::set_pref(recent::KEY, &recent::to_json(&list));
+        self.recent.set(list);
+    }
+
+    /// 新規（v3.1 R-07。PC 版と同じ「無題」）。いまの文書は保存してから替える
+    fn new_document(mut self) {
+        if *self.saved.peek() == Saved::Pending {
+            self.save_now();
+        }
+        self.text.set(String::new());
+        self.format.set(FileFormat::for_new_document());
+        self.name.set("無題.md".to_owned());
+        self.handle.set(None);
+        self.read_only.set(None);
+        self.saved.set(Saved::Nowhere);
+        self.untitled.set(true);
+        self.before.set(None);
+        self.block.set(None);
+        self.sheet.set(None);
+        self.edit_mode.set(false);
+        run("document.getElementById('read').scrollTop = 0".into());
+        // 空の文書はブロックが無いので、全文を編集で書き始める
+        self.open_full();
+    }
+
+    /// 名前を付けて保存（v3.1 R-07）。置き場と名前を選ぶ画面を出し、結果は `watch_picker`
+    fn save_as(mut self) {
+        self.sheet.set(None);
+        let bytes = match io::encode_for_save(&self.text.peek(), &self.format.peek()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.show(format!("保存できませんでした: {error:?}"), None);
+                return;
+            }
+        };
+        let name = self.name.peek().clone();
+        match platform::pick_save_as(&name, bytes) {
+            Ok(()) => self.watch_picker(),
+            Err(error) => self.show(error, None),
+        }
+    }
+
+    /// 最近使ったファイルを開く（v3.1 R-07）
+    fn open_recent(mut self, entry: recent::Entry) {
+        self.sheet.set(None);
+        if *self.saved.peek() == Saved::Pending {
+            self.save_now();
+        }
+        self.opening_recent.set(Some(entry.uri.clone()));
+        match platform::open_uri(&Handle(entry.uri)) {
+            Ok(()) => self.watch_picker(),
+            Err(error) => self.recent_failed(error),
+        }
+    }
+
+    /// 最近使ったファイルを開けなかった。知らせて一覧から外す（PC 版と同じ）
+    fn recent_failed(mut self, error: String) {
+        if self.opening_last.replace(false) {
+            // 最後の書類が開けなかった（消えた・権限が無い）。覚えを消して初めの案内のまま
+            platform::set_pref(positions::LAST, "");
+            return;
+        }
+        let Some(uri) = self.opening_recent.take() else {
+            self.show(error, None);
+            return;
+        };
+        let mut list = self.recent.peek().clone();
+        let name = list
+            .iter()
+            .find(|entry| entry.uri == uri)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default();
+        recent::remove(&mut list, &uri);
+        platform::set_pref(recent::KEY, &recent::to_json(&list));
+        self.recent.set(list);
+        self.show(
+            format!("{name} を開けません: {error}（一覧から外しました）"),
+            None,
+        );
+    }
+
+    /// 最近使ったファイルの一覧を消す（PC 版と同じ「一覧を消す」）
+    fn clear_recent(mut self) {
+        platform::set_pref(recent::KEY, "[]");
+        self.recent.set(Vec::new());
+        self.sheet.set(Some(Sheet::More));
     }
 
     fn undo(mut self, before: String) {
@@ -334,10 +583,37 @@ impl State {
         }
     }
 
-    fn mark(self) {
+    fn mark(mut self) {
         let query = self.query.peek().clone();
         let current = *self.current.peek();
-        run(format!("mv.mark({}, {current})", quote(&query)));
+        let options = *self.search.peek();
+        // 正規表現の誤りは理由を出す（PC 版と同じく黙らない）。土台で組み立てて確かめる
+        let error = if query.is_empty() {
+            None
+        } else {
+            doc::pattern(&query, options).err()
+        };
+        let query = if error.is_some() {
+            String::new()
+        } else {
+            query
+        };
+        self.search_error.set(error);
+        run(format!(
+            "mv.mark({}, {current}, {{ caseSensitive: {}, regex: {}, wholeWord: {} }})",
+            quote(&query),
+            options.case_sensitive,
+            options.regex,
+            options.whole_word
+        ));
+    }
+
+    /// 検索の指定を切り替える（v3.1 R-06）
+    fn toggle_search(mut self, change: fn(&mut doc::SearchOptions)) {
+        let mut options = *self.search.peek();
+        change(&mut options);
+        self.current.set(0);
+        self.search.set(options);
     }
 
     fn step(mut self, forward: bool) {
@@ -362,14 +638,22 @@ impl State {
         let before = self.text.peek().clone();
         let query = self.query.peek().clone();
         let with = self.replacement.peek().clone();
-        let hits = doc::find(&before, &query);
+        // PC 版と同じ土台の検索と置換（正規表現の $1 も同じに展開する。v3.1 R-06）
+        let pattern = match doc::pattern(&query, *self.search.peek()) {
+            Ok(pattern) => pattern,
+            Err(reason) => {
+                self.show(format!("正規表現の誤り: {reason}"), None);
+                return;
+            }
+        };
+        let hits = doc::find(&before, &pattern);
         if hits.is_empty() {
             return;
         }
-        let chosen: Vec<_> = if all {
-            hits
+        let at = if all {
+            None
         } else if hits.len() == *self.found.peek() {
-            vec![hits[*self.current.peek()].clone()]
+            Some(hits[*self.current.peek()].clone())
         } else {
             // 原文と画面で数が合わない（記法の中にもある）ときは、どれを指すか決められない
             self.show(
@@ -378,31 +662,44 @@ impl State {
             );
             return;
         };
-        let mut next = before.clone();
-        for range in chosen.iter().rev() {
-            next = doc::replace(&next, range, &with);
-        }
+        let (next, _) = doc::replace_with(&before, &pattern, at, &with);
         self.text.set(next);
         self.commit(before);
     }
 
-    fn watch_picker(self) {
+    fn watch_picker(mut self) {
         spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 match platform::poll() {
                     Picked::Waiting => continue,
-                    Picked::Cancelled => break,
+                    Picked::Cancelled => {
+                        self.opening_recent.set(None);
+                        self.opening_last.set(false);
+                        break;
+                    }
                     Picked::Opened(opened) => {
+                        self.opening_recent.set(None);
+                        self.opening_last.set(false);
                         self.load(opened);
                         break;
                     }
                     Picked::Exported(name) => {
-                        self.show(format!("{name} に出力しました"), None);
+                        self.show(format!("出力しました: {name}"), None);
+                        break;
+                    }
+                    Picked::Saved { name, handle } => {
+                        self.remember(&name, &handle);
+                        platform::set_pref(positions::LAST, &handle.0);
+                        self.name.set(name.clone());
+                        self.handle.set(Some(handle));
+                        self.untitled.set(false);
+                        self.saved.set(Saved::Yes);
+                        self.show(format!("保存しました: {name}"), None);
                         break;
                     }
                     Picked::Failed(error) => {
-                        self.show(error, None);
+                        self.recent_failed(error);
                         break;
                     }
                 }
@@ -468,7 +765,46 @@ impl State {
                     self.current.set(0);
                 }
             }
+            FromPage::Back => self.back(),
+            FromPage::Scheme { dark } => self.os_dark.set(dark),
+            FromPage::Position { block } => self.remember_position(block),
         }
+    }
+
+    /// Back キー（v3.1 R-01）。1 段閉じて見張りの履歴を積み直す（bridge.js）
+    fn back(mut self) {
+        let step = back_step(*self.sheet.peek(), *self.edit_mode.peek());
+        match step {
+            BackStep::Sheet(next) => self.sheet.set(next),
+            BackStep::Finish => self.finish(),
+            BackStep::LeaveEdit => {
+                self.edit_mode.set(false);
+                self.finish();
+            }
+            BackStep::Exit => {
+                // **この間は積み直さない**。続けて押されると、戻れる履歴が無いので OS がアプリを閉じる
+                let id = self.next_id();
+                self.toast.set(Some(Toast {
+                    message: "もう一度押すと終了します".into(),
+                    undo: None,
+                    id,
+                }));
+                spawn(async move {
+                    tokio::time::sleep(EXIT_WINDOW).await;
+                    if self
+                        .toast
+                        .peek()
+                        .as_ref()
+                        .is_some_and(|toast| toast.id == id)
+                    {
+                        self.toast.set(None);
+                    }
+                    run("window.mv && mv.arm()".into());
+                });
+                return;
+            }
+        }
+        run("window.mv && mv.arm()".into());
     }
 }
 
@@ -529,19 +865,54 @@ pub fn App() -> Element {
         replacement: use_signal(String::new),
         current: use_signal(|| 0),
         found: use_signal(|| 0),
-        scale: use_signal(|| 100),
-        side: use_signal(|| true),
+        search: use_signal(doc::SearchOptions::default),
+        recent: use_signal(|| recent::parse(platform::pref(recent::KEY).as_deref())),
+        opening_recent: use_signal(|| None),
+        opening_last: use_signal(|| false),
+        positions: use_signal(|| positions::parse(platform::pref(positions::KEY).as_deref())),
+        untitled: use_signal(|| false),
+        search_error: use_signal(|| None),
+        settings: use_signal(|| {
+            let mut loaded = settings::Settings::load(platform::pref);
+            // 画面の確認用の起動の様子
+            if let Some(scale) = start.scale {
+                loaded.set("mobile_text_scale", &scale.to_string());
+            }
+            if start.dark {
+                loaded.set("theme", "dark");
+            }
+            loaded.apply_to_core();
+            loaded
+        }),
+        os_dark: use_signal(|| false),
     };
+    // 色の CSS は変わらないので 1 度だけ作る
+    static THEME_CSS: OnceLock<String> = OnceLock::new();
+    let theme_css: &'static str = THEME_CSS.get_or_init(theme::css);
     let mut bar_hidden = use_signal(|| false);
     let last_scroll = use_hook(|| Rc::new(Cell::new(0.0_f64)));
     let cache = use_hook(|| Rc::new(RefCell::new(render::Cache::default())));
+    // スライドに分けたもの（v3.1 R-10）。原文と描き方の設定が同じなら作り直さない
+    type SlideCache = Option<(u64, Option<Rc<render::Slides>>)>;
+    let slide_cache = use_hook(|| Rc::new(RefCell::new(SlideCache::None)));
 
     // 画面の確認用: 直しているブロックを決めて起動する
+    let started_with_text = start.text.is_some() || opened.is_some();
     use_hook(move || {
         if let Some(index) = start.block {
             state.open_block(index);
         }
+        // 起動の引数で開いたものは読んでいた所へ、何も渡されなければ最後の書類を開く（v3.1 R-09）
+        if opened.is_some() {
+            state.restore_position();
+        } else if !started_with_text {
+            state.open_last();
+        }
     });
+
+    // 同梱の字体を WebView へ渡す（v3.1 R-03）
+    #[cfg(any(feature = "desktop", feature = "mobile"))]
+    serve_fonts();
 
     // 画面の側の仕掛けを 1 度だけ入れ、届くものを受ける
     use_future(move || async move {
@@ -556,6 +927,7 @@ pub fn App() -> Element {
         let _ = state.text.read();
         let _ = state.query.read();
         let _ = state.current.read();
+        let _ = state.search.read();
         if *state.sheet.read() == Some(Sheet::Find) {
             state.mark();
         } else {
@@ -569,43 +941,90 @@ pub fn App() -> Element {
     let editing = state.block.read().clone();
     let edit_mode = *state.edit_mode.read();
     let read_only = *state.read_only.read();
-    let scale = *state.scale.read();
-    let wide_side = *state.side.read();
+    let current_settings = state.settings.read().clone();
+    let scale = current_settings.number("mobile_text_scale");
+    let wide_side = current_settings.flag("mobile_toc_side");
     let mut cache = cache.borrow_mut();
+    // 描き方の設定が変わったら描き直す（v3.1 R-08）
+    cache.sync(&current_settings.render_key());
     cache.trim(pieces.len());
 
-    let blocks = pieces.iter().enumerate().map(|(index, piece)| {
-        let html = cache.html(&text[piece.range.clone()]);
-        let class = if editing
-            .as_ref()
-            .is_some_and(|edit| edit.start == piece.range.start)
-        {
-            "blk editing"
-        } else {
-            "blk"
-        };
-        rsx! {
-            div {
-                key: "{index}",
-                class: "{class}",
-                "data-i": "{index}",
-                onclick: move |_| {
-                    if *state.edit_mode.peek() {
-                        state.open_block(index);
-                    }
-                },
-                dangerous_inner_html: "{html}",
+    // frontmatter の欄（v3.1 R-11。設定 frontmatter_panel。PC 版と同じ読み方）
+    let front = current_settings
+        .flag("frontmatter_panel")
+        .then(|| mdview_core::edit::frontmatter::parse(&text))
+        .flatten();
+    let front_end = front.as_ref().map_or(0, |front| front.range.end);
+    let front_block = front.as_ref().and_then(|_| {
+        pieces
+            .iter()
+            .position(|piece| piece.range.start < front_end)
+    });
+    let blocks = pieces
+        .iter()
+        .enumerate()
+        .filter(|(_, piece)| piece.range.start >= front_end)
+        .map(|(index, piece)| {
+            let html = cache.html(&text[piece.range.clone()]);
+            let class = if editing
+                .as_ref()
+                .is_some_and(|edit| edit.start == piece.range.start)
+            {
+                "blk editing"
+            } else {
+                "blk"
+            };
+            rsx! {
+                div {
+                    key: "{index}",
+                    class: "{class}",
+                    "data-i": "{index}",
+                    onclick: move |_| {
+                        if *state.edit_mode.peek() {
+                            state.open_block(index);
+                        }
+                    },
+                    dangerous_inner_html: "{html}",
+                }
+            }
+        });
+
+    // Marp の文書はスライドの枠で見せる（v3.1 R-10。設定 marp_slides。PC 版のプレビューと同じ）
+    let slide_view: Option<Rc<render::Slides>> = if current_settings.flag("marp_slides") {
+        let key = render::fingerprint(&format!("{}|{}", current_settings.render_key(), *text));
+        let mut slot = slide_cache.borrow_mut();
+        match &*slot {
+            Some((done, slides)) if *done == key => slides.clone(),
+            _ => {
+                let made = render::slides(&text).map(Rc::new);
+                *slot = Some((key, made.clone()));
+                made
             }
         }
-    });
-
-    let headings: Vec<(usize, u8, String)> = pieces
+    } else {
+        None
+    };
+    // 見出しへ飛ぶ所（スライドなら何枚目か）
+    let jump_of = |index: usize| -> String {
+        match slide_view
+            .as_ref()
+            .and_then(|slides| slides.slide_of.get(index).copied().flatten())
+        {
+            Some(slide) => format!("mv.scrollToSlide({slide})"),
+            None => format!("mv.scrollTo({index})"),
+        }
+    };
+    let headings: Vec<(String, u8, String)> = pieces
         .iter()
         .enumerate()
         .filter_map(|(index, piece)| {
-            piece
-                .heading
-                .map(|level| (index, level, heading_title(&text[piece.range.clone()])))
+            piece.heading.map(|level| {
+                (
+                    jump_of(index),
+                    level,
+                    heading_title(&text[piece.range.clone()]),
+                )
+            })
         })
         .collect();
     let toc_rows = |close: bool| {
@@ -614,7 +1033,7 @@ pub fn App() -> Element {
             if headings.is_empty() {
                 div { class: "banner", "見出しがありません" }
             }
-            for (index, level, title) in headings {
+            for (jump, level, title) in headings {
                 button {
                     class: "row l{level}",
                     onclick: move |_| {
@@ -622,7 +1041,7 @@ pub fn App() -> Element {
                         if close {
                             sheet.set(None);
                         }
-                        run(format!("mv.scrollTo({index})"));
+                        run(jump.clone());
                     },
                     "{title}"
                 }
@@ -635,9 +1054,16 @@ pub fn App() -> Element {
         Saved::Pending => "保存を待っています".into(),
         Saved::Failed(_) => "保存できませんでした".into(),
     };
+    let dark = theme::Theme::parse(current_settings.get("theme")).is_dark(*state.os_dark.read());
     let shell_class = format!(
-        "{}{}",
-        if edit_mode { "edit-mode" } else { "" },
+        "{}{}{}{}",
+        if dark { "dark" } else { "light" },
+        if sheet == Some(Sheet::Find) {
+            " finding"
+        } else {
+            ""
+        },
+        if edit_mode { " edit-mode" } else { "" },
         if wide_side { "" } else { " no-side" }
     );
     let top_class = if *bar_hidden.read() && sheet.is_none() {
@@ -649,10 +1075,14 @@ pub fn App() -> Element {
     let found = *state.found.read();
     let current = *state.current.read();
     let query = state.query.read().clone();
+    let options = *state.search.read();
+    let search_error = state.search_error.read().clone();
 
     rsx! {
         style { {mdview_core::export::html::stylesheet()} }
         style { {STYLE} }
+        style { {fonts::face_css()} }
+        style { {theme_css} }
         div { id: "shell", class: "{shell_class}", style: "--scale: {scale as f32 / 100.0}",
             div { id: "top", class: "{top_class}",
                 "{name}"
@@ -685,10 +1115,29 @@ pub fn App() -> Element {
                     },
                     if let Some(reason) = read_only {
                         div { class: "banner", "{reason}" }
+                    } else if edit_mode && slide_view.is_some() {
+                        div { class: "banner", "スライドの文書は、メニュー → 全文を編集 で編集します" }
                     } else if edit_mode && sheet != Some(Sheet::Block) {
-                        div { class: "banner", "直すブロックを押してください" }
+                        div { class: "banner", "編集するブロックを押してください" }
                     }
-                    main { {blocks} }
+                    if let Some(front) = front.clone() {
+                        {front_panel(state, &front, &text, front_block)}
+                    }
+                    if let Some(slides) = slide_view.clone() {
+                        main { class: "slides",
+                            style { "{slides.css}" }
+                            for (index, html) in slides.slides.iter().cloned().enumerate() {
+                                div {
+                                    key: "{index}",
+                                    class: "slide",
+                                    "data-slide": "{index}",
+                                    dangerous_inner_html: "{html}",
+                                }
+                            }
+                        }
+                    } else {
+                        main { {blocks} }
+                    }
                 }
             }
             if sheet == Some(Sheet::Find) {
@@ -703,15 +1152,42 @@ pub fn App() -> Element {
                             state.query.set(event.value());
                         },
                     }
-                    span { class: "count",
-                        if found > 0 { "{current + 1} / {found}" } else if !query.is_empty() { "0 件" }
-                    }
                     button {
                         onclick: move |_| {
                             let mut sheet = state.sheet;
                             sheet.set(None);
                         },
                         "閉じる"
+                    }
+                    // PC 版の検索バーと同じ 3 つの切り替え（v3.1 R-06）
+                    div { class: "opts",
+                        button {
+                            class: if options.case_sensitive { "on" } else { "" },
+                            "aria-label": "大文字と小文字を区別する",
+                            onclick: move |_| state.toggle_search(|o| o.case_sensitive = !o.case_sensitive),
+                            "Aa"
+                        }
+                        button {
+                            class: if options.regex { "on" } else { "" },
+                            "aria-label": "正規表現",
+                            onclick: move |_| state.toggle_search(|o| o.regex = !o.regex),
+                            ".*"
+                        }
+                        button {
+                            class: if options.whole_word { "on" } else { "" },
+                            "aria-label": "単語単位",
+                            onclick: move |_| state.toggle_search(|o| o.whole_word = !o.whole_word),
+                            "単語"
+                        }
+                        span { class: "count",
+                            if let Some(reason) = search_error {
+                                "{reason}"
+                            } else if found > 0 {
+                                "{current + 1} / {found}"
+                            } else if !query.is_empty() {
+                                "0 件"
+                            }
+                        }
                     }
                 }
             }
@@ -733,6 +1209,12 @@ pub fn App() -> Element {
                 {bottom_bar(state, sheet, edit_mode, read_only.is_some())}
             }
             {sheets(state, sheet, editing, toc_rows(true))}
+            if slide_view.is_some() && sheet.is_none() {
+                div { id: "slide-nav",
+                    button { "aria-label": "前のスライド", onclick: move |_| run("mv.stepSlide(-1)".into()), "‹" }
+                    button { "aria-label": "次のスライド", onclick: move |_| run("mv.stepSlide(1)".into()), "›" }
+                }
+            }
             if let Some(toast) = state.toast.read().clone() {
                 div { id: "toast",
                     span { "{toast.message}" }
@@ -743,6 +1225,31 @@ pub fn App() -> Element {
             }
         }
     }
+}
+
+/// 同梱の字体を `/mvfont/<名前>` で返す（v3.1 R-03）。土台のバイト列をそのまま渡す（写さない）
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+fn serve_fonts() {
+    #[cfg(feature = "desktop")]
+    use dioxus::desktop as host;
+    #[cfg(all(feature = "mobile", not(feature = "desktop")))]
+    use dioxus::mobile as host;
+    use host::wry::http::Response;
+    use std::borrow::Cow;
+
+    host::use_asset_handler(fonts::HANDLER, |request, responder| {
+        let name = request.uri().path().rsplit('/').next().unwrap_or("");
+        let response = match fonts::bytes(name) {
+            Some(bytes) => Response::builder()
+                .header("Content-Type", "font/ttf")
+                .header("Cache-Control", "max-age=31536000, immutable")
+                .body(Cow::Borrowed(bytes)),
+            None => Response::builder().status(404).body(Cow::Borrowed(&[][..])),
+        };
+        if let Ok(response) = response {
+            responder.respond(response);
+        }
+    });
 }
 
 /// 下の 5 つの操作
@@ -776,13 +1283,13 @@ fn bottom_bar(state: State, sheet: Option<Sheet>, edit_mode: bool, read_only: bo
                         state.finish();
                     }
                 },
-                span { class: "icon", "✎" } "直す"
+                span { class: "icon", "✎" } "編集"
             }
             button { class: on(Sheet::View), onclick: move |_| toggle(Sheet::View),
                 span { class: "icon", "Aa" } "表示"
             }
             button { class: on(Sheet::More), onclick: move |_| toggle(Sheet::More),
-                span { class: "icon", "⋯" } "その他"
+                span { class: "icon", "⋯" } "メニュー"
             }
         }
     }
@@ -833,46 +1340,33 @@ fn sheets(state: State, sheet: Option<Sheet>, editing: Option<BlockEdit>, toc: E
                 div { class: "list", {toc} }
             }
         },
-        Some(Sheet::View) => {
-            let scale = *state.scale.read();
-            let side = *state.side.read();
+        Some(Sheet::View) => rsx! {
+            div { class: "scrim", onclick: close }
+            div { class: "sheet",
+                div { class: "grip" }
+                // 外観の設定と同じもの（ここで変えても覚える。v3.1 R-08）
+                {setting_rows(state, &["theme", "mobile_text_scale", "mobile_toc_side"], false)}
+            }
+        },
+        Some(Sheet::Settings) => {
+            let groups = settings::GROUPS.map(|group| {
+                let keys: Vec<&'static str> = settings::ITEMS
+                    .iter()
+                    .filter(|item| item.group == group)
+                    .map(|item| item.key)
+                    .collect();
+                (group, keys)
+            });
             rsx! {
                 div { class: "scrim", onclick: close }
-                div { class: "sheet",
+                div { class: "sheet menu settings",
                     div { class: "grip" }
-                    h2 { "字の大きさ" }
-                    div { class: "choices",
-                        for (value, label) in [(90_u32, "小"), (100, "中"), (115, "大"), (130, "特大")] {
-                            button {
-                                class: if scale == value { "on" } else { "" },
-                                onclick: move |_| {
-                                    let mut scale = state.scale;
-                                    scale.set(value);
-                                },
-                                "{label}"
-                            }
+                    div { class: "list",
+                        for (group, keys) in groups {
+                            h3 { "{group}" }
+                            {setting_rows(state, &keys, true)}
                         }
                     }
-                    h2 { "目次（横置きのタブレット）" }
-                    div { class: "choices",
-                        button {
-                            class: if side { "on" } else { "" },
-                            onclick: move |_| {
-                                let mut side = state.side;
-                                side.set(true);
-                            },
-                            "左に出す"
-                        }
-                        button {
-                            class: if !side { "on" } else { "" },
-                            onclick: move |_| {
-                                let mut side = state.side;
-                                side.set(false);
-                            },
-                            "隠す"
-                        }
-                    }
-                    div { class: "banner", "配色は端末の設定（明るい・暗い）に従います" }
                 }
             }
         }
@@ -880,30 +1374,75 @@ fn sheets(state: State, sheet: Option<Sheet>, editing: Option<BlockEdit>, toc: E
             let read_only = state.read_only.read().is_some();
             rsx! {
                 div { class: "scrim", onclick: close }
-                div { class: "sheet",
+                div { class: "sheet menu",
                     div { class: "grip" }
+                    // PC 版のメニューの見出しと項目名で並べる（v3.1 R-05）
                     div { class: "list",
+                        h2 { "ファイル" }
+                        button { class: "row", onclick: move |_| state.new_document(), "新規" }
                         button { class: "row", onclick: move |_| state.pick_open(), "開く…" }
                         button {
                             class: "row",
-                            disabled: read_only,
-                            onclick: move |_| state.open_full(),
-                            "全文を直す"
+                            onclick: move |_| {
+                                let mut sheet = state.sheet;
+                                sheet.set(Some(Sheet::Recent));
+                            },
+                            "最近使ったファイル"
+                            span { class: "sub", "▸" }
                         }
+                        button { class: "row", onclick: move |_| state.save_as(), "名前を付けて保存…" }
                         button { class: "row", onclick: move |_| state.export(Format::Pdf, false), "PDF に出力…" }
                         button { class: "row", onclick: move |_| state.export(Format::Html, false), "HTML に出力…" }
                         button { class: "row", onclick: move |_| state.export(Format::Pdf, true), "PDF を共有…" }
                         button { class: "row", onclick: move |_| state.export(Format::Html, true), "HTML を共有…" }
+                        h2 { "編集" }
+                        button {
+                            class: "row",
+                            disabled: read_only,
+                            onclick: move |_| state.open_full(),
+                            "全文を編集"
+                        }
+                        h2 { "ヘルプ" }
+                        button {
+                            class: "row",
+                            onclick: move |_| {
+                                let mut sheet = state.sheet;
+                                sheet.set(Some(Sheet::Settings));
+                            },
+                            "設定…"
+                        }
                         button {
                             class: "row",
                             onclick: move |_| {
                                 let mut sheet = state.sheet;
                                 sheet.set(Some(Sheet::Licenses));
                             },
-                            "使用許諾"
+                            "このアプリについて…"
                         }
-                        div { class: "row", "mdview"
-                            span { class: "sub", "{mdview_core::VERSION}" }
+                    }
+                }
+            }
+        }
+        Some(Sheet::Recent) => {
+            let list = state.recent.read().clone();
+            rsx! {
+                div { class: "scrim", onclick: close }
+                div { class: "sheet",
+                    div { class: "grip" }
+                    h2 { "最近使ったファイル" }
+                    div { class: "list",
+                        if list.is_empty() {
+                            div { class: "banner", "まだありません" }
+                        }
+                        for entry in list.clone() {
+                            button {
+                                class: "row",
+                                onclick: move |_| state.open_recent(entry.clone()),
+                                "{entry.name}"
+                            }
+                        }
+                        if !list.is_empty() {
+                            button { class: "row", onclick: move |_| state.clear_recent(), "一覧を消す" }
                         }
                     }
                 }
@@ -913,7 +1452,10 @@ fn sheets(state: State, sheet: Option<Sheet>, editing: Option<BlockEdit>, toc: E
             div { class: "scrim", onclick: close }
             div { class: "sheet licenses",
                 div { class: "grip" }
-                h2 { "使っているソフトウェアの著作権表示" }
+                // PC 版の「このアプリについて」と同じ中身（版数と、使っているソフトウェア）
+                h2 { "mdview {mdview_core::VERSION}" }
+                div { class: "banner", "Markdown を読む・軽く直すアプリ（PC 版と同じ土台）" }
+                h2 { "使っているソフトウェア" }
                 LicenseList {}
             }
         },
@@ -939,6 +1481,103 @@ fn sheets(state: State, sheet: Option<Sheet>, editing: Option<BlockEdit>, toc: E
     }
 }
 
+/// frontmatter の欄（v3.1 R-11）。PC 版と同じく名前と値を並べ、畳める。欄では直さない（編集の状態で押すと原文の板を開く）
+fn front_panel(
+    state: State,
+    front: &mdview_core::edit::frontmatter::FrontMatter,
+    text: &str,
+    block: Option<usize>,
+) -> Element {
+    use mdview_core::edit::frontmatter::{Format as FrontFormat, Value};
+    let toml = if front.format == FrontFormat::Toml {
+        "・TOML"
+    } else {
+        ""
+    };
+    let rows: Vec<(String, Vec<String>, Option<String>)> = front
+        .entries
+        .iter()
+        .map(|entry| match &entry.value {
+            Value::Scalar { text, .. } => (entry.key.clone(), vec![text.clone()], None),
+            Value::List { items, .. } => (
+                entry.key.clone(),
+                items.iter().map(|item| item.text.clone()).collect(),
+                None,
+            ),
+            Value::Nested { raw } => (
+                entry.key.clone(),
+                Vec::new(),
+                Some(text.get(raw.clone()).unwrap_or("").to_owned()),
+            ),
+        })
+        .collect();
+    let count = rows.len();
+    rsx! {
+        details {
+            class: "front",
+            open: true,
+            onclick: move |_| {
+                if *state.edit_mode.peek() {
+                    if let Some(block) = block {
+                        state.open_block(block);
+                    }
+                }
+            },
+            summary { "frontmatter{toml}（{count} 項目）" }
+            table {
+                for (key, values, raw) in rows {
+                    tr {
+                        th { "{key}" }
+                        td {
+                            if let Some(raw) = raw {
+                                pre { "{raw}" }
+                            } else if values.len() == 1 {
+                                "{values[0]}"
+                            } else {
+                                for value in values {
+                                    span { class: "chip", "{value}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 設定の項目の並び（v3.1 R-08）。`reset` なら既定でない項目に「既定」を出す（PC 版と同じ）
+fn setting_rows(state: State, keys: &[&'static str], reset: bool) -> Element {
+    let current = state.settings.read().clone();
+    let items: Vec<&'static settings::Item> =
+        keys.iter().filter_map(|key| settings::item(key)).collect();
+    rsx! {
+        for item in items {
+            div { class: "setting",
+                h2 {
+                    "{item.label}"
+                    if reset && !current.is_default(item.key) {
+                        button {
+                            class: "reset",
+                            onclick: move |_| state.set_setting(item.key, item.default),
+                            "既定"
+                        }
+                    }
+                }
+                div { class: "choices",
+                    for (value, label) in item.choices.iter().copied() {
+                        button {
+                            class: if current.get(item.key) == value { "on" } else { "" },
+                            onclick: move |_| state.set_setting(item.key, value),
+                            "{label}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// 著作権表示の一覧。**開いたものだけ全文を出す**（全部で 1 MB ほどある）
 #[component]
 fn LicenseList() -> Element {
@@ -958,6 +1597,57 @@ fn LicenseList() -> Element {
                 if opened == Some(index) {
                     pre { class: "license", "{entry.body}" }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Back キーは開いているものを 1 段だけ閉じ、何も開いていなければ終了の確認（v3.1 R-01）
+    #[test]
+    fn back_closes_one_layer_at_a_time() {
+        assert_eq!(
+            back_step(Some(Sheet::Licenses), false),
+            BackStep::Sheet(Some(Sheet::More))
+        );
+        assert_eq!(back_step(Some(Sheet::More), false), BackStep::Sheet(None));
+        assert_eq!(back_step(Some(Sheet::Find), false), BackStep::Sheet(None));
+        // 直している途中は「完了」と同じ。編集の状態は残す（もう一度 Back で抜ける）
+        assert_eq!(back_step(Some(Sheet::Block), true), BackStep::Finish);
+        assert_eq!(back_step(Some(Sheet::Full), false), BackStep::Finish);
+        assert_eq!(back_step(None, true), BackStep::LeaveEdit);
+        assert_eq!(back_step(None, false), BackStep::Exit);
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    /// Android の XML の注釈に `--` を書かない（Gradle の資源の組み立てが「The string "--" is not permitted
+    /// within comments」で止まる。v3.1 R-02 で踏んだ）
+    #[test]
+    fn android_xml_comments_have_no_double_hyphen() {
+        fn walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "xml") {
+                    found.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = vec![root.join("AndroidManifest.xml")];
+        walk(&root.join("src/android"), &mut files);
+        assert!(files.len() > 3, "{files:?}");
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            for comment in text.split("<!--").skip(1) {
+                let body = comment.split("-->").next().unwrap_or("");
+                assert!(!body.contains("--"), "{}: {body}", file.display());
             }
         }
     }
