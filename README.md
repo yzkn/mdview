@@ -34,7 +34,7 @@ Linux 版は **glibc 2.39 以上**が要る（Ubuntu 24.04・Debian 13 以降。
 > 説明文にある。署名の代わりに SHA-256 の照合値を添えている。
 >
 > Android 版はストアからは配らない。APK だけは mdview の鍵で署名している（上書きして入れられるように）。
-> 端末で開き、「提供元不明のアプリ」の導入を許して入れる。**iOS 版は配らない**。実機で確かめるための署名なしの `.ipa` は CI が組み（成果物）、無料の Apple ID で署名し直して入れられる（[docs/release.md](docs/release.md) §8-12）。
+> 端末で開き、「提供元不明のアプリ」の導入を許して入れる。**iOS 版は `.ipa` を Release に載せる**（v3.1.1）。Apple の開発者登録が無いので ad-hoc 署名だけで、Sideloadly などで無料の Apple ID で署名し直して入れる（署名は 7 日で切れる。[docs/release.md](docs/release.md) §8-12）。
 
 ---
 
@@ -144,6 +144,7 @@ mdview -r -g 120 notes.md     # 120 行目を、読み取り専用で開く
 - **Marp のスライド**の枠・**frontmatter の欄**（PC 版と同じ見せ方）
 - 字の大きさに最小・極小を足した
 - Android の APK を release の組み立てにした（v3.0 はデバッグ用の組み立てだった）。iOS の実機で確かめる `.ipa` を CI が組む
+- v3.1.1: **iOS 版の `.ipa` を Release に載せた**（署名し直して入れる。iOS の実機で Sideloadly で入れて確かめた）。アプリの中身は v3.1.0 と同じ
 
 ### v3.0 で足したもの
 

@@ -72,8 +72,8 @@ fi
 
 # --- 5. 説明文 ---
 absent=""
-# Android（v3 R-03）は署名の鍵（Actions の秘密）が無い実行では作らない。そのときも書く
-for label in windows-x86_64 linux-x86_64 macos-aarch64 android; do
+# Android（v3 R-03）は署名の鍵（Actions の秘密）が無い実行では作らない。そのときも書く。iOS は v3.1.1 から
+for label in windows-x86_64 linux-x86_64 macos-aarch64 android ios; do
   if ! ls "$dist" | grep -q -- "-${label}"; then
     absent="${absent}${absent:+、}${label}"
   fi
@@ -101,7 +101,8 @@ cat >> release-notes.md <<'NOTES'
 > **性能・ネイティブ GPU ドライバ・IME・デスクトップ統合は
 > 未確認**です。お気づきの点があればお知らせください。
 >
-> **Android 版（v3.0.0 から）も載せています。** iOS 版は配っていません（組めることだけを確かめています）。
+> **Android 版（v3.0.0 から）と iOS 版（v3.1.1 から）も載せています。**
+> iOS 版はそのままでは入りません。自分の Apple ID で署名し直して入れます（下の手順）。
 
 ## 受け取った側の手順
 
@@ -113,8 +114,11 @@ cat >> release-notes.md <<'NOTES'
 | macOS | 「開発元を検証できません」 | `xattr -dr com.apple.quarantine <ファイル>` の後に実行 |
 | Linux | 実行権限が無い | `chmod +x <ファイル>` |
 | Android | 「提供元不明のアプリ」の確認 | APK を開き、案内に従ってこのアプリからの導入を許可 |
+| iOS | そのままでは入らない | Sideloadly などで自分の Apple ID で署名し直して入れ、「VPN とデバイス管理」で開発元を信頼する |
 
 Android の APK は mdview の鍵で署名しています（ストアからは配っていません）。
+iOS の `.ipa` は ad-hoc 署名（中身の指紋）だけです。Apple の開発者登録は要りませんが、無料の Apple ID の署名は
+**7 日で切れる**ので、切れたら入れ直してください（同時に入れておけるのは 3 つまで）。
 `SHA256SUMS.txt` で中身を照合できます。
 
 ## 中身

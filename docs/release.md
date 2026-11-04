@@ -32,7 +32,7 @@
 |ワークフロー|いつ走るか|やること|
 |---|---|---|
 |**CI**（`ci.yml`）の `check`|`main` への push・PR・手動|3 OS で検査（書式・Lint・単体試験・GUI 試験）→ **組む → 包む**（インストーラ・`.deb`・AppImage・`.dmg`）→ 煙試験。出来たものを成果物 `dist-<OS>` として残す|
-|**CI** の `mobile`|`main` への push・PR・手動|Android と iOS（v3.0.0）。Android は書式・Lint・単体試験・著作権表示の一覧が最新か → 2 つの ABI（arm64-v8a・x86_64）で組み、1 つの APK（ユニバーサル）にまとめる → **署名の鍵（秘密）があれば署名して** 成果物 `dist-android` に残す。iOS はシミュレーター向けに組むだけ（配らない）|
+|**CI** の `mobile`|`main` への push・PR・手動|Android と iOS（v3.0.0）。Android は書式・Lint・単体試験・著作権表示の一覧が最新か → 2 つの ABI（arm64-v8a・x86_64）で組み、1 つの APK（ユニバーサル）にまとめる → **署名の鍵（秘密）があれば署名して** 成果物 `dist-android` に残す。iOS はシミュレーター向けと実機向けに組み、実機向けの `.ipa`（ad-hoc 署名だけ）を成果物 `dist-ios` に残す（v3.1.1 から Release に載せる）|
 |**CI** の `release`|**`main` への push のときだけ**（`check` のあと）|`Cargo.toml` の版の `v<版数>` が**まだ無ければ**、同じ実行の `dist-*` を検査し、タグを打って Release を作る。**版数を上げていない push ではリリースしない**|
 |Release（`release.yml`）|**手動だけ**|作り直し用。タグのコミットの CI の成果物を落として載せる（組まない）|
 
@@ -182,7 +182,7 @@ gh release delete v2.1.3 --cleanup-tag   # Release とタグを消す
 |Linux|**作る。** Linux の分だけが入らない|
 |macOS|**作る。** macOS の分だけが入らない|
 |Android|**作る。** Android の分だけが入らない（署名の鍵の秘密が無い実行も同じ。§8-11）|
-|iOS|配らない（組めることだけを確かめる）|
+|iOS|**作る。** iOS の分だけが入らない（v3.1.1 から載せる）|
 
 判断は `tools/release/make-release.sh`（CI の `release` ジョブと `release.yml` が呼ぶ）。
 **実機が無く確認もできない OS が、確認できる OS の配布を止めるのはおかしい。**
@@ -227,11 +227,12 @@ mdview-<版数>-linux-x86_64               単一実行ファイル
 mdview-<版数>-macos-aarch64.dmg
 mdview-<版数>-macos-aarch64              単一実行ファイル
 mdview-<版数>-android.apk                Android 版（v3.0.0 から。ユニバーサル APK。署名あり。§8-11）
+mdview-<版数>-ios-unsigned.ipa           iOS 版（v3.1.1 から。ad-hoc 署名だけ。入れる人が署名し直す。§8-12）
 SHA256SUMS.txt
 ```
 
-**iOS 版は配らない**（Apple の開発者登録が要る）。CI はシミュレーター向けの `.app`（成果物 `mobile-ios-simulator`）と、
-実機で確かめる人のための署名なしの `.ipa`（成果物 `mobile-ios-device-unsigned`。§8-12）を組むだけ。
+**iOS 版は署名し直して入れる形で配る**（v3.1.1）。Apple の開発者登録が無いのでこちらでは署名できず、`.ipa` には ad-hoc 署名だけを付ける。
+入れる人が無料の Apple ID で署名し直す（§8-12）。シミュレーター向けの `.app`（成果物 `mobile-ios-simulator`）は配らない。
 
 **Android の APK は release の組み立て**（v3.1.0）。dx が作った Gradle の作業場で `assembleRelease` を走らせ、デバッグ用の印
 （debuggable）が無いことを確かめてから署名する（v3.0.0 の APK はデバッグ用の組み立てだった）。
@@ -282,7 +283,7 @@ SHA256SUMS.txt
 |題名とステータスバーの書式|設定 → 外観で書式を変え、「既定」で戻る|
 |**Android 版**（v3.0.0）|APK を入れて、書類を開く・読む・ブロックを直す（日本語の変換）・自動の保存と「元に戻す」・PDF と HTML の出力・共有。前の版の上から入れられる（署名の鍵が同じ）|
 
-**実機が無い OS は、無いと書く**（§5）。iOS 版は配らないので見ない。
+**実機が無い OS は、無いと書く**（§5）。iOS 版は `.ipa` を無料の Apple ID で入れて見る（§8-12。v3.1.1）。
 
 ---
 
@@ -555,17 +556,20 @@ Get-FileHash .\mdview-2.1.3-windows-x86_64-setup.exe -Algorithm SHA256
 確かめ用に、署名していない APK を成果物 `mobile-android-unsigned` に 14 日残す。
 
 
-### 8-12. iOS の実機で確かめる（開発者登録なし。v3.1.0）
+### 8-12. iOS の `.ipa` を入れる（開発者登録なし。v3.1.0・v3.1.1）
 
-**iOS 版は配らない**が、確かめる人が実機で動かせるように、CI は署名なしの実機向けの `.ipa` を組む。Apple の開発者登録（有料）は要らない。
+**v3.1.1 から、iOS 版を Release に `mdview-<版数>-ios-unsigned.ipa` として載せる**（v3.1.0 は確かめる人向けの成果物だけだった）。
+ad-hoc 署名だけなので、そのままでは入らず、入れる人が無料の Apple ID で署名し直す。Apple の開発者登録（有料）は要らない。
 
-1. CI の成果物 `mobile-ios-device-unsigned` から `mdview-ios-device-unsigned.ipa` を落とす（14 日残る。署名していない実機向け）
+1. Release から `mdview-<版数>-ios-unsigned.ipa` を落とす（Release を作らない実行（PR など）では、CI の成果物 `dist-ios` から落とす）
 2. 署名し直して入れる道具を入れる（例: **Sideloadly**。Windows・Mac で動く。Windows では Apple の配る iTunes と iCloud が要る（Microsoft Store 版ではないもの））
 3. iPhone を USB でつなぎ、道具に `.ipa` を渡して、**無料の Apple ID** でサインインして入れる（Apple ID の合言葉を道具に渡すことになる。気になるなら確かめ用の Apple ID を使う）
 4. iPhone で「設定 → 一般 → VPN とデバイス管理」から、自分の Apple ID の開発元を信頼する。iOS 16 以降は「設定 → プライバシーとセキュリティ → デベロッパモード」も入れる（再起動する）
 5. 無料の Apple ID の署名は **7 日で切れる**（切れたら開かなくなるので、同じ手順で入れ直す）。無料の Apple ID で同時に入れておけるのは 3 つまで
 
 Mac があれば、Xcode に無料の Apple ID を足して（Personal Team）、`dx serve --platform ios --device` で手元から直接入れることもできる。
+
+**確かめた例**（v3.1.1。2026-11-04）: Windows の Sideloadly で、v3.1.0 の CI の `.ipa` を無料の Apple ID で署名し直して iPhone に入れ、起動して動くことを確かめた（受入確認の W-14）。
 
 **`0xe800801c No code signature found` で入らないとき**: 入れた道具が署名し直していない。`.ipa` には ad-hoc 署名（証明書の無い、中身の指紋だけの署名）しか付いていないので、そのままでは入らない。ファイルを送るだけの道具ではなく、Apple ID で署名し直す道具（Sideloadly・AltStore など）で入れる。v3.1.0 の最初の `.ipa` は署名の欄そのものが無く、署名し直す道具でもこのエラーになった（CI で ad-hoc 署名を付けるようにした）
 

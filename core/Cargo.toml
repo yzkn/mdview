@@ -2,7 +2,7 @@
 name = "mdview-core"
 # **本体と同じ版数にする**（本体の試験 `core_version_matches_app` がそろっているかを見る）。
 # 土台の中の `CARGO_PKG_VERSION`（URL を読むときの User-Agent など）がこの値になるため
-version = "3.1.0"
+version = "3.1.1"
 description = "mdview の土台（UI に依存しない部分）"
 authors = []
 edition = "2021"

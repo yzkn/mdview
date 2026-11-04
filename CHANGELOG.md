@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-11-04
+
+iOS 版の `.ipa` を Release に載せた（署名し直して入れる）。iOS の実機で確かめた。アプリの中身は v3.1.0 と同じ。
+
+### Added
+
+- **iOS 版を Release に載せる**（`mdview-<版数>-ios-unsigned.ipa`）。Apple の開発者登録が無いので ad-hoc 署名だけで、
+  そのままでは入らない。入れる人が Sideloadly などで無料の Apple ID で署名し直して入れる（開発者登録は要らない。
+  署名は 7 日で切れ、入れ直しが要る）。`SHA256SUMS.txt` にも入れ、欠けたときは説明文の先頭に書く。CI の成果物の
+  名前は `mobile-ios-device-unsigned` から `dist-ios` に変えた。入れ方は[docs/release.md](docs/release.md) §8-12
+
+### Changed
+
+- **iOS の実機で確かめた**。CI の `.ipa` を Sideloadly で無料の Apple ID で署名し直して iPhone に入れ、
+  起動して動くことを確かめた（受入確認の W-14）。v3.0.0 から残っていた「iOS の実機では確かめていない」は解けた
+
 ## [3.1.0] - 2026-11-02
 
 モバイル版を PC 版に寄せた（同じアイコン・同梱の字体・同じ配色・同じ言葉と操作の名前）。Android の Back キー・検索の切り替え・新規と名前を付けて保存と最近使ったファイル・設定画面・開き直したときの位置・Marp のスライド・frontmatter の欄を足し、Android の APK を release の組み立てにした。iOS の実機で確かめる `.ipa` を CI が組む。

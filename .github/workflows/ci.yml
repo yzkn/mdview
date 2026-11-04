@@ -440,7 +440,8 @@ jobs:
           if-no-files-found: error
 
   # **モバイル版**（v3 R-03）。Android は署名した APK を `dist-android` に置き、Release に載せる。
-  # iOS は組めることまで（配らない。Apple の開発者登録が要る）。
+  # iOS は実機向けの `.ipa`（ad-hoc 署名だけ）を `dist-ios` に置き、Release に載せる（v3.1.1）。
+  # そのままでは入らず、入れる人が無料の Apple ID で署名し直す（Apple の開発者登録は要らない）。
   #
   # - **署名の鍵は Actions の秘密に置く**（リポジトリには置かない）。秘密が無い実行（PR など）は
   #   署名せず、Release にも載せない（`dist-android` を作らない）
@@ -664,7 +665,7 @@ jobs:
           if-no-files-found: error
 
       # シミュレーター向けは .app の zip、実機向けは署名なしの .ipa（Payload/mdview.app の zip）にする（v3.1 R-12）
-      - name: .app と .ipa を残す（iOS。配らない）
+      - name: .app と .ipa を残す（iOS）
         if: matrix.label == 'ios'
         run: |
           set -eu
@@ -689,6 +690,10 @@ jobs:
           (cd out/ipa && ditto -c -k --sequesterRsrc --keepParent Payload ../mdview-ios-device-unsigned.ipa)
           unzip -l out/mdview-ios-device-unsigned.ipa | head -5
           ls -l out
+          # Release に載せる名前（v3.1.1）。署名は ad-hoc だけなので `unsigned` と名に出す
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
+          mkdir -p dist
+          cp out/mdview-ios-device-unsigned.ipa "dist/mdview-${version}-ios-unsigned.ipa"
 
       - uses: actions/upload-artifact@v7
         if: matrix.label == 'ios'
@@ -697,13 +702,15 @@ jobs:
           path: out/mdview-ios-simulator.zip
           retention-days: 14
 
-      # 実機で確かめる人が、無料の Apple ID で署名し直して入れる（開発者登録は要らない。docs/release.md §8-12）
-      - uses: actions/upload-artifact@v7
+      # **release ジョブはこの名前（dist-*）で探す**（v3.1.1）。入れる人が無料の Apple ID で署名し直して入れる
+      # （開発者登録は要らない。docs/release.md §8-12）。Release を作らない実行（PR など）でも、ここから落とせる
+      - name: .ipa を Release へ回す（iOS）
         if: matrix.label == 'ios'
+        uses: actions/upload-artifact@v7
         with:
-          name: mobile-ios-device-unsigned
-          path: out/mdview-ios-device-unsigned.ipa
-          retention-days: 14
+          name: dist-ios
+          path: dist/*.ipa
+          if-no-files-found: error
 
   # **版数が新しければ、タグを打って Release を作る**（2026-10-13）。
   #

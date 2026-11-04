@@ -20,10 +20,11 @@
 | macOS 11+ (Apple Silicon) | `mdview-<版数>-macos-aarch64.dmg` | `mdview-<版数>-macos-aarch64` |
 | Linux (x64) | `mdview-<版数>-linux-x86_64.deb` | `mdview-<版数>-linux-x86_64.AppImage` |
 | Android 8.0 以上 | `mdview-<版数>-android.apk` | — |
+| iOS（署名し直して入れる） | `mdview-<版数>-ios-unsigned.ipa` | — |
 
 **Linux 版は glibc 2.39 以上が要ります**（Ubuntu 24.04・Debian 13 以降）。
 
-**iOS 版は配っていません**（組めることだけを確かめています）。
+**iOS 版はそのままでは入りません**（v3.1.1 から。下の「iOS」）。
 
 **どれも単体で動きます。** フォントを同梱しているので、環境によって字形が
 変わることはありません。
@@ -66,6 +67,18 @@ chmod +x mdview-<版数>-linux-x86_64.AppImage
 
 ストアからは配っていません。APK を端末で開くと「提供元不明のアプリ」の確認が出るので、
 案内に従って、開いたアプリ（ファイルやブラウザ）からの導入を許可します。
+
+### iOS
+
+ストアからは配っていません。`.ipa` は ad-hoc 署名だけなので、自分の Apple ID で署名し直して入れます
+（Apple の開発者登録は要りません）。
+
+1. 署名し直して入れる道具を入れる（例: **Sideloadly**。Windows では Apple の配る iTunes と iCloud も要ります）
+2. iPhone を USB でつなぎ、道具に `.ipa` を渡して、Apple ID でサインインして入れる
+3. iPhone の「設定 → 一般 → VPN とデバイス管理」で自分の Apple ID の開発元を信頼する。iOS 16 以降は
+   「設定 → プライバシーとセキュリティ → デベロッパモード」も入れる
+
+無料の Apple ID の署名は **7 日で切れます**。切れたら同じ手順で入れ直してください。
 
 ## 入れ方・消し方
 
